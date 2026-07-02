@@ -68,3 +68,10 @@ _Add a brief overview of your project architecture_
 ## Conventions & Patterns
 
 _Add your project-specific conventions here_
+
+
+### Using subagents for beads
+We have a subagent for harder tasks and one for easier tasks. When you, the orchestrator, are instructed to 
+"work through the beads", either to a certain point or indefitely, you should have a quick scan of the upcoming bead and decide whether it can be completed by a hard worker or an easier worker, and spin up the correct subagent accordingly.
+
+Also, you may as the orchestrator identify opportunities for parallel work such as beads that don't interact with each other much. In these cases you can spin up hard workers or easy workers or one or more of each to work in parallel as the tasks dictate.
