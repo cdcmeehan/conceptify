@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "conceptify",
+  "project_id": "a37c1134-9592-4cdd-b41c-4f45e1de91d2"
+}
