@@ -152,6 +152,16 @@ pub fn version_file_path(root: &Path, project_id: &str, slug: &str, version: i64
     thread_dir(root, project_id, slug).join(format!("artifact.v{version}.html"))
 }
 
+/// `<root>/<project-id>/threads/<slug>/artifact.html` — the always-latest
+/// copy `save_artifact` atomically rewrites on every save (§5.6). This is
+/// the file "Open in browser" (FR-2.5) hands to the system default browser:
+/// a real, pristine, self-contained HTML file with zero Conceptify residue.
+/// Must stay in lockstep with the naming inside `save_artifact` (pinned by
+/// the `latest_copy_path_matches_save_output` test).
+pub fn latest_copy_path(root: &Path, project_id: &str, slug: &str) -> PathBuf {
+    thread_dir(root, project_id, slug).join("artifact.html")
+}
+
 /// Write `bytes` to `path` atomically: full write + fsync to a `.tmp` sibling
 /// in the same directory, then `rename` over the destination (atomic on the
 /// same filesystem, per N4). A crash mid-write leaves only the `.tmp` file;
@@ -1685,5 +1695,23 @@ mod tests {
         let _ = fs::remove_file(&db_path);
         let _ = fs::remove_file(db_path.with_extension("db-wal"));
         let _ = fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    /// Lockstep guard for the open-in-browser path (FR-2.5): the helper the
+    /// `open_artifact_in_browser` command resolves through must name exactly
+    /// the always-latest copy `save_artifact` writes.
+    #[test]
+    fn latest_copy_path_matches_save_output() {
+        let conn = test_conn();
+        let root = tmp_root("latest-copy");
+
+        let html = valid_doc("<p>latest</p>");
+        save_artifact(&conn, &root, "t1", html.as_bytes()).unwrap();
+
+        let path = latest_copy_path(&root, "p1", "oauth-flow");
+        assert!(path.is_file(), "helper must point at the written copy");
+        assert_eq!(fs::read_to_string(&path).unwrap(), html);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

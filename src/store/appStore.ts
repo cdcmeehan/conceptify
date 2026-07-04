@@ -19,7 +19,11 @@
 
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../lib/api";
-import type { Project, Thread } from "../lib/api";
+import type { ArtifactVersion, Project, Thread } from "../lib/api";
+
+/** Which artifact version the viewer shows: a concrete number (read-only
+ *  history view) or `"latest"` (tracks new saves live, FR-2.4). */
+export type ViewerVersion = number | "latest";
 
 export interface AppState {
   projects: Project[];
@@ -31,6 +35,11 @@ export interface AppState {
   threadsLoading: boolean;
   threadsError: string | null;
   selectedThreadId: string | null;
+  /** Saved versions for the selected thread, ascending (FR-2.4). */
+  artifactVersions: ArtifactVersion[];
+  artifactVersionsLoading: boolean;
+  artifactVersionsError: string | null;
+  viewerVersion: ViewerVersion;
 }
 
 type Listener = () => void;
@@ -45,6 +54,18 @@ const initialState: AppState = {
   threadsLoading: false,
   threadsError: null,
   selectedThreadId: null,
+  artifactVersions: [],
+  artifactVersionsLoading: false,
+  artifactVersionsError: null,
+  viewerVersion: "latest",
+};
+
+/** Fresh viewer state, applied whenever the selected thread changes/vanishes. */
+const clearedViewer = {
+  artifactVersions: [] as ArtifactVersion[],
+  artifactVersionsLoading: false,
+  artifactVersionsError: null,
+  viewerVersion: "latest" as ViewerVersion,
 };
 
 class AppStore {
@@ -52,6 +73,8 @@ class AppStore {
   private listeners = new Set<Listener>();
   /** Monotonic token so a slow thread fetch can't clobber a newer one. */
   private threadFetchToken = 0;
+  /** Same guard for artifact-version fetches (viewer switcher data). */
+  private versionFetchToken = 0;
 
   getSnapshot(): AppState {
     return this.state;
@@ -110,11 +133,80 @@ class AppStore {
         threads,
         threadsLoading: false,
         selectedThreadId: stillSelected ? this.state.selectedThreadId : null,
+        // The selected thread vanished → its viewer state is stale too.
+        ...(stillSelected ? null : clearedViewer),
       });
     } catch (e) {
       if (token !== this.threadFetchToken) return;
       this.set({ threadsLoading: false, threadsError: String(e) });
     }
+  }
+
+  /**
+   * Refetch the saved artifact versions for `threadId` (defaults to the
+   * selected thread). Mirrors `refetchThreads`' guards: a no-op unless the
+   * thread is the one on screen, and token-guarded against slow results
+   * landing after the selection moved on.
+   */
+  async refetchArtifactVersions(threadId?: string): Promise<void> {
+    const target = threadId ?? this.state.selectedThreadId;
+    if (!target || target !== this.state.selectedThreadId) return;
+
+    const token = ++this.versionFetchToken;
+    this.set({ artifactVersionsLoading: true, artifactVersionsError: null });
+    try {
+      const versions = await api.listArtifactVersions(target);
+      if (token !== this.versionFetchToken || this.state.selectedThreadId !== target) return;
+      this.set({ artifactVersions: versions, artifactVersionsLoading: false });
+    } catch (e) {
+      if (token !== this.versionFetchToken) return;
+      this.set({ artifactVersionsLoading: false, artifactVersionsError: String(e) });
+    }
+  }
+
+  /**
+   * React to a core `artifact-updated` event `{project_id, thread_id,
+   * version}` (a save landed via the API/CLI/skill). Two jobs:
+   *
+   * 1. List data: the save flipped the thread's status to `ready` and moved
+   *    its last-activity ordering — refetch the project list and, when the
+   *    project is on screen, its threads.
+   * 2. Live viewer refresh (PRD N2, < 500ms): when the saved thread is the
+   *    one being viewed, record the new version *synchronously* so the
+   *    iframe src flips to it in the same tick — no round-trip on the
+   *    critical path. A refetch then reconciles the optimistic entry
+   *    (correct `created_at`/`created_by`) in the background.
+   *
+   * The viewer only follows the new version while `viewerVersion` is
+   * `"latest"`; pinned historical versions stay put (FR-2.4).
+   */
+  handleArtifactUpdated(payload: {
+    project_id: string;
+    thread_id: string;
+    version: number;
+  }): void {
+    void this.refetchProjects();
+    void this.refetchThreads(payload.project_id);
+
+    if (payload.thread_id !== this.state.selectedThreadId) return;
+    if (!this.state.artifactVersions.some((v) => v.version === payload.version)) {
+      const optimistic = [
+        ...this.state.artifactVersions,
+        {
+          version: payload.version,
+          created_at: new Date().toISOString(),
+          created_by: payload.version === 1 ? "initial" : "follow_up",
+        },
+      ].sort((a, b) => a.version - b.version);
+      this.set({ artifactVersions: optimistic });
+    }
+    void this.refetchArtifactVersions(payload.thread_id);
+  }
+
+  /** Viewer switcher selection (FR-2.4): a concrete version or `"latest"`. */
+  setViewerVersion(version: ViewerVersion): void {
+    if (version === this.state.viewerVersion) return;
+    this.set({ viewerVersion: version });
   }
 
   // ---- selection ----
@@ -126,13 +218,15 @@ class AppStore {
       selectedThreadId: null,
       threads: [],
       threadsError: null,
+      ...clearedViewer,
     });
     void this.refetchThreads(id);
   }
 
   selectThread(id: string): void {
     if (id === this.state.selectedThreadId) return;
-    this.set({ selectedThreadId: id });
+    this.set({ selectedThreadId: id, ...clearedViewer });
+    void this.refetchArtifactVersions(id);
   }
 
   setShowArchived(showArchived: boolean): void {
@@ -150,7 +244,7 @@ class AppStore {
   async archiveProject(id: string, archived: boolean): Promise<void> {
     await api.setProjectArchived(id, archived);
     if (archived && this.state.selectedProjectId === id) {
-      this.set({ selectedProjectId: null, selectedThreadId: null, threads: [] });
+      this.set({ selectedProjectId: null, selectedThreadId: null, threads: [], ...clearedViewer });
     }
     await this.refetchProjects();
   }

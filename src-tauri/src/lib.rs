@@ -70,6 +70,8 @@ pub fn run() {
             commands::rename_project,
             commands::set_project_archived,
             commands::remap_project,
+            commands::list_artifact_versions,
+            commands::open_artifact_in_browser,
         ])
         .setup(|app| {
             // Opened and migrated before anything else touches it: both the

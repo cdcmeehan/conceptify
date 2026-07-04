@@ -18,11 +18,14 @@
 //! window) ride the `projects-changed`/`thread-created` events the axum handlers
 //! already emit, wired to these same refetch paths by bead `conceptify-qxr.5`.
 
+use std::path::{Path, PathBuf};
+
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use tauri::State;
 
 use crate::db::DbHandle;
-use crate::{projects, threads};
+use crate::{artifacts, projects, threads};
 
 /// A project row for the shell sidebar. Mirrors the HTTP `ProjectListItem` plus
 /// `root_exists`: whether the mapped `root_path` still resolves on disk, so the
@@ -154,6 +157,107 @@ pub fn remap_project(db: State<DbHandle>, id: String, root_path: String) -> Resu
     Ok(())
 }
 
+/// One saved artifact version for the viewer's version switcher (FR-2.4).
+/// Sorted ascending by `version`; the last entry is the thread's latest.
+#[derive(Serialize)]
+pub struct ArtifactVersionDto {
+    pub version: i64,
+    pub created_at: String,
+    /// `initial` (v1) or `follow_up` (v2+), mirroring the artifacts table.
+    pub created_by: String,
+}
+
+/// List a thread's saved artifact versions, oldest first (FR-2.4). An
+/// unknown thread (or a thread with no saves yet) yields an empty list —
+/// the viewer treats both as "no artifact yet" and renders by status.
+#[tauri::command(rename_all = "snake_case")]
+pub fn list_artifact_versions(
+    db: State<DbHandle>,
+    thread_id: String,
+) -> Result<Vec<ArtifactVersionDto>, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT version, created_at, created_by FROM artifacts
+             WHERE thread_id = ?1 ORDER BY version ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&thread_id], |r| {
+            Ok(ArtifactVersionDto {
+                version: r.get(0)?,
+                created_at: r.get(1)?,
+                created_by: r.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Resolve the on-disk `artifact.html` (the always-latest copy, §5.6) for a
+/// thread. Split out of the command so the DB/path logic is unit-testable
+/// without triggering a real browser launch. Errors are user-facing strings
+/// (the frontend surfaces them verbatim).
+fn resolve_latest_artifact_html(
+    conn: &Connection,
+    root: &Path,
+    thread_id: &str,
+) -> Result<PathBuf, String> {
+    let row = conn
+        .query_row(
+            "SELECT project_id, slug FROM threads WHERE id = ?1",
+            [thread_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((project_id, slug)) = row else {
+        return Err(format!("thread not found: {thread_id}"));
+    };
+
+    let has_versions: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM artifacts WHERE thread_id = ?1)",
+            [thread_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !has_versions {
+        return Err("this thread has no saved artifact yet".to_owned());
+    }
+
+    let path = artifacts::latest_copy_path(root, &project_id, &slug);
+    if !path.is_file() {
+        return Err(format!(
+            "artifact file is missing on disk: {}",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+/// Open the thread's on-disk `artifact.html` with the system default browser
+/// (FR-2.5 — the permanently-one-click portability guarantee). The frontend
+/// never constructs filesystem paths: this command resolves the path from
+/// the DB + artifacts root server-side and hands it to the opener plugin
+/// (macOS: `/usr/bin/open`, which launches the `.html` default handler).
+/// Returns the opened path (handy for logging/diagnostics).
+#[tauri::command(rename_all = "snake_case")]
+pub fn open_artifact_in_browser(
+    db: State<DbHandle>,
+    thread_id: String,
+) -> Result<String, String> {
+    let root = artifacts::artifacts_root().map_err(|e| e.to_string())?;
+    // Resolve under the lock, open after releasing it — the launch can take
+    // long enough that holding the shared connection would stall the API.
+    let path = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        resolve_latest_artifact_html(&conn, &root, &thread_id)?
+    };
+    tauri_plugin_opener::open_path(&path, None::<&str>).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +343,168 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    /// Shared fixture for the artifact-facing command tests: a real-migration
+    /// DB with one project + one thread, and a throwaway artifacts root.
+    fn artifact_fixture(tag: &str) -> (crate::db::DbHandle, std::path::PathBuf, String, std::path::PathBuf) {
+        let db_path = std::env::temp_dir().join(format!(
+            "conceptify-test-cmd-artifacts-{tag}-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = std::env::temp_dir().join(format!(
+            "conceptify-test-cmd-artifacts-root-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let db_handle = crate::db::init_at(&db_path).expect("test db should init and migrate");
+        let thread_id = {
+            let conn = db_handle.lock().unwrap();
+            conn.execute(
+                "INSERT INTO projects (id, name, root_path) VALUES ('p1', 'Proj', '/tmp/p1')",
+                [],
+            )
+            .unwrap();
+            crate::threads::create_thread(&conn, "p1", "Viewer thread", "q")
+                .unwrap()
+                .id
+        };
+        (db_handle, root, thread_id, db_path)
+    }
+
+    fn cleanup(db_path: &std::path::Path, root: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    fn artifact_html(version: i64) -> String {
+        format!(
+            r#"<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>T</title>
+<meta name="cfy:question" content="q">
+<meta name="cfy:version" content="{version}">
+<meta name="cfy:generated-by" content="claude-code/test">
+</head><body><h1 data-cfy-id="sec-t">Version {version}</h1></body></html>"#
+        )
+    }
+
+    /// Drives `list_artifact_versions` through Tauri's real IPC dispatch,
+    /// exactly like the frontend's `invoke("list_artifact_versions",
+    /// { thread_id })`: proves the snake_case arg mapping, the managed-state
+    /// read, and the ascending version order the switcher relies on. The
+    /// versions are saved through the real `artifacts::save_artifact`
+    /// pipeline so the DTO reflects genuine rows.
+    #[test]
+    fn list_artifact_versions_over_ipc_is_ascending() {
+        let (db_handle, root, thread_id, db_path) = artifact_fixture("list");
+        {
+            let conn = db_handle.lock().unwrap();
+            for v in 1..=3 {
+                crate::artifacts::save_artifact(&conn, &root, &thread_id, artifact_html(v).as_bytes())
+                    .unwrap_or_else(|e| panic!("save v{v}: {e:?}"));
+            }
+        }
+
+        let app = tauri::test::mock_builder()
+            .manage(db_handle)
+            .invoke_handler(tauri::generate_handler![list_artifact_versions])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("failed to build mock webview");
+
+        let response = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "list_artifact_versions".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(serde_json::json!({ "thread_id": thread_id })),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .expect("list_artifact_versions should succeed over IPC");
+
+        let value: serde_json::Value = response.deserialize().expect("JSON array of versions");
+        let arr = value.as_array().expect("array");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(
+            arr.iter().map(|v| v["version"].as_i64().unwrap()).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "versions must come back ascending"
+        );
+        assert_eq!(arr[0]["created_by"], serde_json::json!("initial"));
+        assert_eq!(arr[2]["created_by"], serde_json::json!("follow_up"));
+        assert!(arr[0]["created_at"].as_str().is_some_and(|s| !s.is_empty()));
+
+        // Unknown thread → empty list, not an error.
+        let response = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "list_artifact_versions".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(serde_json::json!({ "thread_id": "ghost" })),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .expect("unknown thread should still succeed");
+        let value: serde_json::Value = response.deserialize().unwrap();
+        assert_eq!(value.as_array().map(Vec::len), Some(0));
+
+        cleanup(&db_path, &root);
+    }
+
+    /// The open-in-browser resolution logic (everything except the actual
+    /// browser launch, which is not exercisable headlessly): resolves the
+    /// always-latest `artifact.html`, and errors cleanly for an unknown
+    /// thread, a thread with no versions, and a missing file.
+    #[test]
+    fn resolve_latest_artifact_html_covers_happy_and_error_paths() {
+        let (db_handle, root, thread_id, db_path) = artifact_fixture("resolve");
+        let conn = db_handle.lock().unwrap();
+
+        // No versions yet → clear error.
+        let err = resolve_latest_artifact_html(&conn, &root, &thread_id).unwrap_err();
+        assert!(err.contains("no saved artifact"), "{err}");
+
+        // Unknown thread → clear error.
+        let err = resolve_latest_artifact_html(&conn, &root, "ghost").unwrap_err();
+        assert!(err.contains("thread not found"), "{err}");
+
+        // Two saves → resolves to the always-latest copy with v2 content.
+        for v in 1..=2 {
+            crate::artifacts::save_artifact(&conn, &root, &thread_id, artifact_html(v).as_bytes())
+                .unwrap();
+        }
+        let path = resolve_latest_artifact_html(&conn, &root, &thread_id).unwrap();
+        assert!(path.ends_with("artifact.html"), "{}", path.display());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), artifact_html(2));
+
+        // DB rows present but the file vanished → clear error, no panic.
+        std::fs::remove_file(&path).unwrap();
+        let err = resolve_latest_artifact_html(&conn, &root, &thread_id).unwrap_err();
+        assert!(err.contains("missing on disk"), "{err}");
+
+        drop(conn);
+        cleanup(&db_path, &root);
     }
 }

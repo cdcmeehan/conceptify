@@ -23,6 +23,12 @@ interface NavigatePayload {
   thread_id: string | null;
 }
 
+interface ArtifactUpdatedPayload {
+  project_id: string;
+  thread_id: string;
+  version: number;
+}
+
 /**
  * Subscribe to the core's Tauri events and drive `appStore`. Call once at
  * startup; returns a cleanup function that removes every listener.
@@ -45,6 +51,13 @@ export function initEventListeners(): () => void {
     listen<ThreadCreatedPayload>("thread-created", (event) => {
       void appStore.refetchProjects();
       void appStore.refetchThreads(event.payload.project_id);
+    }),
+
+    // An artifact version was saved (save-artifact endpoint). Drives the
+    // viewer's live refresh (< 500ms, PRD N2) plus list/status updates —
+    // all the logic lives on the store seam.
+    listen<ArtifactUpdatedPayload>("artifact-updated", (event) => {
+      appStore.handleArtifactUpdated(event.payload);
     }),
 
     // The user asked to open a specific project/thread (e.g. `conceptify open`).

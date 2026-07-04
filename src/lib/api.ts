@@ -58,3 +58,24 @@ export function setProjectArchived(id: string, archived: boolean): Promise<void>
 export function remapProject(id: string, rootPath: string): Promise<void> {
   return invoke<void>("remap_project", { id, root_path: rootPath });
 }
+
+/** One saved artifact version (FR-2.4). Lists come back ascending by version. */
+export interface ArtifactVersion {
+  version: number;
+  created_at: string;
+  /** `initial` (v1) or `follow_up` (v2+). */
+  created_by: string;
+}
+
+export function listArtifactVersions(threadId: string): Promise<ArtifactVersion[]> {
+  return invoke<ArtifactVersion[]>("list_artifact_versions", { thread_id: threadId });
+}
+
+/**
+ * Open the thread's on-disk `artifact.html` with the system default browser
+ * (FR-2.5). Path resolution happens entirely in Rust — the frontend never
+ * constructs filesystem paths. Resolves to the opened path.
+ */
+export function openArtifactInBrowser(threadId: string): Promise<string> {
+  return invoke<string>("open_artifact_in_browser", { thread_id: threadId });
+}
