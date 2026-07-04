@@ -32,6 +32,19 @@ install-cli:
     ln -sf "$(pwd)/target/release/conceptify" "$target_dir/conceptify"; \
     echo "Installed: $target_dir/conceptify -> $(pwd)/target/release/conceptify"
 
+# Install the Claude Code skill globally (~/.claude/skills/conceptify).
+# Snapshots skill/ plus the canonical artifact spec (docs/artifact-spec.md)
+# so the installed skill is self-contained; re-run after editing either.
+install-skill:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dest="$HOME/.claude/skills/conceptify"
+    rm -rf "$dest"
+    mkdir -p "$dest"
+    cp -R skill/. "$dest/"
+    cp docs/artifact-spec.md "$dest/artifact-spec.md"
+    echo "Installed skill -> $dest"
+
 # Run cargo check and clippy on all workspace members
 check:
     cargo check --workspace
