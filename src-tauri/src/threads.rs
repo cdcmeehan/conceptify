@@ -212,6 +212,23 @@ pub fn list_threads(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// Return the id of the project owning `thread_id`, or `None` if no such
+/// thread exists. Used by the `open` endpoint (§5.2) to both validate the
+/// target thread (→ 404 when absent) and resolve it to its project so the
+/// frontend `navigate` event can carry both ids.
+pub fn find_thread_project(
+    conn: &Connection,
+    thread_id: &str,
+) -> Result<Option<String>, ThreadError> {
+    conn.query_row(
+        "SELECT project_id FROM threads WHERE id = ?1",
+        [thread_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 /// Turn a human title into a filesystem-safe slug: lowercase ASCII
 /// alphanumerics, runs of any other character collapsed to a single hyphen,
 /// no leading/trailing hyphen, capped at `MAX_SLUG_LEN`.

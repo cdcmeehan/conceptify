@@ -52,6 +52,7 @@ webview updates live instead of polling. The frontend subscribes with
 | `api-ping` | `GET /api/v1/ping` (demo/health-check route) | `{ message: string, unix_ms: number }` |
 | `projects-changed` | `POST /api/v1/projects/ensure`, `PATCH /api/v1/projects/:id`, `PUT /api/v1/projects/:id/archive` | `null` (no payload) |
 | `thread-created` | `POST /api/v1/threads` | `{ project_id: string, thread_id: string }` |
+| `navigate` | `POST /api/v1/open` | `{ project_id: string, thread_id: string \| null }` |
 
 `GET /api/v1/debug/db-check`, `GET /api/v1/projects`, and `GET /api/v1/threads`
 do not emit events — they're read-only.
@@ -354,6 +355,72 @@ error.
 
 ---
 
+## Open / focus
+
+### `POST /api/v1/open`
+
+Authenticated. Focus the app on a project or thread (PRD §5.2 `conceptify
+open`). Validates the target exists, brings the main window to the front, and
+emits a `navigate` event the frontend uses to route to the target.
+
+Focus-on-open is part of UC1's feel: after an agent finishes generating an
+artifact, `conceptify open --thread <id>` puts it on screen. Because the main
+window hides (rather than quits) on close (§5.1 lifecycle), the handler
+`show()`s it before `set_focus()`.
+
+Request body — supply **exactly one** of `thread_id` / `project_id`:
+
+```json
+{ "thread_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7" }
+```
+
+or
+
+```json
+{ "project_id": "550e8400-e29b-41d4-a716-446655440000" }
+```
+
+If both are present, the more specific `thread_id` wins (the project is
+resolved from the thread). The CLI enforces exactly-one before calling.
+
+Response `200 OK`:
+
+```json
+{
+  "ok": true,
+  "project_id": "550e8400-e29b-41d4-a716-446655440000",
+  "thread_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+}
+```
+
+`thread_id` is `null` when a project (not a specific thread) was opened. The
+same `{ project_id, thread_id }` shape is emitted as the `navigate` event.
+
+Response `400 Bad Request` (neither `thread_id` nor `project_id` supplied):
+
+```json
+{ "error": "must specify thread_id or project_id" }
+```
+
+Response `404 Not Found` (unknown target):
+
+```json
+{ "error": "thread not found: <id>" }
+```
+
+```json
+{ "error": "project not found: <id>" }
+```
+
+Side effect: brings the `main` window to the front (`show` + `set_focus`) and
+emits `navigate` (see Events above).
+
+Errors: `401 Unauthorized` if bearer token missing/wrong; `400` if no target
+is supplied; `404` if the referenced thread/project doesn't exist; `500` on
+database error.
+
+---
+
 _Endpoints to be added by later beads: `save-artifact`, `get-context`,
-`list-comments`, `resolve-comment`, `open`, `status` (§5.2). Each should get
-its own section here with request/response shapes and any events it emits._
+`list-comments`, `resolve-comment`, `status` (§5.2). Each should get its own
+section here with request/response shapes and any events it emits._

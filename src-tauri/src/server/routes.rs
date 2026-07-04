@@ -26,6 +26,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/debug/db-check", get(db_check))
         .merge(super::projects_routes::router())
         .merge(super::threads_routes::router())
+        .merge(super::open_routes::router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer_token,

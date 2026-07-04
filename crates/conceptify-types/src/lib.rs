@@ -132,3 +132,29 @@ pub struct ThreadListItem {
 pub struct ListThreadsResponse {
     pub threads: Vec<ThreadListItem>,
 }
+
+// Open / focus API types (PRD §5.2 `conceptify open`)
+
+/// Request to focus the app on a project or thread (`POST /api/v1/open`).
+///
+/// Exactly one of `thread_id` / `project_id` should be set. If both are
+/// present the server resolves the more specific `thread_id`; if neither is
+/// present it returns `400`. The CLI enforces exactly-one before calling.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpenRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+/// Response from the `open` endpoint: confirms the resolved target the app was
+/// focused and navigated to. `thread_id` is `null` when opening a project with
+/// no specific thread. The same `{project_id, thread_id}` shape is emitted as
+/// the `navigate` Tauri event for the frontend to act on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenResponse {
+    pub ok: bool,
+    pub project_id: String,
+    pub thread_id: Option<String>,
+}

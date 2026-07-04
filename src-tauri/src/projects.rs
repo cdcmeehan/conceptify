@@ -246,6 +246,17 @@ pub fn set_archived(conn: &Connection, id: &str, archived: bool) -> Result<(), P
     Ok(())
 }
 
+/// Return true if a project with `id` exists. Used by the `open` endpoint
+/// (§5.2) to validate a `--project` target before focusing/navigating (→ 404
+/// when absent).
+pub fn project_exists(conn: &Connection, id: &str) -> Result<bool, ProjectError> {
+    let exists = conn
+        .query_row("SELECT 1 FROM projects WHERE id = ?1", [id], |_| Ok(()))
+        .optional()?
+        .is_some();
+    Ok(exists)
+}
+
 /// Current timestamp as ISO-8601 UTC (matches the DB's strftime default).
 fn now_iso8601() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()

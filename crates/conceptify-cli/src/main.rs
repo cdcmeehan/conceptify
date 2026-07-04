@@ -4,9 +4,9 @@
 //! (using the port file, fallback 4477) → on failure run `open -a Conceptify`
 //! → poll up to ~10s → proceed. JSON output on stdout for agent consumption;
 //! human-readable errors on stderr; non-zero exit when the app can't be
-//! reached.
+//! reached or the API returns an error.
 
-use conceptify_types::HealthResponse;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -14,26 +14,48 @@ use std::process::{Command, ExitCode};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use serde_json::json;
+
+use conceptify_types::{
+    CreateThreadRequest, CreateThreadResponse, EnsureProjectRequest, EnsureProjectResponse,
+    HealthResponse, OpenRequest, OpenResponse,
+};
+
 const DEFAULT_PORT: u16 = 4477;
 const POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+const USAGE: &str = "\
+Usage: conceptify <command> [args...]
+
+Commands:
+  status                                              app/API health, version, port
+  ensure-project --dir <path> [--name <name>]         find-or-create a project by directory
+  create-thread  --project <id> --title <t> --question <q>   create a thread
+  open           --thread <id> | --project <id>       focus the app on a project/thread";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: conceptify <command> [args...]");
-        eprintln!("Commands: status");
+        eprintln!("{USAGE}");
         return ExitCode::FAILURE;
     }
 
     let command = &args[1];
+    let rest = &args[2..];
 
     match command.as_str() {
         "status" => cmd_status(),
+        "ensure-project" => cmd_ensure_project(rest),
+        "create-thread" => cmd_create_thread(rest),
+        "open" => cmd_open(rest),
         _ => {
             eprintln!("Unknown command: {}", command);
-            eprintln!("Available commands: status");
+            eprintln!("{USAGE}");
             ExitCode::FAILURE
         }
     }
@@ -41,15 +63,13 @@ fn main() -> ExitCode {
 
 /// Returns the path to the port file written by the server.
 fn port_file_path() -> PathBuf {
-    let data_dir = dirs::data_dir()
-        .expect("failed to determine user data directory");
+    let data_dir = dirs::data_dir().expect("failed to determine user data directory");
     data_dir.join("conceptify").join("port")
 }
 
 /// Returns the path to the bearer token file.
 fn token_file_path() -> PathBuf {
-    let data_dir = dirs::data_dir()
-        .expect("failed to determine user data directory");
+    let data_dir = dirs::data_dir().expect("failed to determine user data directory");
     data_dir.join("conceptify").join("token")
 }
 
@@ -65,11 +85,10 @@ fn read_port_file() -> u16 {
 
 /// Reads the bearer token from the token file. Returns an error if the file
 /// doesn't exist or can't be read (the app hasn't run yet, or permissions are
-/// wrong).
-#[allow(dead_code)]
+/// wrong). Callers should only read the token after `ensure_app_healthy`, by
+/// which point the running server has written it.
 fn read_token() -> io::Result<String> {
-    fs::read_to_string(token_file_path())
-        .map(|s| s.trim().to_string())
+    fs::read_to_string(token_file_path()).map(|s| s.trim().to_string())
 }
 
 /// Probes GET /health at the given port. Returns Ok(response) if the endpoint
@@ -77,22 +96,15 @@ fn read_token() -> io::Result<String> {
 fn probe_health(port: u16) -> Result<HealthResponse, String> {
     let url = format!("http://127.0.0.1:{}/health", port);
 
-    match ureq::get(&url)
-        .timeout(Duration::from_secs(2))
-        .call()
-    {
-        Ok(response) => {
-            match response.into_json::<HealthResponse>() {
-                Ok(health) => Ok(health),
-                Err(e) => Err(format!("health endpoint returned invalid JSON: {}", e)),
-            }
-        }
+    match ureq::get(&url).timeout(Duration::from_secs(2)).call() {
+        Ok(response) => match response.into_json::<HealthResponse>() {
+            Ok(health) => Ok(health),
+            Err(e) => Err(format!("health endpoint returned invalid JSON: {}", e)),
+        },
         Err(ureq::Error::Status(code, _)) => {
             Err(format!("health endpoint returned status {}", code))
         }
-        Err(ureq::Error::Transport(e)) => {
-            Err(format!("failed to reach health endpoint: {}", e))
-        }
+        Err(ureq::Error::Transport(e)) => Err(format!("failed to reach health endpoint: {}", e)),
     }
 }
 
@@ -100,10 +112,7 @@ fn probe_health(port: u16) -> Result<HealthResponse, String> {
 /// Ok(()) if the command was invoked successfully (not a guarantee the app
 /// actually launched or will become healthy — the caller must still poll).
 fn launch_app() -> io::Result<()> {
-    let status = Command::new("open")
-        .arg("-a")
-        .arg("Conceptify")
-        .status()?;
+    let status = Command::new("open").arg("-a").arg("Conceptify").status()?;
 
     if status.success() {
         Ok(())
@@ -160,6 +169,77 @@ fn ensure_app_healthy() -> Result<u16, String> {
     ))
 }
 
+/// POST a JSON body to an authenticated `/api/v1/*` endpoint and deserialize
+/// the response. Reads the bearer token from the token file (written by the
+/// running server) and attaches it as `Authorization: Bearer <token>`.
+///
+/// On an HTTP error status, extracts the server's `{"error": "..."}` message
+/// so the CLI can surface it verbatim on stderr.
+fn authed_post<B, R>(port: u16, path: &str, body: &B) -> Result<R, String>
+where
+    B: Serialize,
+    R: DeserializeOwned,
+{
+    let token = read_token()
+        .map_err(|e| format!("failed to read auth token (has the app run once?): {}", e))?;
+    let url = format!("http://127.0.0.1:{}{}", port, path);
+
+    match ureq::post(&url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .timeout(REQUEST_TIMEOUT)
+        .send_json(body)
+    {
+        Ok(response) => response
+            .into_json::<R>()
+            .map_err(|e| format!("invalid JSON from {}: {}", path, e)),
+        Err(ureq::Error::Status(code, response)) => {
+            let msg = response
+                .into_json::<serde_json::Value>()
+                .ok()
+                .as_ref()
+                .and_then(|v| v.get("error"))
+                .and_then(|e| e.as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("HTTP {}", code));
+            Err(format!("{} (HTTP {})", msg, code))
+        }
+        Err(ureq::Error::Transport(e)) => Err(format!("failed to reach app: {}", e)),
+    }
+}
+
+/// Parse `--key value` pairs from an argument slice into a map. Unknown-shaped
+/// tokens (a value without a preceding `--key`, or a `--key` with no value)
+/// return an error rather than being silently dropped, so a typo surfaces
+/// instead of producing a wrong request.
+fn parse_flags(args: &[String]) -> Result<HashMap<String, String>, String> {
+    let mut flags = HashMap::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        let key = arg
+            .strip_prefix("--")
+            .ok_or_else(|| format!("unexpected argument: {}", arg))?;
+        let value = args
+            .get(i + 1)
+            .ok_or_else(|| format!("missing value for --{}", key))?;
+        flags.insert(key.to_string(), value.to_string());
+        i += 2;
+    }
+    Ok(flags)
+}
+
+/// Print a JSON value to stdout and return success.
+fn emit(value: &serde_json::Value) -> ExitCode {
+    println!("{}", serde_json::to_string_pretty(value).unwrap());
+    ExitCode::SUCCESS
+}
+
+/// Print an error to stderr and return failure.
+fn fail(msg: impl AsRef<str>) -> ExitCode {
+    eprintln!("Error: {}", msg.as_ref());
+    ExitCode::FAILURE
+}
+
 /// `conceptify status` — prints app/API health and version as JSON.
 fn cmd_status() -> ExitCode {
     match ensure_app_healthy() {
@@ -167,27 +247,252 @@ fn cmd_status() -> ExitCode {
             // Re-probe to get the current health info (we know it's healthy,
             // but we want the version and status fields for JSON output).
             match probe_health(port) {
-                Ok(health) => {
-                    let output = serde_json::json!({
-                        "service": health.service,
-                        "status": health.status,
-                        "version": health.version,
-                        "port": port,
-                    });
-                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
-                    ExitCode::SUCCESS
-                }
+                Ok(health) => emit(&json!({
+                    "service": health.service,
+                    "status": health.status,
+                    "version": health.version,
+                    "port": port,
+                })),
                 Err(e) => {
                     // This shouldn't happen (we just confirmed it's healthy),
                     // but handle it gracefully.
-                    eprintln!("Error re-probing health after success: {}", e);
-                    ExitCode::FAILURE
+                    fail(format!("re-probing health after success: {}", e))
                 }
             }
         }
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            ExitCode::FAILURE
+        Err(e) => fail(e),
+    }
+}
+
+/// Shape the API's ensure-project response into the CLI's documented output
+/// contract (§5.2): `{"projectId": …, "created": bool}` (camelCase, unlike the
+/// snake_case API body).
+fn ensure_project_output(resp: &EnsureProjectResponse) -> serde_json::Value {
+    json!({ "projectId": resp.id, "created": resp.created })
+}
+
+/// `conceptify ensure-project --dir <path> [--name <name>]`.
+fn cmd_ensure_project(args: &[String]) -> ExitCode {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => return fail(e),
+    };
+
+    let dir = match flags.get("dir") {
+        Some(d) => d,
+        None => return fail("ensure-project requires --dir <path>"),
+    };
+
+    // Resolve --dir to an absolute, symlink-free path *on the CLI's side*: the
+    // server canonicalizes relative to *its* cwd (wherever the app launched),
+    // not the agent's, so a bare relative path would resolve against the wrong
+    // directory. Canonicalizing here also gives a clean "not found" before we
+    // even touch the API.
+    let abs_dir = match fs::canonicalize(dir) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => return fail(format!("path not found: {} ({})", dir, e)),
+    };
+
+    let port = match ensure_app_healthy() {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+
+    let req = EnsureProjectRequest {
+        root_path: abs_dir,
+        name: flags.get("name").cloned(),
+    };
+
+    match authed_post::<_, EnsureProjectResponse>(port, "/api/v1/projects/ensure", &req) {
+        Ok(resp) => emit(&ensure_project_output(&resp)),
+        Err(e) => fail(e),
+    }
+}
+
+/// Shape the API's create-thread response into the CLI's documented output
+/// contract (§5.2): `{"threadId": …}`, plus the server-derived `slug` (the
+/// artifact-folder name the skill needs for save-artifact).
+fn create_thread_output(resp: &CreateThreadResponse) -> serde_json::Value {
+    json!({ "threadId": resp.id, "slug": resp.slug })
+}
+
+/// `conceptify create-thread --project <id> --title <t> --question <q>`.
+fn cmd_create_thread(args: &[String]) -> ExitCode {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => return fail(e),
+    };
+
+    let (project, title, question) = match (
+        flags.get("project"),
+        flags.get("title"),
+        flags.get("question"),
+    ) {
+        (Some(p), Some(t), Some(q)) => (p, t, q),
+        _ => {
+            return fail("create-thread requires --project <id> --title <t> --question <q>");
         }
+    };
+
+    let port = match ensure_app_healthy() {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+
+    let req = CreateThreadRequest {
+        project_id: project.clone(),
+        title: title.clone(),
+        initial_question: question.clone(),
+    };
+
+    match authed_post::<_, CreateThreadResponse>(port, "/api/v1/threads", &req) {
+        Ok(resp) => emit(&create_thread_output(&resp)),
+        Err(e) => fail(e),
+    }
+}
+
+/// Shape the API's open response into the CLI's JSON output (camelCase).
+fn open_output(resp: &OpenResponse) -> serde_json::Value {
+    json!({
+        "ok": resp.ok,
+        "projectId": resp.project_id,
+        "threadId": resp.thread_id,
+    })
+}
+
+/// `conceptify open --thread <id> | --project <id>` — focus the app on target.
+fn cmd_open(args: &[String]) -> ExitCode {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => return fail(e),
+    };
+
+    let thread = flags.get("thread");
+    let project = flags.get("project");
+
+    // Exactly one selector: reject neither/both up front so the request is
+    // unambiguous (the server would otherwise pick thread over project).
+    let req = match (thread, project) {
+        (Some(t), None) => OpenRequest {
+            thread_id: Some(t.clone()),
+            project_id: None,
+        },
+        (None, Some(p)) => OpenRequest {
+            thread_id: None,
+            project_id: Some(p.clone()),
+        },
+        (None, None) => return fail("open requires exactly one of --thread <id> or --project <id>"),
+        (Some(_), Some(_)) => {
+            return fail("open takes only one of --thread or --project, not both")
+        }
+    };
+
+    let port = match ensure_app_healthy() {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+
+    match authed_post::<_, OpenResponse>(port, "/api/v1/open", &req) {
+        Ok(resp) => emit(&open_output(&resp)),
+        Err(e) => fail(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    #[test]
+    fn parse_flags_reads_key_value_pairs() {
+        let args = vec![s("--dir"), s("/tmp/x"), s("--name"), s("My Proj")];
+        let flags = parse_flags(&args).unwrap();
+        assert_eq!(flags.get("dir").map(String::as_str), Some("/tmp/x"));
+        assert_eq!(flags.get("name").map(String::as_str), Some("My Proj"));
+    }
+
+    #[test]
+    fn parse_flags_empty_is_ok() {
+        let flags = parse_flags(&[]).unwrap();
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn parse_flags_rejects_dangling_key() {
+        let args = vec![s("--dir")];
+        let err = parse_flags(&args).unwrap_err();
+        assert!(err.contains("missing value for --dir"));
+    }
+
+    #[test]
+    fn parse_flags_rejects_bare_value() {
+        let args = vec![s("positional")];
+        let err = parse_flags(&args).unwrap_err();
+        assert!(err.contains("unexpected argument"));
+    }
+
+    #[test]
+    fn ensure_project_output_is_camelcase_contract() {
+        let resp = EnsureProjectResponse {
+            id: s("proj-123"),
+            name: s("myrepo"),
+            root_path: s("/Users/chris/code/myrepo"),
+            created_at: s("2026-07-04T00:00:00.000Z"),
+            archived: false,
+            created: true,
+        };
+        let out = ensure_project_output(&resp);
+        assert_eq!(out, json!({ "projectId": "proj-123", "created": true }));
+        // Stable, parseable JSON with exactly the documented keys.
+        assert!(out.get("projectId").is_some());
+        assert!(out.get("created").is_some());
+    }
+
+    #[test]
+    fn create_thread_output_includes_thread_id_and_slug() {
+        let resp = CreateThreadResponse {
+            id: s("thr-9"),
+            project_id: s("proj-123"),
+            title: s("How does OAuth work?"),
+            slug: s("how-does-oauth-work"),
+            initial_question: s("Explain it"),
+            status: s("generating"),
+            created_at: s("2026-07-04T00:00:00.000Z"),
+            updated_at: s("2026-07-04T00:00:00.000Z"),
+        };
+        let out = create_thread_output(&resp);
+        assert_eq!(
+            out,
+            json!({ "threadId": "thr-9", "slug": "how-does-oauth-work" })
+        );
+    }
+
+    #[test]
+    fn open_output_thread_target() {
+        let resp = OpenResponse {
+            ok: true,
+            project_id: s("proj-123"),
+            thread_id: Some(s("thr-9")),
+        };
+        let out = open_output(&resp);
+        assert_eq!(
+            out,
+            json!({ "ok": true, "projectId": "proj-123", "threadId": "thr-9" })
+        );
+    }
+
+    #[test]
+    fn open_output_project_target_has_null_thread() {
+        let resp = OpenResponse {
+            ok: true,
+            project_id: s("proj-123"),
+            thread_id: None,
+        };
+        let out = open_output(&resp);
+        assert_eq!(out["threadId"], serde_json::Value::Null);
+        assert_eq!(out["projectId"], json!("proj-123"));
     }
 }

@@ -75,6 +75,98 @@ Prints app health, version, and bound port as JSON. Useful for agent scripts to 
 
 ---
 
+### `conceptify ensure-project --dir <path> [--name <name>]`
+
+Find-or-create a project for a directory (PRD §5.2, maps to
+`POST /api/v1/projects/ensure`). Idempotent: running it twice for the same
+directory returns the same `projectId` with `created: false` the second time.
+
+`--dir` is resolved to an absolute, symlink-free path **on the CLI side**
+before the request is sent, because the server canonicalizes relative to its
+own working directory (wherever the app launched), not the agent's. A path that
+doesn't exist fails fast on the CLI before any HTTP call.
+
+`--name` optionally overrides the project name (defaults to the directory
+name, deduped with a numeric suffix if taken).
+
+**Output (stdout):**
+
+```json
+{
+  "projectId": "550e8400-e29b-41d4-a716-446655440000",
+  "created": true
+}
+```
+
+**Errors (stderr, exit 1):**
+
+- `Error: path not found: <dir> (...)` — `--dir` doesn't exist / can't be resolved.
+- `Error: ensure-project requires --dir <path>` — `--dir` missing.
+- API errors are surfaced verbatim, e.g. `Error: path not found: ... (HTTP 400)`.
+
+---
+
+### `conceptify create-thread --project <id> --title <t> --question <q>`
+
+Create a thread in a project (PRD §5.2, maps to `POST /api/v1/threads`). The
+filesystem-safe `slug` (the artifact-folder name, §5.6) is derived server-side
+from the title and deduped within the project; it's echoed in the output
+because the skill needs it for `save-artifact`.
+
+**Output (stdout):**
+
+```json
+{
+  "threadId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "slug": "how-does-oauth-work"
+}
+```
+
+**Errors (stderr, exit 1):**
+
+- `Error: create-thread requires --project <id> --title <t> --question <q>` — a flag is missing.
+- API errors are surfaced verbatim, e.g. `Error: project not found: <id> (HTTP 404)`,
+  `Error: title must not be empty (HTTP 400)`.
+
+---
+
+### `conceptify open --thread <id> | --project <id>`
+
+Focus the app on a project or thread (PRD §5.2, maps to `POST /api/v1/open`).
+Brings the main window to the front and emits the `navigate` event the frontend
+routes on — so the artifact is on screen when an agent finishes (UC1). Supply
+**exactly one** of `--thread` / `--project`.
+
+**Output (stdout):**
+
+```json
+{
+  "ok": true,
+  "projectId": "550e8400-e29b-41d4-a716-446655440000",
+  "threadId": "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+}
+```
+
+`threadId` is `null` when opening a project without a specific thread.
+
+**Errors (stderr, exit 1):**
+
+- `Error: open requires exactly one of --thread <id> or --project <id>` — neither supplied.
+- `Error: open takes only one of --thread or --project, not both` — both supplied.
+- API errors are surfaced verbatim, e.g. `Error: thread not found: <id> (HTTP 404)`.
+
+---
+
+## Output contract
+
+All commands print stable, parseable JSON to **stdout** on success and
+human-readable errors to **stderr** with a non-zero exit code — these are the
+exact commands the M3 Claude Code skill drives. Note the CLI output keys are
+camelCase (`projectId`, `threadId`) even though the underlying HTTP API uses
+snake_case; the CLI is the stable contract for scripts.
+
+---
+
 ## Workspace layout
 
 The CLI is part of a Cargo workspace:
@@ -94,12 +186,9 @@ Shared types (e.g., `HealthResponse`) live in `conceptify-types` and are used by
 
 The following commands are specified in PRD §5.2 but not yet implemented:
 
-- `conceptify ensure-project --dir <path> [--name <name>]`
-- `conceptify create-thread --project <id> --title <t> --question <q>`
 - `conceptify save-artifact --thread <id> --file <path>`
 - `conceptify get-context --thread <id>`
 - `conceptify list-comments --thread <id> [--status open]`
 - `conceptify resolve-comment --id <id> --answer-file <path> [--applied]`
-- `conceptify open --thread <id> | --project <id>`
 
 These will be added in later milestones as the API surface expands.

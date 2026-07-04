@@ -13,6 +13,7 @@
 
 mod auth;
 mod net;
+mod open_routes;
 pub(crate) mod paths;
 mod projects_routes;
 mod routes;
