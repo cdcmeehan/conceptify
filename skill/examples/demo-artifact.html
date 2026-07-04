@@ -493,6 +493,7 @@ p code, li code, td code, th code, figcaption code, summary code, dd code {
   border: 1px solid var(--cfy-line);
   border-radius: var(--cfy-radius-sm);
   padding: 0.08em 0.35em;
+  overflow-wrap: break-word; /* long paths/URLs must not set a page-width floor in narrow panes */
 }
 
 /* block code — .shiki emitted by Shiki; bare <pre> gets the same frame */
