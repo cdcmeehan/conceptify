@@ -25,7 +25,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::db::DbHandle;
-use crate::{artifacts, projects, threads};
+use crate::{artifacts, comments, projects, threads};
 
 /// A project row for the shell sidebar. Mirrors the HTTP `ProjectListItem` plus
 /// `root_exists`: whether the mapped `root_path` still resolves on disk, so the
@@ -258,6 +258,92 @@ pub fn open_artifact_in_browser(
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// A comment row for the shell's in-artifact comment layer (94m.3/94m.4) and
+/// sidebar (94m.6). Mirrors the HTTP `CommentResponse` (docs/api.md "Comments")
+/// field-for-field — the frontend commands and the CLI/skill HTTP surface stay
+/// on the same shape. `anchor` is the stored FR-4.4 anchor JSON, `null` for a
+/// direct follow-up.
+#[derive(Serialize)]
+pub struct CommentDto {
+    pub id: String,
+    pub thread_id: String,
+    pub artifact_version: i64,
+    pub anchor: Option<serde_json::Value>,
+    pub body: String,
+    pub status: String,
+    pub answer_html: Option<String>,
+    pub anchor_state: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+impl From<comments::Comment> for CommentDto {
+    fn from(c: comments::Comment) -> Self {
+        CommentDto {
+            id: c.id,
+            thread_id: c.thread_id,
+            artifact_version: c.artifact_version,
+            anchor: c.anchor,
+            body: c.body,
+            status: c.status.as_str().to_owned(),
+            answer_html: c.answer_html,
+            anchor_state: c.anchor_state.as_str().to_owned(),
+            created_at: c.created_at,
+            resolved_at: c.resolved_at,
+        }
+    }
+}
+
+/// Create a comment against the artifact version currently in the viewer
+/// (FR-4.1 text selection / FR-4.2 element click / FR-4.3 direct follow-up).
+///
+/// Thin wrapper over `comments::create_comment` — the same domain fn that backs
+/// `POST /api/v1/comments`. `anchor` is the FR-4.4 anchor captured by the bridge
+/// (`null`/absent for a direct follow-up); it is validated and stored verbatim.
+/// The target thread and `artifact_version` must already exist (a comment always
+/// anchors to a saved version), so a still-generating thread with no artifact
+/// yields a clean error rather than an opaque composite-FK failure — the shell
+/// only mounts the comment layer once an artifact is present.
+///
+/// Unlike the axum route this does **not** emit a `comment-created` event: the
+/// shell that invoked it updates its own store directly (the established command
+/// convention — events are for cross-surface CLI/API mutations).
+#[tauri::command(rename_all = "snake_case")]
+pub fn create_comment(
+    db: State<DbHandle>,
+    thread_id: String,
+    artifact_version: i64,
+    anchor: Option<serde_json::Value>,
+    body: String,
+) -> Result<CommentDto, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let ctx = comments::create_comment(&conn, &thread_id, artifact_version, anchor.as_ref(), &body)
+        .map_err(|e| e.to_string())?;
+    Ok(ctx.comment.into())
+}
+
+/// List a thread's comments, oldest first, optionally filtered to one status
+/// (`open` | `answered` | `applied`). Thin wrapper over `comments::list_comments`
+/// (the same domain fn behind `GET /api/v1/comments`). An unknown thread yields
+/// an empty list; an unknown `status` value is a clean error.
+#[tauri::command(rename_all = "snake_case")]
+pub fn list_comments(
+    db: State<DbHandle>,
+    thread_id: String,
+    status: Option<String>,
+) -> Result<Vec<CommentDto>, String> {
+    let status = match status.as_deref() {
+        None | Some("") => None,
+        Some(s) => Some(
+            comments::CommentStatus::parse(s)
+                .ok_or_else(|| format!("invalid status \"{s}\" (expected open|answered|applied)"))?,
+        ),
+    };
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let rows = comments::list_comments(&conn, &thread_id, status).map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(CommentDto::from).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +555,113 @@ mod tests {
         .expect("unknown thread should still succeed");
         let value: serde_json::Value = response.deserialize().unwrap();
         assert_eq!(value.as_array().map(Vec::len), Some(0));
+
+        cleanup(&db_path, &root);
+    }
+
+    /// Drives `create_comment` then `list_comments` through Tauri's real IPC
+    /// dispatch, exactly like the shell's `invoke("create_comment", { thread_id,
+    /// artifact_version, anchor, body })` and `invoke("list_comments", {
+    /// thread_id })` (94m.3/94m.4). Proves the snake_case arg mapping (including
+    /// the nested `anchor` JSON and the `Option` `status` filter), that the
+    /// created comment starts `open`/`anchored` with the FR-4.4 anchor stored
+    /// verbatim, and that the just-created comment lists back. A real artifact
+    /// v1 is saved through the genuine pipeline so the composite-FK create path
+    /// is exercised, not stubbed.
+    #[test]
+    fn comment_commands_over_ipc_create_and_list() {
+        let (db_handle, root, thread_id, db_path) = artifact_fixture("comments");
+        {
+            let conn = db_handle.lock().unwrap();
+            crate::artifacts::save_artifact(&conn, &root, &thread_id, artifact_html(1).as_bytes())
+                .expect("save artifact v1");
+        }
+
+        let app = tauri::test::mock_builder()
+            .manage(db_handle)
+            .invoke_handler(tauri::generate_handler![create_comment, list_comments])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("failed to build mock webview");
+
+        // A text-selection anchor (FR-4.1): primary cfy_id + offsets, fallback
+        // quote — the exact snake_case shape the bridge emits.
+        let anchor = serde_json::json!({
+            "v": 1,
+            "type": "text",
+            "cfy_id": "sec-t",
+            "start": 0,
+            "end": 9,
+            "quote": { "exact": "Version 1", "prefix": "", "suffix": "" }
+        });
+
+        let response = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "create_comment".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(serde_json::json!({
+                    "thread_id": thread_id,
+                    "artifact_version": 1,
+                    "anchor": anchor,
+                    "body": "why this heading?"
+                })),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .expect("create_comment should succeed over IPC");
+        let created: serde_json::Value = response.deserialize().expect("comment JSON");
+        assert_eq!(created["status"], serde_json::json!("open"));
+        assert_eq!(created["anchor_state"], serde_json::json!("anchored"));
+        assert_eq!(created["artifact_version"], serde_json::json!(1));
+        assert_eq!(created["anchor"], anchor, "anchor stored + returned verbatim");
+        assert!(created["answer_html"].is_null());
+        assert!(created["resolved_at"].is_null());
+        let created_id = created["id"].as_str().expect("id string").to_owned();
+
+        // The just-created comment lists back (no status filter → all comments).
+        let response = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "list_comments".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(serde_json::json!({ "thread_id": thread_id })),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .expect("list_comments should succeed over IPC");
+        let listed: serde_json::Value = response.deserialize().expect("array JSON");
+        let arr = listed.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], serde_json::json!(created_id));
+        assert_eq!(arr[0]["body"], serde_json::json!("why this heading?"));
+
+        // The `open` status filter matches; `applied` does not.
+        let response = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "list_comments".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(
+                    serde_json::json!({ "thread_id": thread_id, "status": "applied" }),
+                ),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .expect("list_comments with filter should succeed over IPC");
+        let listed: serde_json::Value = response.deserialize().unwrap();
+        assert_eq!(listed.as_array().map(Vec::len), Some(0));
 
         cleanup(&db_path, &root);
     }

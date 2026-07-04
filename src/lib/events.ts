@@ -29,6 +29,12 @@ interface ArtifactUpdatedPayload {
   version: number;
 }
 
+interface CommentEventPayload {
+  project_id: string;
+  thread_id: string;
+  comment_id: string;
+}
+
 /**
  * Subscribe to the core's Tauri events and drive `appStore`. Call once at
  * startup; returns a cleanup function that removes every listener.
@@ -58,6 +64,25 @@ export function initEventListeners(): () => void {
     // all the logic lives on the store seam.
     listen<ArtifactUpdatedPayload>("artifact-updated", (event) => {
       appStore.handleArtifactUpdated(event.payload);
+    }),
+
+    // A comment was created via the API/CLI (M5 headless flows, or another
+    // surface). Refresh the affected thread's comments — a no-op unless it's the
+    // thread on screen — so the sidebar/highlights pick it up live (FR-4.5); and
+    // its project's threads for the open-comment badge. The shell's own
+    // create (94m.3/94m.4) updates the store directly and emits no event, so
+    // this only ever fires for cross-surface mutations.
+    listen<CommentEventPayload>("comment-created", (event) => {
+      void appStore.refetchComments(event.payload.thread_id);
+      void appStore.refetchThreads(event.payload.project_id);
+    }),
+
+    // A comment mutated (answered/applied/anchor moved — M5 resolve flow). Same
+    // scoped refresh: the sidebar re-renders the new status/answer, highlights
+    // drop a no-longer-open comment, and the badge count updates.
+    listen<CommentEventPayload>("comment-updated", (event) => {
+      void appStore.refetchComments(event.payload.thread_id);
+      void appStore.refetchThreads(event.payload.project_id);
     }),
 
     // The user asked to open a specific project/thread (e.g. `conceptify open`).

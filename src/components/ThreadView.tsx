@@ -14,11 +14,12 @@
 // version and the iframe reloads in place. Concrete version URLs are
 // immutable/cacheable, so history browsing is instant (FR-2.4).
 
-import { useCallback, useState } from "preact/hooks";
+import { useCallback, useRef, useState } from "preact/hooks";
 import * as api from "../lib/api";
 import type { Thread } from "../lib/api";
 import { artifactBridge } from "../lib/bridge";
 import { appStore, useAppStore } from "../store/appStore";
+import { ArtifactCommentLayer } from "./ArtifactCommentLayer";
 import { StatusChip } from "./StatusChip";
 
 export function ThreadView({ thread }: { thread: Thread | null }) {
@@ -28,8 +29,12 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
   // Register the viewer iframe with the bridge (src/lib/bridge.ts owns the
   // postMessage handshake; comment UI riding on it is 94m.3/94m.6). Stable
   // callback so it only fires on mount/unmount — version switches reload the
-  // same element and the bridge re-handshakes via its `ready` message.
+  // same element and the bridge re-handshakes via its `ready` message. We also
+  // stash the element so the comment layer can convert iframe-viewport rects to
+  // shell coordinates (it reads this ref at popover-show time).
+  const iframeElRef = useRef<HTMLIFrameElement | null>(null);
   const iframeRef = useCallback((el: HTMLIFrameElement | null) => {
+    iframeElRef.current = el;
     if (el != null) artifactBridge.attach(el);
     else artifactBridge.detach();
   }, []);
@@ -123,14 +128,28 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
       {hasArtifact ? (
         // S2 containment boundary: allow-scripts ONLY — never add
         // allow-same-origin (opaque origin is the whole point).
-        <iframe
-          key={thread.id}
-          ref={iframeRef}
-          src={`artifact://localhost/${thread.id}/${resolvedVersion}`}
-          sandbox="allow-scripts"
-          title="Artifact"
-          class="min-h-0 w-full flex-1 border-0 bg-white dark:bg-neutral-950"
-        />
+        <>
+          <iframe
+            key={thread.id}
+            ref={iframeRef}
+            src={`artifact://localhost/${thread.id}/${resolvedVersion}`}
+            sandbox="allow-scripts"
+            title="Artifact"
+            class="min-h-0 w-full flex-1 border-0 bg-white dark:bg-neutral-950"
+          />
+          {/* Text-selection + element-click commenting (94m.3/94m.4). Keyed by
+              thread so it remounts (fresh popover + bridge subscription) on
+              thread switch; version switches update via the prop. Only mounted
+              when an artifact exists → no commenting on a generating thread. */}
+          {resolvedVersion != null && (
+            <ArtifactCommentLayer
+              key={thread.id}
+              threadId={thread.id}
+              artifactVersion={resolvedVersion}
+              iframeRef={iframeElRef}
+            />
+          )}
+        </>
       ) : waitingOnVersions ? (
         // Version list still in flight (or failed): render nothing heavy —
         // the list resolves in a beat; on error the state below takes over

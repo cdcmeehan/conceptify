@@ -19,7 +19,7 @@
 
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../lib/api";
-import type { ArtifactVersion, Project, Thread } from "../lib/api";
+import type { ArtifactVersion, Comment, Project, Thread } from "../lib/api";
 
 /** Which artifact version the viewer shows: a concrete number (read-only
  *  history view) or `"latest"` (tracks new saves live, FR-2.4). */
@@ -40,6 +40,12 @@ export interface AppState {
   artifactVersionsLoading: boolean;
   artifactVersionsError: string | null;
   viewerVersion: ViewerVersion;
+  /** Comments for the selected thread, oldest first (FR-4.5). The source of
+   *  truth for the in-artifact highlights (94m.3/94m.4) and the sidebar
+   *  (94m.6). Empty when no thread is selected. */
+  comments: Comment[];
+  commentsLoading: boolean;
+  commentsError: string | null;
 }
 
 type Listener = () => void;
@@ -58,14 +64,21 @@ const initialState: AppState = {
   artifactVersionsLoading: false,
   artifactVersionsError: null,
   viewerVersion: "latest",
+  comments: [],
+  commentsLoading: false,
+  commentsError: null,
 };
 
-/** Fresh viewer state, applied whenever the selected thread changes/vanishes. */
+/** Fresh viewer state, applied whenever the selected thread changes/vanishes.
+ *  Comments belong to a thread, so they clear on the same boundary. */
 const clearedViewer = {
   artifactVersions: [] as ArtifactVersion[],
   artifactVersionsLoading: false,
   artifactVersionsError: null,
   viewerVersion: "latest" as ViewerVersion,
+  comments: [] as Comment[],
+  commentsLoading: false,
+  commentsError: null,
 };
 
 class AppStore {
@@ -75,6 +88,8 @@ class AppStore {
   private threadFetchToken = 0;
   /** Same guard for artifact-version fetches (viewer switcher data). */
   private versionFetchToken = 0;
+  /** Same guard for comment fetches (comment layer + sidebar data). */
+  private commentFetchToken = 0;
 
   getSnapshot(): AppState {
     return this.state;
@@ -165,6 +180,50 @@ class AppStore {
   }
 
   /**
+   * Refetch the selected thread's comments (defaults to the selected thread).
+   * Mirrors `refetchArtifactVersions`' guards: a no-op unless the thread is the
+   * one on screen, and token-guarded so a slow result can't land after the
+   * selection moved on. Fetches every status (the comment layer filters to
+   * open+current-version for highlights; the sidebar (94m.6) filters for its
+   * tabs). Called by `selectThread`, by this store after its own create, and by
+   * `events.ts` on a CLI/API `comment-created`/`comment-updated` for this thread.
+   */
+  async refetchComments(threadId?: string): Promise<void> {
+    const target = threadId ?? this.state.selectedThreadId;
+    if (!target || target !== this.state.selectedThreadId) return;
+
+    const token = ++this.commentFetchToken;
+    this.set({ commentsLoading: true, commentsError: null });
+    try {
+      const comments = await api.listComments(target);
+      if (token !== this.commentFetchToken || this.state.selectedThreadId !== target) return;
+      this.set({ comments, commentsLoading: false });
+    } catch (e) {
+      if (token !== this.commentFetchToken) return;
+      this.set({ commentsLoading: false, commentsError: String(e) });
+    }
+  }
+
+  /**
+   * Record a comment the shell just created via `api.createComment` (94m.3/4).
+   * The command returns the authoritative row, so we append it immediately — no
+   * round-trip on the critical path (N2: the highlight must land instantly) —
+   * de-duped by id, and dropped if the thread is no longer selected. Then a
+   * fresh `refetchComments` reconciles the full list: its token bump also
+   * invalidates any still-in-flight initial load (whose snapshot may predate
+   * this write), so a comment created mid-load can't hide pre-existing ones.
+   * `refetchThreads` refreshes the open-comment badge.
+   */
+  addComment(comment: Comment): void {
+    if (comment.thread_id !== this.state.selectedThreadId) return;
+    if (!this.state.comments.some((c) => c.id === comment.id)) {
+      this.set({ comments: [...this.state.comments, comment] });
+    }
+    void this.refetchComments();
+    void this.refetchThreads();
+  }
+
+  /**
    * React to a core `artifact-updated` event `{project_id, thread_id,
    * version}` (a save landed via the API/CLI/skill). Two jobs:
    *
@@ -227,6 +286,7 @@ class AppStore {
     if (id === this.state.selectedThreadId) return;
     this.set({ selectedThreadId: id, ...clearedViewer });
     void this.refetchArtifactVersions(id);
+    void this.refetchComments(id);
   }
 
   setShowArchived(showArchived: boolean): void {

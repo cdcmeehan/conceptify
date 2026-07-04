@@ -73,6 +73,8 @@ pub fn run() {
             commands::remap_project,
             commands::list_artifact_versions,
             commands::open_artifact_in_browser,
+            commands::create_comment,
+            commands::list_comments,
         ])
         .setup(|app| {
             // Opened and migrated before anything else touches it: both the

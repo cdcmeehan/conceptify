@@ -71,6 +71,58 @@ export function listArtifactVersions(threadId: string): Promise<ArtifactVersion[
   return invoke<ArtifactVersion[]>("list_artifact_versions", { thread_id: threadId });
 }
 
+export type CommentStatus = "open" | "answered" | "applied";
+
+/**
+ * A comment on an artifact version (PRD §7.4, FR-4.1–FR-4.5). Mirrors the Rust
+ * `CommentDto` / documented `CommentResponse` shape. `anchor` is the FR-4.4
+ * anchor JSON (captured by the bridge, stored verbatim) or `null` for a direct
+ * follow-up question (94m.5). Types are declared locally on purpose — see the
+ * module header (`crates/conceptify-types` is not imported from the frontend).
+ */
+export interface Comment {
+  id: string;
+  thread_id: string;
+  artifact_version: number;
+  /** FR-4.4 anchor; `null` for a direct follow-up (94m.5). Opaque here — the
+   *  bridge (`src/lib/bridge.ts`) owns the typed anchor shapes. */
+  anchor: Record<string, unknown> | null;
+  body: string;
+  status: CommentStatus;
+  answer_html: string | null;
+  anchor_state: "anchored" | "moved";
+  created_at: string;
+  resolved_at: string | null;
+}
+
+/**
+ * Create a comment against the artifact version currently in the viewer
+ * (FR-4.1/4.2/4.3). `anchor` is the bridge-captured FR-4.4 anchor, or `null`
+ * for a direct follow-up. The target thread and `artifactVersion` must already
+ * exist (a comment always anchors to a saved version). Resolves to the created
+ * comment (status `open`, `anchored`), whose id/anchor drive the immediate
+ * in-artifact highlight.
+ */
+export function createComment(input: {
+  threadId: string;
+  artifactVersion: number;
+  anchor: Record<string, unknown> | null;
+  body: string;
+}): Promise<Comment> {
+  return invoke<Comment>("create_comment", {
+    thread_id: input.threadId,
+    artifact_version: input.artifactVersion,
+    anchor: input.anchor,
+    body: input.body,
+  });
+}
+
+/** List a thread's comments, oldest first (FR-4.5). `status` optionally filters
+ *  to one state; omit for all. */
+export function listComments(threadId: string, status?: CommentStatus): Promise<Comment[]> {
+  return invoke<Comment[]>("list_comments", { thread_id: threadId, status: status ?? null });
+}
+
 /**
  * Open the thread's on-disk `artifact.html` with the system default browser
  * (FR-2.5). Path resolution happens entirely in Rust — the frontend never
