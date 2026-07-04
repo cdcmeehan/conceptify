@@ -14,15 +14,25 @@
 // version and the iframe reloads in place. Concrete version URLs are
 // immutable/cacheable, so history browsing is instant (FR-2.4).
 
-import { useState } from "preact/hooks";
+import { useCallback, useState } from "preact/hooks";
 import * as api from "../lib/api";
 import type { Thread } from "../lib/api";
+import { artifactBridge } from "../lib/bridge";
 import { appStore, useAppStore } from "../store/appStore";
 import { StatusChip } from "./StatusChip";
 
 export function ThreadView({ thread }: { thread: Thread | null }) {
   const state = useAppStore();
   const [openError, setOpenError] = useState<string | null>(null);
+
+  // Register the viewer iframe with the bridge (src/lib/bridge.ts owns the
+  // postMessage handshake; comment UI riding on it is 94m.3/94m.6). Stable
+  // callback so it only fires on mount/unmount — version switches reload the
+  // same element and the bridge re-handshakes via its `ready` message.
+  const iframeRef = useCallback((el: HTMLIFrameElement | null) => {
+    if (el != null) artifactBridge.attach(el);
+    else artifactBridge.detach();
+  }, []);
 
   if (thread == null) {
     return (
@@ -115,6 +125,7 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
         // allow-same-origin (opaque origin is the whole point).
         <iframe
           key={thread.id}
+          ref={iframeRef}
           src={`artifact://localhost/${thread.id}/${resolvedVersion}`}
           sandbox="allow-scripts"
           title="Artifact"

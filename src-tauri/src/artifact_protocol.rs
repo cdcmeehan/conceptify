@@ -40,12 +40,14 @@
 //!
 //! ## Bridge injection (G3: the on-disk file stays pristine)
 //!
-//! [`inject_bridge`] splices [`BRIDGE_STUB`] into the served bytes just
+//! [`inject_bridge`] splices [`BRIDGE_TAG`] into the served bytes just
 //! before the closing `</body>` tag; the file on disk is never modified, so
-//! opened directly in a browser it has no Conceptify residue. The stub is a
-//! no-op placeholder — M4 (bead `conceptify-94m.1`) replaces the constant's
-//! *content* with the real postMessage bridge; the injection point and
-//! mechanism are fixed here and should not need to change.
+//! opened directly in a browser it has no Conceptify residue. The tag wraps
+//! the real postMessage bridge (M4, bead `conceptify-94m.1`), which lives as
+//! an editable JS asset at `src-tauri/assets/bridge.js` and is compiled in
+//! via `include_str!`. The message protocol it speaks is documented in
+//! docs/api.md, "Bridge protocol" — the shell counterpart is
+//! `src/lib/bridge.ts`.
 //!
 //! ## WKWebView note (Appendix A, wry #168)
 //!
@@ -83,19 +85,20 @@ pub const CSP: &str = "default-src 'none'; \
 /// [`inject_bridge`].
 const BRIDGE_MARKER: &str = "data-cfy-bridge";
 
-/// The injected bridge script. **No-op stub until M4**: bead
-/// `conceptify-94m.1` replaces the body of this tag with the real
-/// postMessage bridge (selection reporting, click-to-comment, highlight
-/// decorations, scroll-to-anchor). Keep the `data-cfy-bridge` attribute and
-/// the `window.__cfyBridge` global — both are reserved names the spec
-/// promises artifacts will not touch. Never present in the on-disk file.
-const BRIDGE_STUB: &str = "\n<script data-cfy-bridge=\"stub\">\n\
-     /* Conceptify bridge stub — injected at serve time by the artifact://\n\
-        protocol handler; the on-disk artifact file never contains this.\n\
-        Replaced by the real postMessage bridge in M4 (conceptify-94m.1). */\n\
-     \"use strict\";\n\
-     window.__cfyBridge = Object.freeze({ stub: true });\n\
-     </script>\n";
+/// The injected bridge `<script>` tag: the real postMessage bridge (M4,
+/// bead `conceptify-94m.1`) — selection reporting, click-to-comment,
+/// highlight decorations, scroll-to-anchor; protocol documented in
+/// docs/api.md "Bridge protocol". The script body lives as a lintable JS
+/// asset (`assets/bridge.js`) and MUST NOT contain a literal `</script>`
+/// (it would close this tag early — guarded by a test below). The
+/// `data-cfy-bridge` attribute and the `window.__cfyBridge` global are
+/// reserved names the spec promises artifacts will not touch. Never present
+/// in the on-disk file.
+const BRIDGE_TAG: &str = concat!(
+    "\n<script data-cfy-bridge=\"v1\">\n",
+    include_str!("../assets/bridge.js"),
+    "\n</script>\n",
+);
 
 // ---------------------------------------------------------------------------
 // Request path parsing (pure)
@@ -353,18 +356,18 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|w| w == needle)
 }
 
-/// Splice [`BRIDGE_STUB`] into the served bytes, immediately before the
+/// Splice [`BRIDGE_TAG`] into the served bytes, immediately before the
 /// **last** case-insensitive `</body>` (the last occurrence is the real
 /// close tag even when earlier script text contains a `</body>` literal —
 /// inside `<script>` only `</script>` closes, so such literals are legal).
 /// Injecting at end-of-body means the entire artifact DOM above is parsed
-/// when the bridge runs — no DOMContentLoaded dance for M4.
+/// when the bridge runs — no DOMContentLoaded dance needed.
 ///
 /// Fallbacks keep this total: a document with no `</body>` (HTML5 parsers
-/// error-recover it) gets the stub appended at the end, which still parses
-/// into `<body>` and executes. Already-injected input (checked via the
-/// reserved `data-cfy-bridge` marker) is returned unchanged, so injection
-/// is idempotent.
+/// error-recover it) gets the bridge appended at the end, which still
+/// parses into `<body>` and executes. Already-injected input (checked via
+/// the reserved `data-cfy-bridge` marker) is returned unchanged, so
+/// injection is idempotent.
 ///
 /// Operates on raw bytes and never re-encodes: the served document is the
 /// on-disk bytes with exactly one splice — the disk file itself is never
@@ -373,19 +376,19 @@ pub fn inject_bridge(bytes: &[u8]) -> Vec<u8> {
     if contains_bytes(bytes, BRIDGE_MARKER.as_bytes()) {
         return bytes.to_vec();
     }
-    let stub = BRIDGE_STUB.as_bytes();
+    let bridge = BRIDGE_TAG.as_bytes();
     match rfind_ascii_ci(bytes, b"</body>") {
         Some(i) => {
-            let mut out = Vec::with_capacity(bytes.len() + stub.len());
+            let mut out = Vec::with_capacity(bytes.len() + bridge.len());
             out.extend_from_slice(&bytes[..i]);
-            out.extend_from_slice(stub);
+            out.extend_from_slice(bridge);
             out.extend_from_slice(&bytes[i..]);
             out
         }
         None => {
-            let mut out = Vec::with_capacity(bytes.len() + stub.len());
+            let mut out = Vec::with_capacity(bytes.len() + bridge.len());
             out.extend_from_slice(bytes);
-            out.extend_from_slice(stub);
+            out.extend_from_slice(bridge);
             out
         }
     }
@@ -754,14 +757,47 @@ mod tests {
     // -- bridge injection -------------------------------------------------------
 
     #[test]
-    fn inject_places_stub_before_last_body_close() {
+    fn bridge_tag_is_wellformed_inline_script() {
+        // The JS asset is inlined into a <script> tag, so it must not close
+        // that tag early: exactly one `</script>` (ours, at the end), and it
+        // must not contain a nested `<script` opener either.
+        let lower = BRIDGE_TAG.to_ascii_lowercase();
+        assert_eq!(
+            lower.matches("</script>").count(),
+            1,
+            "bridge.js must not contain a literal </script>"
+        );
+        assert_eq!(
+            lower.matches("<script").count(),
+            1,
+            "bridge.js must not contain a nested <script opener"
+        );
+        // Reserved names the artifact spec promises artifacts won't touch.
+        assert!(BRIDGE_TAG.contains("data-cfy-bridge=\"v1\""));
+        assert!(BRIDGE_TAG.contains("__cfyBridge"));
+        // The protocol messages the shell depends on (docs/api.md
+        // "Bridge protocol") — cheap lockstep guards.
+        for msg in [
+            "ready",
+            "selection",
+            "selection_cleared",
+            "element_click",
+            "set_highlights",
+            "scroll_to_anchor",
+        ] {
+            assert!(BRIDGE_TAG.contains(msg), "bridge must reference {msg:?}");
+        }
+    }
+
+    #[test]
+    fn inject_places_bridge_before_last_body_close() {
         let html = b"<html><body><p>hi</p></body></html>";
         let out = inject_bridge(html);
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("data-cfy-bridge"));
-        let stub_pos = s.find("data-cfy-bridge").unwrap();
+        let bridge_pos = s.find("data-cfy-bridge").unwrap();
         let body_close = s.rfind("</body>").unwrap();
-        assert!(stub_pos < body_close, "stub must sit before </body>");
+        assert!(bridge_pos < body_close, "bridge must sit before </body>");
         assert!(s.ends_with("</body></html>"));
     }
 
@@ -772,11 +808,11 @@ mod tests {
         let html = b"<body><script>let s = \"</body>\";</script><p>x</p></BODY>";
         let out = inject_bridge(html);
         let s = String::from_utf8(out).unwrap();
-        let stub_pos = s.find("data-cfy-bridge").unwrap();
+        let bridge_pos = s.find("data-cfy-bridge").unwrap();
         let fake_close = s.find("</body>").unwrap();
         assert!(
-            stub_pos > fake_close,
-            "stub must not be injected at the script-text decoy"
+            bridge_pos > fake_close,
+            "bridge must not be injected at the script-text decoy"
         );
         assert!(s.ends_with("</BODY>"));
     }
@@ -801,7 +837,7 @@ mod tests {
     // -- serving ----------------------------------------------------------------
 
     #[test]
-    fn serves_versioned_file_with_stub_and_exact_csp() {
+    fn serves_versioned_file_with_bridge_and_exact_csp() {
         let conn = test_conn();
         let root = tmp_root("serve");
         save_versions(&conn, &root, 2);
@@ -824,14 +860,15 @@ mod tests {
         );
         assert_eq!(header_str(&res, header::X_CONTENT_TYPE_OPTIONS), "nosniff");
 
-        // Served body = disk bytes + exactly the stub splice.
+        // Served body = disk bytes + exactly the bridge splice.
         let body = body_str(&res);
         assert!(body.contains("Version 1"));
         assert!(body.contains("data-cfy-bridge"));
+        assert!(body.contains("__cfyBridge"), "real bridge script present");
         assert_eq!(
             res.body(),
             &inject_bridge(artifact_html(1).as_bytes()),
-            "served bytes must be the pristine file with one stub splice"
+            "served bytes must be the pristine file with one bridge splice"
         );
 
         // The on-disk file stays byte-identical (pristine, G3).

@@ -488,9 +488,10 @@ artifact is edited when the primary no longer resolves.
 
 **`type: "text"`** (text selection). Primary = the nearest ancestor
 `data-cfy-id` (`cfy_id`) plus `start`/`end` character offsets within that
-element's normalized text content; fallback = `quote`. When the selection has no
-id-bearing ancestor, `cfy_id`/`start`/`end` are omitted and `quote` is the sole
-anchor.
+element's normalized text content (precise definition: "visible text" under
+[Bridge protocol → Conventions](#conventions)); fallback = `quote`. When the
+selection has no id-bearing ancestor, `cfy_id`/`start`/`end` are omitted and
+`quote` is the sole anchor.
 
 ```json
 {
@@ -822,15 +823,117 @@ changing the spec first.
 
 ### Bridge injection
 
-The handler splices one `<script data-cfy-bridge="stub">…</script>` tag into
+The handler splices one `<script data-cfy-bridge="v1">…</script>` tag into
 the served bytes immediately before the closing `</body>` (appended at the
-end if no close tag exists; idempotent). The on-disk file is **never
-modified** — opened directly in a browser it carries no Conceptify residue
-(G3). Until M4 (`conceptify-94m.1`) the script is a no-op stub that defines
-`window.__cfyBridge = Object.freeze({ stub: true })`; M4 replaces the stub's
-content in `artifact_protocol::BRIDGE_STUB` — injection point and mechanism
-are already final. Artifacts must not rely on the bridge existing
-(spec §1/§3): the same file opens bridge-less in a plain browser.
+end if no close tag exists; idempotent via the reserved `data-cfy-bridge`
+marker). The on-disk file is **never modified** — opened directly in a
+browser it carries no Conceptify residue (G3). The script is the in-artifact
+half of the comment interaction layer (source:
+`src-tauri/assets/bridge.js`, inlined via `artifact_protocol::BRIDGE_TAG`);
+the protocol it speaks is specified in [Bridge protocol](#bridge-protocol)
+below. It defines the reserved global
+`window.__cfyBridge = Object.freeze({ v: 1 })` and injects one
+zero-specificity `<style data-cfy-bridge="style">` element (hover
+affordances + highlight styles, all `:where()`-wrapped so artifact CSS
+always wins). Artifacts must not rely on the bridge existing (spec §1/§3):
+the same file opens bridge-less in a plain browser.
+
+## Bridge protocol
+
+The postMessage protocol between the app shell and the injected bridge
+script inside the artifact iframe (PRD §5.4). Shell counterpart:
+`src/lib/bridge.ts` (the only module that may talk to the frame); bridge
+script: `src-tauri/assets/bridge.js`. Comment UI (popover, sidebar) rides on
+this seam — beads `conceptify-94m.3/4/5/6`.
+
+**Envelope.** Every message, both directions, is a plain object carrying
+`cfy: 1` (protocol version) and a `type` string, plus type-specific fields.
+Receivers on both sides ignore messages without the `cfy: 1` envelope and
+silently drop unknown `type`s (forward compatibility; the shell logs them at
+debug level). A breaking protocol change bumps `cfy`.
+
+**Origin / source validation.** The artifact frame is opaque-origin
+(sandboxed, cross-scheme), so:
+
+- The **shell** accepts a message only when `event.origin === "null"` (an
+  opaque origin serializes as the string `"null"`) **and** `event.source`
+  is the registered viewer iframe's `contentWindow`.
+- The **bridge** accepts a command only when `event.source ===
+  window.parent`.
+- Both sides must post with `targetOrigin "*"` — an opaque origin cannot be
+  named. Nothing sensitive ever rides the channel in either direction:
+  artifact→shell carries only anchors/quotes/rects, shell→artifact only
+  anchors/keys.
+
+**Trust model (S2 — containment, not adversarial).** Artifact JS lives in
+the same frame as the bridge and *can* post protocol-shaped messages to the
+shell (spoofing the bridge). This is accepted by the threat model: the shell
+treats every inbound message as untrusted input (shape-validated, dropped if
+malformed) and nothing a spoofed message triggers exceeds what the user
+could do by hand in the UI. Artifact JS cannot, however, spoof
+shell→artifact *commands* (its `event.source` is its own window, not
+`window.parent`).
+
+### Conventions
+
+- **Anchors** are exactly the FR-4.4 anchor objects documented under
+  [The anchor model](#the-anchor-model-fr-44) — snake_case, `v: 1`. The
+  bridge emits them capture-ready; the shell adds `thread_id`,
+  `artifact_version`, and `body` when creating the comment.
+- **Text offsets** (`start`/`end` in `text` anchors — this is the precise
+  meaning of the anchor model's "normalized text content"): UTF-16
+  code-unit indices into the element's **visible text** — the concatenation
+  of its `Text` node data in document order, **excluding** text inside
+  `script`, `style`, `noscript`, and `template` subtrees, with **no
+  whitespace normalization**. Excluding script/style keeps offsets stable
+  against inline-JS/CSS churn (and against the injected bridge itself).
+  Re-attachment (`conceptify-94m.7`) must measure identically.
+- **Quotes**: `text`-anchor quotes are raw visible-text slices
+  (`exact` = the selection verbatim; `prefix`/`suffix` = up to 32 chars of
+  *document-wide* visible text on either side, omitted when empty at a
+  document edge). `element`-anchor quotes are whitespace-collapsed +
+  trimmed element text, omitted when empty (purely graphical node) or
+  longer than 300 chars — they are re-attachment hints, not exact-match
+  slices.
+- **Rects** are `{x, y, width, height}` in the **iframe's viewport
+  coordinate space** (CSS px, `getBoundingClientRect` values at send time).
+  To position shell UI, add the iframe element's own bounding rect; rects
+  go stale when the artifact scrolls (the popover should dismiss or
+  re-request on scroll/`selection_cleared`).
+
+### Artifact → shell
+
+| `type` | Payload | Meaning |
+|---|---|---|
+| `ready` | — | The bridge booted. Sent once per **document load** — including every iframe reload (version switch, live refresh), which wipes all decorations. Consumers must (re)apply highlights on every `ready`; `bridge.ts` queues commands sent before the first `ready` of an attachment. |
+| `selection` | `anchor` (a `text` anchor), `rect` (selection bounding rect) | A non-empty text selection settled (debounced ~180 ms). `cfy_id`/`start`/`end` are present when the selection has a `data-cfy-id` ancestor; `quote` always is. |
+| `selection_cleared` | — | The previously reported selection collapsed/vanished (dismiss the popover). |
+| `element_click` | `anchor` (an `element` anchor), `rect` (element bounding rect) | Click on a `data-cfy-id`-bearing element (nearest such ancestor of the click target). Suppressed for clicks that end a text selection and for clicks on interactive elements (`a[href]`, `button`, form controls, `summary`, `label`, `[contenteditable]`). |
+
+### Shell → artifact
+
+| `type` | Payload | Meaning |
+|---|---|---|
+| `set_highlights` | `highlights`: array of `{key, anchor}` (`key` = comment id) | **Full replacement** of the decoration set (`[]` clears). Element anchors get an outline on the resolved element; text anchors are wrapped in inline `<span data-cfy-hl="text">` spans via offsets (verified against the quote), falling back to a document-wide quote search, then to outlining the `cfy_id` host. Unresolvable anchors are skipped (flagging them `moved` is `conceptify-94m.7`). Decorations are non-destructive and fully reverted on the next `set_highlights`. |
+| `scroll_to_anchor` | `anchor`, optional `key` | Smooth-scroll the anchored element/range into view (`block: "center"`) with a brief attention pulse. When `key` matches a live decoration the pulse lands exactly on it; otherwise the anchor is resolved fresh. |
+
+### Hover affordance (v1 decision)
+
+Commentable elements (`[data-cfy-id]`) always show a subtle dashed-outline
+hover affordance — there is **no** "commenting enabled" toggle message in
+v1. Rationale: commenting is always available in the viewer, the affordance
+is zero-specificity (any artifact rule overrides it), and it doubles as
+discoverability for click-to-comment. If a mode toggle is ever needed, add a
+`set_mode` shell→artifact message rather than overloading an existing one.
+
+### Reserved DOM footprint
+
+Everything the bridge touches stays inside the reserved `data-cfy-*` /
+`__cfy*` namespaces (artifact-spec §1): the `data-cfy-bridge` script/style
+markers, `data-cfy-hl` / `data-cfy-hl-key` decoration attributes,
+`data-cfy-pulse` for the scroll pulse, and the `cfy-pulse` keyframes name.
+Text-node splits made while wrapping highlight spans are re-merged
+(`Node.normalize()`) when the decoration is removed.
 
 ### Errors
 
