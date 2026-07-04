@@ -285,6 +285,129 @@ Each warning is printed as `warning: <code>: <message>` (agent-visible).
 
 ---
 
+### `conceptify get-context --thread <id>`
+
+Assemble a thread's **run context** for a headless follow-up (PRD §5.2, §5.5;
+maps to `GET /api/v1/threads/:id/context`). One round-trip returns everything an
+agent needs to answer the thread's open comments without touching the DB: the
+question, the latest artifact's path on disk, the project root (the agent's
+`cwd`), and each open comment with its anchor. This is the context Conceptify
+assembles into the follow-up prompt.
+
+**Output (stdout):**
+
+```json
+{
+  "threadId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "title": "How does OAuth work?",
+  "question": "Explain the OAuth 2.0 authorization code flow.",
+  "status": "ready",
+  "slug": "how-does-oauth-work",
+  "projectId": "550e8400-e29b-41d4-a716-446655440000",
+  "projectName": "myrepo",
+  "projectRoot": "/Users/chris/code/myrepo",
+  "artifactVersion": 2,
+  "artifactPath": "/Users/chris/Documents/conceptify/artifacts/550e8400-…/threads/how-does-oauth-work/artifact.v2.html",
+  "openComments": [
+    {
+      "id": "b3f1…",
+      "threadId": "7c9e6679-…",
+      "artifactVersion": 1,
+      "anchor": { "v": 1, "type": "text", "cfy_id": "sec-walkthrough", "start": 142, "end": 210, "quote": { "exact": "the token is refreshed here" } },
+      "body": "why is the token refreshed here?",
+      "status": "open",
+      "answerHtml": null,
+      "anchorState": "anchored",
+      "createdAt": "2026-07-04T12:34:56.789Z",
+      "resolvedAt": null
+    }
+  ]
+}
+```
+
+`artifactVersion` / `artifactPath` are `null` when the thread has no artifact yet.
+`openComments` contains only comments still in the `open` state.
+
+**Anchor passthrough:** top-level keys are camelCase (like every command), **but
+each comment's `anchor` object is passed through verbatim** — its inner keys stay
+`snake_case` (`cfy_id`, `quote`, …). The anchor is a stored cross-layer contract
+(bridge ⇄ DB ⇄ re-attachment ⇄ agent, see docs/api.md → *The anchor model*) and
+must round-trip byte-for-byte; the CLI never rewrites it.
+
+**Errors (stderr, exit 1):**
+
+- `Error: get-context requires --thread <id>` — `--thread` missing.
+- `Error: thread not found: <id> (HTTP 404)` — unknown thread.
+
+---
+
+### `conceptify list-comments --thread <id> [--status open|answered|applied]`
+
+List a thread's comments with anchors (PRD §5.2; maps to
+`GET /api/v1/comments`). Optionally filter by `--status`. Output is a bare JSON
+**array** — each comment is the same camelCase shape as `get-context`'s
+`openComments`, with the `anchor` passed through verbatim.
+
+**Output (stdout):**
+
+```json
+[
+  {
+    "id": "b3f1…",
+    "threadId": "7c9e6679-…",
+    "artifactVersion": 1,
+    "anchor": { "v": 1, "type": "element", "cfy_id": "fig-auth-flow.token-service", "quote": { "exact": "Token Service" } },
+    "body": "why does this node retry?",
+    "status": "answered",
+    "answerHtml": "<p>Because the upstream can return 503…</p>",
+    "anchorState": "anchored",
+    "createdAt": "2026-07-04T12:34:56.789Z",
+    "resolvedAt": "2026-07-04T12:40:01.234Z"
+  }
+]
+```
+
+An unknown thread returns an empty array (`[]`), not an error.
+
+**Errors (stderr, exit 1):**
+
+- `Error: list-comments requires --thread <id>` — `--thread` missing.
+- `Error: invalid status filter "<x>" (expected open|answered|applied) (HTTP 400)`
+  — an unrecognized `--status` value.
+
+---
+
+### `conceptify resolve-comment --id <id> --answer-file <path> [--applied]`
+
+Answer (or, with `--applied`, apply) a comment (PRD §5.2, FR-4.6/4.7; maps to
+`PATCH /api/v1/comments/:id`). The answer is read from `--answer-file` on the CLI
+side and stored as the comment's `answer_html`, advancing its status to
+`answered` (default) or `applied` (with `--applied`). The sidebar updates live
+via the `comment-updated` event the server emits.
+
+The answer file may be an **HTML fragment or markdown** — it is sent verbatim;
+the sidebar renders it. Use `--applied` for the *apply-to-artifact* flow, where
+the run also saved a new artifact version and is resolving the comment as
+applied in one shot (`open → applied` is a legal transition).
+
+**Output (stdout):**
+
+```json
+{ "ok": true, "id": "b3f1…", "status": "answered" }
+```
+
+**Errors (stderr, exit 1):**
+
+- `Error: resolve-comment requires --id <id> --answer-file <path> [--applied]` — a
+  required flag is missing.
+- `Error: failed to read <path>: ...` — the answer file doesn't exist or can't be
+  read.
+- `Error: comment not found: <id> (HTTP 404)` — unknown comment id.
+- `Error: illegal status transition: applied -> answered (HTTP 409)` — the status
+  would regress (a comment may only advance `open → answered → applied`).
+
+---
+
 ## Output contract
 
 All commands print stable, parseable JSON to **stdout** on success and
@@ -310,12 +433,8 @@ Shared types (e.g., `HealthResponse`) live in `conceptify-types` and are used by
 
 ---
 
-## Future commands
+## Command coverage
 
-The following commands are specified in PRD §5.2 but not yet implemented:
-
-- `conceptify get-context --thread <id>`
-- `conceptify list-comments --thread <id> [--status open]`
-- `conceptify resolve-comment --id <id> --answer-file <path> [--applied]`
-
-These will be added in later milestones as the API surface expands.
+Every command in the PRD §5.2 table is now implemented: `status`, `doctor`,
+`ensure-project`, `create-thread`, `open`, `save-artifact`, `get-context`,
+`list-comments`, and `resolve-comment`.

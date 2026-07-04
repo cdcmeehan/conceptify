@@ -69,7 +69,8 @@ as `comment-resolved`: one event covers all comment mutations (consistent with
 `thread_id` in the payload.
 
 Read-only routes (`GET /api/v1/debug/db-check`, `GET /api/v1/projects`,
-`GET /api/v1/threads`, `GET /api/v1/comments`) emit no events.
+`GET /api/v1/threads`, `GET /api/v1/threads/:id/context`, `GET /api/v1/comments`)
+emit no events.
 
 ## Endpoints
 
@@ -363,6 +364,74 @@ An unknown `project_id` returns an empty `threads` array rather than a 404.
 
 Errors: `401 Unauthorized` if bearer token missing/wrong; `500` on database
 error.
+
+---
+
+### `GET /api/v1/threads/:id/context`
+
+Authenticated. **get-context** (PRD §5.2, §5.5): the one-round-trip aggregate a
+headless follow-up run needs to answer a thread's open comments without touching
+the DB directly — the thread, its owning project, the latest artifact on disk,
+and the open comments (with anchors). The `conceptify get-context` CLI wraps
+this; internal server-side prompt assembly (the headless spawner) reuses the
+same aggregation.
+
+Path parameter:
+- `id` (required): the thread to assemble context for.
+
+Response `200 OK`:
+
+```json
+{
+  "thread": {
+    "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+    "title": "How does OAuth work?",
+    "initial_question": "Explain the OAuth 2.0 authorization code flow.",
+    "status": "ready",
+    "slug": "how-does-oauth-work"
+  },
+  "project": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "name": "myrepo",
+    "root_path": "/Users/chris/code/myrepo"
+  },
+  "latest_artifact": {
+    "version": 2,
+    "file_path": "/Users/chris/Documents/conceptify/artifacts/550e8400-…/threads/how-does-oauth-work/artifact.v2.html"
+  },
+  "open_comments": [
+    {
+      "id": "b3f1…",
+      "thread_id": "7c9e6679-…",
+      "artifact_version": 1,
+      "anchor": { "v": 1, "type": "text", "cfy_id": "sec-walkthrough", "start": 142, "end": 210, "quote": { "exact": "the token is refreshed here" } },
+      "body": "why is the token refreshed here?",
+      "status": "open",
+      "answer_html": null,
+      "anchor_state": "anchored",
+      "created_at": "2026-07-04T12:34:56.789Z",
+      "resolved_at": null
+    }
+  ]
+}
+```
+
+- `latest_artifact` is the highest artifact version on disk (`file_path` is the
+  absolute path of that immutable `artifact.vN.html`), or **`null`** when the
+  thread has no artifact yet (still `generating`).
+- `open_comments` lists only comments still in the `open` state, oldest first —
+  the questions the run must answer. Each is the full comment shape (identical to
+  `GET /api/v1/comments`), so its `anchor` is carried **verbatim** (the stored
+  snake_case contract — see [The anchor model](#the-anchor-model-fr-44)).
+
+Response `404 Not Found` (unknown thread id):
+
+```json
+{ "error": "thread not found: <id>" }
+```
+
+Errors: `401 Unauthorized` if bearer token missing/wrong; `404` if the thread
+doesn't exist; `500` on database error.
 
 ---
 

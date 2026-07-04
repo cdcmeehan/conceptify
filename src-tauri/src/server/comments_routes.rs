@@ -30,8 +30,10 @@ pub fn router<R: tauri::Runtime>() -> Router<ApiState<R>> {
         .route("/comments/{id}", axum::routing::patch(update_comment))
 }
 
-/// Map a domain `Comment` to its API shape.
-fn to_response(c: Comment) -> CommentResponse {
+/// Map a domain `Comment` to its API shape. `pub(super)` so the thread-context
+/// route (`threads_routes`) can reuse the exact same mapping for the aggregate's
+/// `open_comments`.
+pub(super) fn to_response(c: Comment) -> CommentResponse {
     CommentResponse {
         id: c.id,
         thread_id: c.thread_id,

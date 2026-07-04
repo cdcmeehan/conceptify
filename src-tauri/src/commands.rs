@@ -701,3 +701,43 @@ mod tests {
         cleanup(&db_path, &root);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Agent settings (PRD §5.5, FR-7.1–7.4) — bead conceptify-b12.1.
+//
+// Thin command wrappers over the `crate::settings` domain module (which owns
+// the storage, defaults, and resolution logic). The M6 Settings UI
+// (`conceptify-959.4`) is the caller. Types are fully qualified so this block
+// stays self-contained (appended at EOF to avoid colliding with concurrent
+// edits higher in this file). Domain logic + substitution safety are tested in
+// `crate::settings`; these wrappers only marshal the DB handle and stringify
+// errors, following the pattern of the commands above.
+// ---------------------------------------------------------------------------
+
+/// Read the agent settings (stored overrides merged over code defaults, or pure
+/// defaults when nothing has been saved — FR-7.4 zero-config).
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_agent_settings(db: State<DbHandle>) -> Result<crate::settings::AgentSettings, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::settings::get_settings(&conn).map_err(|e| e.to_string())
+}
+
+/// Persist the agent settings and emit `settings-changed` so any live view (or
+/// a future settings-aware surface) refreshes — consistent with the app's
+/// event-driven live-update pattern. Validation (a `default_adapter` that names
+/// an existing adapter) happens in the domain layer before the write, so a
+/// broken config is rejected rather than stored.
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_agent_settings(
+    app: tauri::AppHandle,
+    db: State<DbHandle>,
+    settings: crate::settings::AgentSettings,
+) -> Result<(), String> {
+    {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        crate::settings::update_settings(&conn, &settings).map_err(|e| e.to_string())?;
+    }
+    use tauri::Emitter;
+    let _ = app.emit("settings-changed", &());
+    Ok(())
+}

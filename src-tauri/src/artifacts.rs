@@ -162,6 +162,40 @@ pub fn latest_copy_path(root: &Path, project_id: &str, slug: &str) -> PathBuf {
     thread_dir(root, project_id, slug).join("artifact.html")
 }
 
+/// The latest (highest-version) artifact stored for a thread. Returns the
+/// version and the absolute path of its immutable `artifact.vN.html` file, or
+/// `None` when the thread has no artifact yet (still `generating`).
+///
+/// Read helper composed by the thread-context aggregation (`crate::context`,
+/// §5.2 `get-context`); the path comes from the DB (`file_path`), which
+/// `save_artifact` wrote as the absolute versioned path.
+pub fn latest_artifact(
+    conn: &Connection,
+    thread_id: &str,
+) -> Result<Option<LatestArtifact>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT version, file_path FROM artifacts
+         WHERE thread_id = ?1
+         ORDER BY version DESC
+         LIMIT 1",
+        [thread_id],
+        |row| {
+            Ok(LatestArtifact {
+                version: row.get(0)?,
+                file_path: row.get(1)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// The latest artifact's version and on-disk path (see `latest_artifact`).
+#[derive(Debug, Clone)]
+pub struct LatestArtifact {
+    pub version: i64,
+    pub file_path: String,
+}
+
 /// Write `bytes` to `path` atomically: full write + fsync to a `.tmp` sibling
 /// in the same directory, then `rename` over the destination (atomic on the
 /// same filesystem, per N4). A crash mid-write leaves only the `.tmp` file;

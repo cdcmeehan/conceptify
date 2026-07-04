@@ -85,6 +85,9 @@ pub enum ThreadError {
     #[error("project not found: {0}")]
     ProjectNotFound(String),
 
+    #[error("thread not found: {0}")]
+    ThreadNotFound(String),
+
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
 }
@@ -141,8 +144,16 @@ pub fn create_thread(
     get_thread(conn, &id)
 }
 
-/// Fetch a single thread by id.
+/// Fetch a single thread by id, erroring if it doesn't exist (used on the
+/// create path, where the row is guaranteed present after the insert).
 fn get_thread(conn: &Connection, id: &str) -> Result<Thread, ThreadError> {
+    get_thread_opt(conn, id)?.ok_or_else(|| ThreadError::ThreadNotFound(id.to_owned()))
+}
+
+/// Fetch a single thread by id, or `None` if absent. The read primitive behind
+/// `get_thread` and the thread-context aggregation (`crate::context`), where an
+/// unknown id must surface as a clean 404 rather than a rusqlite no-rows error.
+pub fn get_thread_opt(conn: &Connection, id: &str) -> Result<Option<Thread>, ThreadError> {
     conn.query_row(
         "SELECT id, project_id, title, slug, initial_question, status, created_at, updated_at
          FROM threads WHERE id = ?1",
@@ -160,6 +171,7 @@ fn get_thread(conn: &Connection, id: &str) -> Result<Thread, ThreadError> {
             })
         },
     )
+    .optional()
     .map_err(Into::into)
 }
 

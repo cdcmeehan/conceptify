@@ -19,8 +19,9 @@ use serde::Serialize;
 use serde_json::json;
 
 use conceptify_types::{
-    CreateThreadRequest, CreateThreadResponse, EnsureProjectRequest, EnsureProjectResponse,
-    HealthResponse, OpenRequest, OpenResponse, SaveArtifactErrorResponse, SaveArtifactResponse,
+    CommentResponse, CreateThreadRequest, CreateThreadResponse, EnsureProjectRequest,
+    EnsureProjectResponse, HealthResponse, ListCommentsResponse, OpenRequest, OpenResponse,
+    SaveArtifactErrorResponse, SaveArtifactResponse, ThreadContextResponse, UpdateCommentRequest,
 };
 
 const DEFAULT_PORT: u16 = 4477;
@@ -37,7 +38,10 @@ Commands:
   ensure-project --dir <path> [--name <name>]         find-or-create a project by directory
   create-thread  --project <id> --title <t> --question <q>   create a thread
   open           --thread <id> | --project <id>       focus the app on a project/thread
-  save-artifact  --thread <id> --file <path>          save an artifact file to a thread";
+  save-artifact  --thread <id> --file <path>          save an artifact file to a thread
+  get-context    --thread <id>                         run context for a headless follow-up (JSON)
+  list-comments  --thread <id> [--status open|answered|applied]   list a thread's comments (JSON)
+  resolve-comment --id <id> --answer-file <path> [--applied]      answer/apply a comment";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -57,6 +61,9 @@ fn main() -> ExitCode {
         "create-thread" => cmd_create_thread(rest),
         "open" => cmd_open(rest),
         "save-artifact" => cmd_save_artifact(rest),
+        "get-context" => cmd_get_context(rest),
+        "list-comments" => cmd_list_comments(rest),
+        "resolve-comment" => cmd_resolve_comment(rest),
         _ => {
             eprintln!("Unknown command: {}", command);
             eprintln!("{USAGE}");
@@ -242,6 +249,71 @@ where
                 .unwrap_or_else(|| format!("HTTP {}", code));
             Err(format!("{} (HTTP {})", msg, code))
         }
+        Err(ureq::Error::Transport(e)) => Err(format!("failed to reach app: {}", e)),
+    }
+}
+
+/// Extract the server's `{"error": "..."}` message from an HTTP error
+/// response, falling back to a bare `HTTP <code>` when the body isn't the
+/// documented shape. Suffixed with the status so the agent can branch on it.
+fn status_error(code: u16, response: ureq::Response) -> String {
+    let msg = response
+        .into_json::<serde_json::Value>()
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(|e| e.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("HTTP {}", code));
+    format!("{} (HTTP {})", msg, code)
+}
+
+/// GET an authenticated `/api/v1/*` endpoint and deserialize the JSON response.
+/// Reads the bearer token (written by the running server) and attaches it as
+/// `Authorization: Bearer <token>`. A non-2xx status surfaces the server's
+/// `{"error": …}` message verbatim (see `status_error`).
+fn authed_get<R>(port: u16, path: &str) -> Result<R, String>
+where
+    R: DeserializeOwned,
+{
+    let token = read_token()
+        .map_err(|e| format!("failed to read auth token (has the app run once?): {}", e))?;
+    let url = format!("http://127.0.0.1:{}{}", port, path);
+
+    match ureq::get(&url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .timeout(REQUEST_TIMEOUT)
+        .call()
+    {
+        Ok(response) => response
+            .into_json::<R>()
+            .map_err(|e| format!("invalid JSON from {}: {}", path, e)),
+        Err(ureq::Error::Status(code, response)) => Err(status_error(code, response)),
+        Err(ureq::Error::Transport(e)) => Err(format!("failed to reach app: {}", e)),
+    }
+}
+
+/// PATCH an authenticated `/api/v1/*` endpoint with a JSON body and deserialize
+/// the JSON response. Used by `resolve-comment`; a `404` (unknown comment) or
+/// `409` (illegal status transition) surfaces the server's message verbatim.
+fn authed_patch<B, R>(port: u16, path: &str, body: &B) -> Result<R, String>
+where
+    B: Serialize,
+    R: DeserializeOwned,
+{
+    let token = read_token()
+        .map_err(|e| format!("failed to read auth token (has the app run once?): {}", e))?;
+    let url = format!("http://127.0.0.1:{}{}", port, path);
+
+    match ureq::request("PATCH", &url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .timeout(REQUEST_TIMEOUT)
+        .send_json(body)
+    {
+        Ok(response) => response
+            .into_json::<R>()
+            .map_err(|e| format!("invalid JSON from {}: {}", path, e)),
+        Err(ureq::Error::Status(code, response)) => Err(status_error(code, response)),
         Err(ureq::Error::Transport(e)) => Err(format!("failed to reach app: {}", e)),
     }
 }
@@ -522,6 +594,178 @@ fn cmd_open(args: &[String]) -> ExitCode {
 
     match authed_post::<_, OpenResponse>(port, "/api/v1/open", &req) {
         Ok(resp) => emit(&open_output(&resp)),
+        Err(e) => fail(e),
+    }
+}
+
+/// Shape one API comment into the CLI's stable camelCase form. The `anchor` is
+/// the single deliberate exception: it is passed through **verbatim** (stored
+/// snake_case JSON), because the anchor is a documented cross-layer contract
+/// (bridge ⇄ DB ⇄ re-attachment ⇄ agent) that must round-trip byte-for-byte.
+/// Shared by `get-context` (its `openComments`) and `list-comments`.
+fn comment_output(c: &CommentResponse) -> serde_json::Value {
+    json!({
+        "id": c.id,
+        "threadId": c.thread_id,
+        "artifactVersion": c.artifact_version,
+        "anchor": c.anchor,
+        "body": c.body,
+        "status": c.status,
+        "answerHtml": c.answer_html,
+        "anchorState": c.anchor_state,
+        "createdAt": c.created_at,
+        "resolvedAt": c.resolved_at,
+    })
+}
+
+/// Shape the context aggregate into the CLI's camelCase output contract (§5.2):
+/// the run-specific context a headless follow-up assembles into its prompt —
+/// question, artifact path, project root, and the open comments to answer.
+/// `artifactVersion`/`artifactPath` are `null` when the thread has no artifact
+/// yet. Anchors inside `openComments` stay verbatim (see `comment_output`).
+fn get_context_output(resp: &ThreadContextResponse) -> serde_json::Value {
+    json!({
+        "threadId": resp.thread.id,
+        "title": resp.thread.title,
+        "question": resp.thread.initial_question,
+        "status": resp.thread.status,
+        "slug": resp.thread.slug,
+        "projectId": resp.project.id,
+        "projectName": resp.project.name,
+        "projectRoot": resp.project.root_path,
+        "artifactVersion": resp.latest_artifact.as_ref().map(|a| a.version),
+        "artifactPath": resp.latest_artifact.as_ref().map(|a| a.file_path.clone()),
+        "openComments": resp
+            .open_comments
+            .iter()
+            .map(comment_output)
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// `conceptify get-context --thread <id>` — the one-round-trip run context
+/// (thread + question + artifact path + open comments) a headless follow-up
+/// needs (PRD §5.2, §5.5; maps to `GET /api/v1/threads/:id/context`).
+fn cmd_get_context(args: &[String]) -> ExitCode {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => return fail(e),
+    };
+
+    let thread = match flags.get("thread") {
+        Some(t) => t,
+        None => return fail("get-context requires --thread <id>"),
+    };
+
+    let port = match ensure_app_healthy() {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+
+    let path = format!("/api/v1/threads/{}/context", thread);
+    match authed_get::<ThreadContextResponse>(port, &path) {
+        Ok(resp) => emit(&get_context_output(&resp)),
+        Err(e) => fail(e),
+    }
+}
+
+/// Shape the list-comments response into a bare JSON array (each comment
+/// camelCase, anchors verbatim).
+fn list_comments_output(resp: &ListCommentsResponse) -> serde_json::Value {
+    serde_json::Value::Array(resp.comments.iter().map(comment_output).collect())
+}
+
+/// `conceptify list-comments --thread <id> [--status open|answered|applied]` —
+/// list a thread's comments with anchors (PRD §5.2; maps to
+/// `GET /api/v1/comments`). An invalid `--status` is rejected by the server.
+fn cmd_list_comments(args: &[String]) -> ExitCode {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => return fail(e),
+    };
+
+    let thread = match flags.get("thread") {
+        Some(t) => t,
+        None => return fail("list-comments requires --thread <id>"),
+    };
+
+    // thread ids are UUIDs and status is a known enum, so neither needs URL
+    // encoding; the server strictly validates the status value.
+    let mut path = format!("/api/v1/comments?thread_id={}", thread);
+    if let Some(status) = flags.get("status") {
+        path.push_str("&status=");
+        path.push_str(status);
+    }
+
+    let port = match ensure_app_healthy() {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+
+    match authed_get::<ListCommentsResponse>(port, &path) {
+        Ok(resp) => emit(&list_comments_output(&resp)),
+        Err(e) => fail(e),
+    }
+}
+
+/// Parse `resolve-comment`'s args: the valueless `--applied` boolean is split
+/// off first (it may appear anywhere), then the remaining `--key value` pairs
+/// are parsed. Returns `(id, answer_file, applied)`.
+fn resolve_flags(args: &[String]) -> Result<(String, String, bool), String> {
+    let applied = args.iter().any(|a| a == "--applied");
+    let rest: Vec<String> = args
+        .iter()
+        .filter(|a| a.as_str() != "--applied")
+        .cloned()
+        .collect();
+    let flags = parse_flags(&rest)?;
+
+    match (flags.get("id"), flags.get("answer-file")) {
+        (Some(id), Some(file)) => Ok((id.clone(), file.clone(), applied)),
+        _ => Err("resolve-comment requires --id <id> --answer-file <path> [--applied]".to_string()),
+    }
+}
+
+/// Shape a resolved comment into the CLI's confirmation output (§5.2).
+fn resolve_comment_output(c: &CommentResponse) -> serde_json::Value {
+    json!({ "ok": true, "id": c.id, "status": c.status })
+}
+
+/// `conceptify resolve-comment --id <id> --answer-file <path> [--applied]` —
+/// answer (or, with `--applied`, apply) a comment (PRD §5.2, FR-4.6/4.7; maps
+/// to `PATCH /api/v1/comments/:id`). Reads the answer fragment from the file on
+/// the CLI side and stores it as `answer_html`, advancing the comment to
+/// `answered` (default) or `applied`. The sidebar updates live via the
+/// `comment-updated` event the server emits.
+fn cmd_resolve_comment(args: &[String]) -> ExitCode {
+    let (id, answer_file, applied) = match resolve_flags(args) {
+        Ok(parts) => parts,
+        Err(e) => return fail(e),
+    };
+
+    // Read the answer fragment (HTML or markdown) on the CLI side, verbatim —
+    // the sidebar renders it. A missing/unreadable file fails before any HTTP.
+    let answer = match fs::read_to_string(&answer_file) {
+        Ok(s) => s,
+        Err(e) => return fail(format!("failed to read {}: {}", answer_file, e)),
+    };
+
+    let status = if applied { "applied" } else { "answered" };
+
+    let port = match ensure_app_healthy() {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+
+    let req = UpdateCommentRequest {
+        status: Some(status.to_string()),
+        answer_html: Some(answer),
+        anchor_state: None,
+    };
+
+    let path = format!("/api/v1/comments/{}", id);
+    match authed_patch::<_, CommentResponse>(port, &path, &req) {
+        Ok(resp) => emit(&resolve_comment_output(&resp)),
         Err(e) => fail(e),
     }
 }
@@ -954,5 +1198,151 @@ mod tests {
         assert_eq!(check.ok, false);
         assert_eq!(check.detail, "bar");
         assert_eq!(check.hint, Some("baz".to_string()));
+    }
+
+    fn text_anchor() -> serde_json::Value {
+        json!({
+            "v": 1,
+            "type": "text",
+            "cfy_id": "sec-walkthrough",
+            "start": 142,
+            "end": 210,
+            "quote": { "exact": "the token is refreshed here", "prefix": "why ", "suffix": " each time" }
+        })
+    }
+
+    fn open_comment() -> CommentResponse {
+        CommentResponse {
+            id: s("c-1"),
+            thread_id: s("thr-9"),
+            artifact_version: 1,
+            anchor: Some(text_anchor()),
+            body: s("why refresh here?"),
+            status: s("open"),
+            answer_html: None,
+            anchor_state: s("anchored"),
+            created_at: s("2026-07-04T00:00:00.000Z"),
+            resolved_at: None,
+        }
+    }
+
+    #[test]
+    fn comment_output_is_camelcase_with_verbatim_snakecase_anchor() {
+        let out = comment_output(&open_comment());
+        // Top-level keys are camelCase like every other CLI command.
+        assert_eq!(out["id"], "c-1");
+        assert_eq!(out["threadId"], "thr-9");
+        assert_eq!(out["artifactVersion"], 1);
+        assert_eq!(out["anchorState"], "anchored");
+        assert_eq!(out["answerHtml"], serde_json::Value::Null);
+        assert_eq!(out["resolvedAt"], serde_json::Value::Null);
+        // The anchor is passed through verbatim — its keys stay snake_case, so
+        // the agent sees the exact stored contract.
+        assert_eq!(out["anchor"], text_anchor());
+        assert_eq!(out["anchor"]["cfy_id"], "sec-walkthrough");
+        assert!(out.get("anchor_state").is_none(), "no snake_case top-level leakage");
+    }
+
+    fn context_with_artifact() -> ThreadContextResponse {
+        use conceptify_types::{ThreadContextArtifact, ThreadContextProject, ThreadContextThread};
+        ThreadContextResponse {
+            thread: ThreadContextThread {
+                id: s("thr-9"),
+                title: s("How does OAuth work?"),
+                initial_question: s("Explain the OAuth 2.0 authorization code flow."),
+                status: s("ready"),
+                slug: s("how-does-oauth-work"),
+            },
+            project: ThreadContextProject {
+                id: s("proj-1"),
+                name: s("myrepo"),
+                root_path: s("/Users/chris/code/myrepo"),
+            },
+            latest_artifact: Some(ThreadContextArtifact {
+                version: 2,
+                file_path: s("/Users/chris/Documents/conceptify/artifacts/proj-1/threads/how-does-oauth-work/artifact.v2.html"),
+            }),
+            open_comments: vec![open_comment()],
+        }
+    }
+
+    #[test]
+    fn get_context_output_exposes_prompt_fields_and_verbatim_anchors() {
+        let out = get_context_output(&context_with_artifact());
+        assert_eq!(out["threadId"], "thr-9");
+        assert_eq!(out["question"], "Explain the OAuth 2.0 authorization code flow.");
+        assert_eq!(out["projectRoot"], "/Users/chris/code/myrepo");
+        assert_eq!(out["artifactVersion"], 2);
+        assert!(out["artifactPath"]
+            .as_str()
+            .unwrap()
+            .ends_with("artifact.v2.html"));
+        let open = out["openComments"].as_array().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0]["id"], "c-1");
+        // Anchor round-trips verbatim through the context shaper too.
+        assert_eq!(open[0]["anchor"]["cfy_id"], "sec-walkthrough");
+    }
+
+    #[test]
+    fn get_context_output_null_artifact_when_thread_has_none() {
+        let mut ctx = context_with_artifact();
+        ctx.latest_artifact = None;
+        ctx.open_comments.clear();
+        let out = get_context_output(&ctx);
+        assert_eq!(out["artifactVersion"], serde_json::Value::Null);
+        assert_eq!(out["artifactPath"], serde_json::Value::Null);
+        assert_eq!(out["openComments"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn list_comments_output_is_a_bare_array() {
+        let resp = ListCommentsResponse {
+            comments: vec![open_comment()],
+        };
+        let out = list_comments_output(&resp);
+        let arr = out.as_array().expect("list-comments emits a JSON array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "c-1");
+        assert_eq!(arr[0]["anchor"]["cfy_id"], "sec-walkthrough");
+    }
+
+    #[test]
+    fn resolve_comment_output_is_stable_contract() {
+        let mut c = open_comment();
+        c.status = s("applied");
+        let out = resolve_comment_output(&c);
+        assert_eq!(out, json!({ "ok": true, "id": "c-1", "status": "applied" }));
+    }
+
+    #[test]
+    fn resolve_flags_defaults_to_answered_without_applied() {
+        let args = vec![s("--id"), s("c-1"), s("--answer-file"), s("/tmp/a.html")];
+        let (id, file, applied) = resolve_flags(&args).unwrap();
+        assert_eq!(id, "c-1");
+        assert_eq!(file, "/tmp/a.html");
+        assert!(!applied);
+    }
+
+    #[test]
+    fn resolve_flags_accepts_applied_in_any_position() {
+        // Leading.
+        let args = vec![s("--applied"), s("--id"), s("c-1"), s("--answer-file"), s("/tmp/a.html")];
+        let (_, _, applied) = resolve_flags(&args).unwrap();
+        assert!(applied);
+        // Trailing.
+        let args = vec![s("--id"), s("c-1"), s("--answer-file"), s("/tmp/a.html"), s("--applied")];
+        let (id, file, applied) = resolve_flags(&args).unwrap();
+        assert_eq!(id, "c-1");
+        assert_eq!(file, "/tmp/a.html");
+        assert!(applied);
+    }
+
+    #[test]
+    fn resolve_flags_rejects_missing_required_flags() {
+        let err = resolve_flags(&[s("--id"), s("c-1")]).unwrap_err();
+        assert!(err.contains("resolve-comment requires"));
+        let err = resolve_flags(&[s("--answer-file"), s("/tmp/a.html")]).unwrap_err();
+        assert!(err.contains("resolve-comment requires"));
     }
 }

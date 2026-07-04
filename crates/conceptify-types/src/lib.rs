@@ -328,6 +328,55 @@ pub struct ListCommentsResponse {
     pub comments: Vec<CommentResponse>,
 }
 
+// Thread context API type (PRD §5.2 `get-context`, §5.5)
+//
+// The one-round-trip aggregate a headless follow-up run needs: the thread, its
+// project, the latest artifact on disk, and the open comments (anchors carried
+// verbatim). Serves both the `get-context` CLI and internal server-side prompt
+// assembly (bead `conceptify-b12.2`), so it lives in shared types.
+
+/// Response from `GET /api/v1/threads/:id/context`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadContextResponse {
+    pub thread: ThreadContextThread,
+    pub project: ThreadContextProject,
+    /// The highest artifact version on disk, or `null` when the thread has no
+    /// artifact yet (still `generating`).
+    pub latest_artifact: Option<ThreadContextArtifact>,
+    /// Comments still in the `open` state, oldest first — the questions the run
+    /// must answer. Each carries its `anchor` verbatim (see `Anchor`).
+    pub open_comments: Vec<CommentResponse>,
+}
+
+/// The thread fields a run needs for prompt assembly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadContextThread {
+    pub id: String,
+    pub title: String,
+    /// The question that seeded the thread's initial artifact.
+    pub initial_question: String,
+    /// One of `generating` | `ready` | `updating` | `error`.
+    pub status: String,
+    /// Filesystem-safe artifact-folder slug (§5.6).
+    pub slug: String,
+}
+
+/// The owning project's identity and on-disk root (the agent's `cwd`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadContextProject {
+    pub id: String,
+    pub name: String,
+    pub root_path: String,
+}
+
+/// The latest artifact version and the absolute path of its immutable
+/// `artifact.vN.html` file on disk (the file a run reads and edits).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadContextArtifact {
+    pub version: i64,
+    pub file_path: String,
+}
+
 /// Request to update a comment (PRD FR-4.6/4.7; drives the M5 `resolve-comment`
 /// CLI). Every field is optional — supply the subset to change; an empty body
 /// is rejected. `status` transitions are validated: status may only **advance**

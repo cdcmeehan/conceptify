@@ -2,9 +2,11 @@ mod artifact_protocol;
 mod artifacts;
 mod commands;
 mod comments;
+mod context;
 mod db;
 mod projects;
 mod server;
+mod settings;
 mod threads;
 
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -75,6 +77,8 @@ pub fn run() {
             commands::open_artifact_in_browser,
             commands::create_comment,
             commands::list_comments,
+            commands::get_agent_settings,
+            commands::set_agent_settings,
         ])
         .setup(|app| {
             // Opened and migrated before anything else touches it: both the

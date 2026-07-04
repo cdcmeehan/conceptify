@@ -28,3 +28,7 @@
 {"id":"int-ac89acec","kind":"field_change","created_at":"2026-07-04T23:02:51.427168Z","actor":"Chris","issue_id":"conceptify-94m.1","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-0d1089df","kind":"field_change","created_at":"2026-07-04T23:05:41.378046Z","actor":"Chris","issue_id":"conceptify-57l.5","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-82f7f9d8","kind":"field_change","created_at":"2026-07-04T23:05:41.658893Z","actor":"Chris","issue_id":"conceptify-bvr","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-c5bc3fb3","kind":"field_change","created_at":"2026-07-04T23:23:17.539997Z","actor":"Chris","issue_id":"conceptify-94m.3","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-6d745f8b","kind":"field_change","created_at":"2026-07-04T23:23:17.841239Z","actor":"Chris","issue_id":"conceptify-94m.4","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-06de230d","kind":"field_change","created_at":"2026-07-04T23:40:04.88232Z","actor":"Chris","issue_id":"conceptify-94m.5","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-9422e33e","kind":"field_change","created_at":"2026-07-04T23:40:05.17124Z","actor":"Chris","issue_id":"conceptify-94m.6","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
