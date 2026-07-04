@@ -514,6 +514,87 @@ database error.
 
 ---
 
+## The `artifact://` scheme (in-app viewer transport)
+
+Not an HTTP endpoint: a custom Tauri URI scheme
+(`register_asynchronous_uri_scheme_protocol`, PRD §5.4, §9 S2) that serves
+stored artifacts into the viewer's sandboxed iframe. Only reachable from
+inside the app's webviews — there is no network listener behind it.
+Implementation: `src-tauri/src/artifact_protocol.rs`.
+
+### URL contract
+
+```
+artifact://localhost/<thread-id>/<version>
+```
+
+- **`<thread-id>`** — the thread's DB id (UUID). Validated strictly:
+  `[A-Za-z0-9_-]{1,128}`. No percent-decoding is performed on this scheme;
+  ids never need encoding, and any `%`, `.`, `\`, or extra `/` in a segment
+  is a `400`.
+- **`<version>`** — one of:
+  - a bare decimal integer ≥ 1 (e.g. `…/3`): serves the immutable
+    `artifact.v3.html` for that thread. **Not** `v3` — no prefix.
+  - the literal lowercase **`latest`**: resolves the thread's highest
+    version **via the DB** (`MAX(version)` over `artifacts`) and serves that
+    versioned file. The `artifact.html` disk copy is deliberately not
+    served — files are written before the DB row commits (crash-safety
+    ordering, PRD N4), so the copy can momentarily be ahead of the DB; the
+    DB is the source of truth the version switcher and events read.
+- **GET only** (405 otherwise). One document per request — artifacts are
+  self-contained by spec, and subresource fetches through custom protocols
+  are unreliable in WKWebView anyway (Appendix A, wry #168): never point a
+  subresource (`<img src>`, etc.) at `artifact://`.
+
+The viewer (`conceptify-nsy.4`) should embed
+`<iframe src="artifact://localhost/<thread-id>/<version>"
+sandbox="allow-scripts">` — **no `allow-same-origin`** — and reload on
+`artifact-updated`, using the concrete `version` from the event payload.
+
+### Response headers
+
+Every response on the scheme — success or error page — carries:
+
+| Header | Value |
+|---|---|
+| `Content-Type` | `text/html; charset=utf-8` |
+| `Content-Security-Policy` | `default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline' https://cdn.jsdelivr.net; font-src data: https://cdn.jsdelivr.net; img-src data:; connect-src 'none'` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Cache-Control` | numeric version: `public, max-age=31536000, immutable` (write-once files); `latest` and all errors: `no-store` |
+
+The CSP is exactly the reference policy of
+[docs/artifact-spec.md](artifact-spec.md) §3 and stays in lockstep with the
+§7.1 pinned-CDN allowlist (single host, `cdn.jsdelivr.net`; `font-src`
+includes it for KaTeX). The load-bearing directive is `connect-src 'none'`:
+artifact JS can never reach this API (PRD §9 S2). Changing the policy means
+changing the spec first.
+
+### Bridge injection
+
+The handler splices one `<script data-cfy-bridge="stub">…</script>` tag into
+the served bytes immediately before the closing `</body>` (appended at the
+end if no close tag exists; idempotent). The on-disk file is **never
+modified** — opened directly in a browser it carries no Conceptify residue
+(G3). Until M4 (`conceptify-94m.1`) the script is a no-op stub that defines
+`window.__cfyBridge = Object.freeze({ stub: true })`; M4 replaces the stub's
+content in `artifact_protocol::BRIDGE_STUB` — injection point and mechanism
+are already final. Artifacts must not rely on the bridge existing
+(spec §1/§3): the same file opens bridge-less in a plain browser.
+
+### Errors
+
+Errors are small styled HTML pages (dark-mode aware, same CSP) designed to
+render inside the viewer iframe:
+
+| Status | Case |
+|---|---|
+| `400` | Malformed path: wrong segment count, bad charset, traversal attempts (`..`, `%2e%2e`, `\`), bad version syntax (`0`, `v3`, `Latest`) |
+| `404` | Unknown thread; unknown version; `latest` on a thread with no artifact versions yet; DB row present but file missing on disk |
+| `405` | Non-GET method |
+| `500` | Database/read errors; DB-stored project id or slug fails path-segment validation (defense in depth — never expected) |
+
+---
+
 _Endpoints to be added by later beads: `get-context`, `list-comments`,
 `resolve-comment`, `status` (§5.2). Each should get its own section here with
 request/response shapes and any events it emits._

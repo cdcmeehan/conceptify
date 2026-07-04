@@ -141,6 +141,17 @@ fn thread_dir(root: &Path, project_id: &str, slug: &str) -> PathBuf {
     root.join(project_id).join("threads").join(slug)
 }
 
+/// `<root>/<project-id>/threads/<slug>/artifact.v<version>.html` — the
+/// immutable versioned artifact file written by `save_artifact`. Used by the
+/// `artifact://` protocol handler (`crate::artifact_protocol`) to map a
+/// DB-resolved (project, slug, version) triple back to the on-disk file.
+/// Must stay in lockstep with the naming inside `save_artifact`; the
+/// protocol tests pin the two together by saving through `save_artifact`
+/// and reading back through this helper.
+pub fn version_file_path(root: &Path, project_id: &str, slug: &str, version: i64) -> PathBuf {
+    thread_dir(root, project_id, slug).join(format!("artifact.v{version}.html"))
+}
+
 /// Write `bytes` to `path` atomically: full write + fsync to a `.tmp` sibling
 /// in the same directory, then `rename` over the destination (atomic on the
 /// same filesystem, per N4). A crash mid-write leaves only the `.tmp` file;

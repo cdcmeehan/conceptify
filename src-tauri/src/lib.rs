@@ -1,3 +1,4 @@
+mod artifact_protocol;
 mod artifacts;
 mod commands;
 mod db;
@@ -44,6 +45,14 @@ pub fn run() {
     }
 
     builder = builder.plugin(tauri_plugin_opener::init());
+
+    // PRD §5.4 / §9 S2: the artifact:// scheme the viewer's sandboxed
+    // iframe loads from. Cross-scheme = real origin isolation from the app
+    // shell; the handler applies the per-response CSP. Registered on the
+    // builder so the scheme exists before any webview is created (a
+    // WKWebView requirement). See `artifact_protocol` for the URL contract.
+    builder = builder
+        .register_asynchronous_uri_scheme_protocol("artifact", artifact_protocol::protocol_handler);
 
     // PRD §5.1 Lifecycle: window-state plugin for size/position persistence
     // across hide/show and relaunch.
