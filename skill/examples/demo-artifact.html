@@ -1,0 +1,1005 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How an artifact reaches your eyes</title>
+<meta name="cfy:question" content="How does Conceptify render an artifact safely inside the app?">
+<meta name="cfy:version" content="1">
+<meta name="cfy:generated-by" content="hand-authored/m2-design-pass">
+<style>
+/* ==========================================================================
+   Conceptify design-system scaffold  (D1–D6, PRD §6)  — v1
+   ==========================================================================
+   Embedded VERBATIM as the first <style> block of every artifact by the
+   Claude Code skill (artifact-spec §1). Self-contained: system font stacks
+   only, no network requests, light & dark via prefers-color-scheme.
+   Artifact-specific styles go in a second <style> block AFTER this one.
+
+   Structure:
+     1. TOKENS        — everything between the @cfy:tokens sentinels is the
+                        shareable token block (the app shell imports/extracts
+                        exactly this section for visual continuity).
+     2. BASE          — reset + page frame
+     3. TYPOGRAPHY    — D1 type, prose rhythm
+     4. COMPONENTS    — D3 content components (cfy-* classes)
+     5. CODE          — D4 Shiki dual-theme containers
+     6. DIAGRAMS      — D5 SVG hooks (currentColor + var())
+     7. MOTION        — D6 compositor-friendly, reduced-motion-safe
+     8. PRINT
+
+   Class + token namespace: `cfy-` / `--cfy-` is reserved for this scaffold;
+   artifact-specific styles must not redefine them (extend with new names).
+   ========================================================================== */
+
+
+/* ==========================================================================
+   1. TOKENS
+   ========================================================================== */
+/* @cfy:tokens:start */
+:root {
+  /* ---- D1 type stacks (OQ1 decision — see design-system.md) ------------ */
+  /* Headings: New York via ui-serif (Safari/WKWebView), Iowan Old Style as
+     the deterministic named fallback for Chromium on macOS. */
+  --cfy-font-serif: ui-serif, "New York", "Iowan Old Style", "Palatino Nova",
+                    Palatino, Georgia, "Times New Roman", serif;
+  /* Body: the system sans (SF Pro on macOS) — optically sized, always there. */
+  --cfy-font-sans: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI",
+                   Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* Code: SF Mono via ui-monospace, Menlo as the named macOS fallback. */
+  --cfy-font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco,
+                   Consolas, "Liberation Mono", monospace;
+  /* Optional hand-drawn flavor (D5) — pair with D2 --sketch / Mermaid
+     handDrawn. Never used for body text. */
+  --cfy-font-hand: "Bradley Hand", "Chalkboard SE", "Comic Sans MS",
+                   "Segoe Print", cursive;
+
+  /* ---- D2 type scale ---------------------------------------------------- */
+  --cfy-text-sm:   0.8125rem;                              /* 13px captions  */
+  --cfy-text-body: 1.0625rem;                              /* 17px body      */
+  --cfy-text-lede: 1.1875rem;                              /* 19px opener    */
+  --cfy-text-h4:   0.8125rem;                              /* tracked label  */
+  --cfy-text-h3:   1.1875rem;
+  --cfy-text-h2:   clamp(1.375rem, 1.15rem + 1vw, 1.625rem);
+  --cfy-text-h1:   clamp(1.75rem, 1.3rem + 2.2vw, 2.5rem);
+  --cfy-leading:   1.65;
+
+  /* ---- D2 spacing rhythm & shape ---------------------------------------- */
+  --cfy-space-1: 0.25rem;
+  --cfy-space-2: 0.5rem;
+  --cfy-space-3: 0.75rem;
+  --cfy-space-4: 1rem;
+  --cfy-space-5: 1.5rem;
+  --cfy-space-6: 2rem;
+  --cfy-space-7: 3rem;
+  --cfy-space-8: 4.5rem;
+  --cfy-measure: 68ch;
+  --cfy-radius:    10px;
+  --cfy-radius-sm: 6px;
+
+  /* ---- D2 palette — light ------------------------------------------------ */
+  --cfy-paper:   #fbf9f4;   /* page                                    */
+  --cfy-surface: #f3f0e8;   /* panels, inline code, diagram frames     */
+  --cfy-ink:     #211d16;   /* primary text                            */
+  --cfy-muted:   #6d6759;   /* secondary text, captions                */
+  --cfy-line:    #e4dfd2;   /* hairlines, borders                      */
+  --cfy-accent:  #a34d24;   /* terracotta — links, emphasis, markers   */
+  --cfy-mark:    #f3e5c3;   /* key-term highlighter swipe              */
+
+  /* callouts (D3): edge/title color + wash */
+  --cfy-insight:       #7a5a12;
+  --cfy-insight-bg:    #f5edd8;
+  --cfy-warning:       #9b3a2a;
+  --cfy-warning-bg:    #f7e8e0;
+  --cfy-definition:    #33586b;
+  --cfy-definition-bg: #e8eef1;
+
+  /* code (D4) */
+  --cfy-code-bg:     #f4f1e9;
+  --cfy-code-hl:     #eae4d2;   /* highlighted line wash                */
+  --cfy-code-hl-bar: #a34d24;   /* highlighted line edge bar            */
+
+  /* diagrams (D5) — consumed by inline SVG via var()/currentColor, and
+     mirrored into Mermaid themeVariables / d2 themes by the skill */
+  --cfy-diagram-node:        #f3f0e8;
+  --cfy-diagram-node-stroke: #58513f;
+  --cfy-diagram-edge:        #6d6759;
+  --cfy-diagram-label:       #211d16;
+  --cfy-diagram-accent:      #a34d24;
+  --cfy-diagram-accent-bg:   #f0ddcf;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* ---- D2 palette — dark (warm charcoal, not blue-black) -------------- */
+    --cfy-paper:   #17140f;
+    --cfy-surface: #221e17;
+    --cfy-ink:     #eae4d8;
+    --cfy-muted:   #a89f8d;
+    --cfy-line:    #383226;
+    --cfy-accent:  #e09863;
+    --cfy-mark:    #4a3a1c;
+
+    --cfy-insight:       #e3c377;
+    --cfy-insight-bg:    #322a15;
+    --cfy-warning:       #e89b85;
+    --cfy-warning-bg:    #3a211a;
+    --cfy-definition:    #9dc2d6;
+    --cfy-definition-bg: #1d2b33;
+
+    --cfy-code-bg:     #201c15;
+    --cfy-code-hl:     #332c1e;
+    --cfy-code-hl-bar: #e09863;
+
+    --cfy-diagram-node:        #2a251c;
+    --cfy-diagram-node-stroke: #8d8471;
+    --cfy-diagram-edge:        #a89f8d;
+    --cfy-diagram-label:       #eae4d8;
+    --cfy-diagram-accent:      #e09863;
+    --cfy-diagram-accent-bg:   #46301f;
+  }
+}
+/* @cfy:tokens:end */
+
+
+/* ==========================================================================
+   2. BASE
+   ========================================================================== */
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--cfy-paper);
+  color: var(--cfy-ink);
+  font-family: var(--cfy-font-sans);
+  font-size: var(--cfy-text-body);
+  line-height: var(--cfy-leading);
+  -webkit-font-smoothing: antialiased;
+  font-synthesis: none;
+}
+
+article {
+  max-width: var(--cfy-measure);
+  margin-inline: auto;
+  padding: var(--cfy-space-7) var(--cfy-space-5) var(--cfy-space-8);
+}
+
+::selection { background: var(--cfy-mark); color: var(--cfy-ink); }
+
+:focus-visible {
+  outline: 2px solid var(--cfy-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Room for the app's scroll-to-anchor (FR-4.5) */
+[data-cfy-id] { scroll-margin-top: var(--cfy-space-7); }
+
+img, svg, video { max-width: 100%; height: auto; }
+
+
+/* ==========================================================================
+   3. TYPOGRAPHY (D1)
+   ========================================================================== */
+h1, h2, h3 {
+  font-family: var(--cfy-font-serif);
+  font-weight: 600;
+  line-height: 1.18;
+  text-wrap: balance;   /* harmless where unsupported */
+  color: var(--cfy-ink);
+}
+
+h1 {
+  font-size: var(--cfy-text-h1);
+  font-weight: 700;
+  letter-spacing: -0.015em;   /* tighten large optical sizes */
+  margin: 0 0 var(--cfy-space-4);
+}
+
+h2 {
+  font-size: var(--cfy-text-h2);
+  letter-spacing: -0.008em;
+  margin: var(--cfy-space-8) 0 var(--cfy-space-4);
+  padding-top: var(--cfy-space-5);
+  border-top: 1px solid var(--cfy-line);   /* print-style section rule */
+}
+
+h3 {
+  font-size: var(--cfy-text-h3);
+  margin: var(--cfy-space-6) 0 var(--cfy-space-3);
+}
+
+/* h4 breaks pattern deliberately: a small tracked sans label */
+h4 {
+  font-family: var(--cfy-font-sans);
+  font-size: var(--cfy-text-h4);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--cfy-muted);
+  margin: var(--cfy-space-6) 0 var(--cfy-space-2);
+}
+
+p, ul, ol, dl { margin: 0 0 var(--cfy-space-4); }
+ul, ol { padding-left: 1.4em; }
+li { margin-bottom: var(--cfy-space-1); }
+li::marker { color: var(--cfy-muted); }
+
+/* Eyebrow above the h1 */
+.cfy-kicker {
+  font-family: var(--cfy-font-sans);
+  font-size: var(--cfy-text-sm);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--cfy-accent);
+  margin: 0 0 var(--cfy-space-2);
+}
+
+/* Opening paragraph — the hook */
+.cfy-lede {
+  font-size: var(--cfy-text-lede);
+  line-height: 1.6;
+  color: var(--cfy-ink);
+  margin-bottom: var(--cfy-space-6);
+}
+
+a {
+  color: var(--cfy-accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--cfy-accent) 45%, transparent);
+  text-underline-offset: 0.18em;
+}
+a:hover { text-decoration-color: var(--cfy-accent); }
+
+strong { font-weight: 650; }
+em { font-style: italic; }
+
+blockquote {
+  margin: var(--cfy-space-5) 0;
+  padding: 0 0 0 var(--cfy-space-4);
+  border-left: 2px solid var(--cfy-line);
+  color: var(--cfy-muted);
+  font-family: var(--cfy-font-serif);
+  font-size: var(--cfy-text-h3);
+  line-height: 1.5;
+}
+
+/* Editorial section break: <hr> renders as an asterism-style mark */
+hr {
+  border: 0;
+  margin: var(--cfy-space-7) 0;
+  text-align: center;
+}
+hr::after {
+  content: "·  ·  ·";
+  color: var(--cfy-muted);
+  font-size: var(--cfy-text-body);
+  letter-spacing: 0.4em;
+}
+
+
+/* ==========================================================================
+   4. COMPONENTS (D3)
+   ========================================================================== */
+
+/* ---- Callouts: <aside class="cfy-callout cfy-insight"> ------------------
+   Variants: cfy-insight | cfy-warning | cfy-definition
+   Optional first child: <p class="cfy-callout-title">…</p>               */
+.cfy-callout {
+  --_edge: var(--cfy-muted);
+  --_wash: var(--cfy-surface);
+  margin: var(--cfy-space-5) 0;
+  padding: var(--cfy-space-4) var(--cfy-space-5);
+  background: var(--_wash);
+  border-left: 3px solid var(--_edge);
+  border-radius: 0 var(--cfy-radius) var(--cfy-radius) 0;
+}
+.cfy-callout > :last-child { margin-bottom: 0; }
+.cfy-callout-title {
+  font-family: var(--cfy-font-sans);
+  font-size: var(--cfy-text-sm);
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--_edge);
+  margin-bottom: var(--cfy-space-2);
+}
+.cfy-insight    { --_edge: var(--cfy-insight);    --_wash: var(--cfy-insight-bg); }
+.cfy-warning    { --_edge: var(--cfy-warning);    --_wash: var(--cfy-warning-bg); }
+.cfy-definition { --_edge: var(--cfy-definition); --_wash: var(--cfy-definition-bg); }
+
+/* ---- Step sequence: <ol class="cfy-steps"><li>…</li></ol> ---------------
+   Numbered badges on a connecting rail; put the step name in <strong>
+   as the first words of the item. */
+.cfy-steps {
+  list-style: none;
+  counter-reset: cfy-step;
+  margin: var(--cfy-space-5) 0;
+  padding: 0;
+}
+.cfy-steps > li {
+  counter-increment: cfy-step;
+  position: relative;
+  padding: 0 0 var(--cfy-space-5) 3.1rem;
+  margin: 0;
+}
+.cfy-steps > li:last-child { padding-bottom: 0; }
+.cfy-steps > li::before {
+  content: counter(cfy-step);
+  position: absolute;
+  left: 0;
+  top: -0.1rem;
+  width: 2rem;
+  height: 2rem;
+  display: grid;
+  place-items: center;
+  background: var(--cfy-surface);
+  border: 1px solid var(--cfy-line);
+  border-radius: 50%;
+  font-family: var(--cfy-font-serif);
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--cfy-accent);
+}
+/* the rail */
+.cfy-steps > li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: calc(1rem - 0.5px);
+  top: 2.1rem;
+  bottom: 0.2rem;
+  width: 1px;
+  background: var(--cfy-line);
+}
+
+/* ---- Key terms: <dfn class="cfy-term"> or <span class="cfy-term"> -------
+   Highlighter swipe under the lower half of the text.                    */
+.cfy-term {
+  font-style: normal;
+  font-weight: 600;
+  background: linear-gradient(transparent 58%, var(--cfy-mark) 58%);
+  border-radius: 2px;
+  padding: 0 0.15em;
+}
+
+/* ---- Collapsible deep-dive: <details class="cfy-details"> ---------------
+   <summary> first, then any flow content. Open state is styled;
+   fully usable with JS disabled (native disclosure).                     */
+.cfy-details {
+  margin: var(--cfy-space-5) 0;
+  border: 1px solid var(--cfy-line);
+  border-radius: var(--cfy-radius);
+  background: var(--cfy-surface);
+}
+.cfy-details > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: var(--cfy-space-3) var(--cfy-space-5);
+  font-family: var(--cfy-font-sans);
+  font-weight: 600;
+  color: var(--cfy-ink);
+  border-radius: var(--cfy-radius);
+  position: relative;
+  padding-left: 2.4rem;
+}
+.cfy-details > summary::-webkit-details-marker { display: none; }
+.cfy-details > summary::before {
+  content: "";
+  position: absolute;
+  left: var(--cfy-space-4);
+  top: calc(50% - 0.28em);
+  width: 0.55em;
+  height: 0.55em;
+  border-right: 1.5px solid var(--cfy-accent);
+  border-bottom: 1.5px solid var(--cfy-accent);
+  transform: rotate(-45deg);          /* ▸ closed */
+  transition: transform 0.18s ease;
+}
+.cfy-details[open] > summary::before { transform: rotate(45deg); } /* ▾ open */
+.cfy-details[open] > summary {
+  border-bottom: 1px solid var(--cfy-line);
+  border-radius: var(--cfy-radius) var(--cfy-radius) 0 0;
+}
+.cfy-details > :not(summary) {
+  margin-left: var(--cfy-space-5);
+  margin-right: var(--cfy-space-5);
+}
+.cfy-details > summary + * { margin-top: var(--cfy-space-4); }
+.cfy-details > :last-child { margin-bottom: 0; padding-bottom: var(--cfy-space-4); }
+
+/* ---- Figures: <figure data-cfy-id> + <figcaption> ----------------------- */
+figure {
+  margin: var(--cfy-space-6) 0;
+}
+figcaption {
+  font-family: var(--cfy-font-sans);
+  font-size: var(--cfy-text-sm);
+  line-height: 1.5;
+  color: var(--cfy-muted);
+  margin-top: var(--cfy-space-3);
+  padding-top: var(--cfy-space-2);
+  border-top: 1px solid var(--cfy-line);
+}
+figcaption strong { color: var(--cfy-ink); font-weight: 600; }
+
+/* ---- Tables: <div class="cfy-table-wrap"><table class="cfy-table"> ------
+   Print-quality: horizontal hairlines only. Add class="cfy-compare" to
+   the table when the first column is row headers (comparison tables).   */
+.cfy-table-wrap { overflow-x: auto; margin: var(--cfy-space-5) 0; }
+.cfy-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
+.cfy-table caption {
+  caption-side: bottom;
+  text-align: left;
+  font-size: var(--cfy-text-sm);
+  color: var(--cfy-muted);
+  padding-top: var(--cfy-space-2);
+}
+.cfy-table th {
+  font-family: var(--cfy-font-sans);
+  font-size: var(--cfy-text-sm);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--cfy-muted);
+  text-align: left;
+}
+.cfy-table th, .cfy-table td {
+  padding: var(--cfy-space-2) var(--cfy-space-4) var(--cfy-space-2) 0;
+  border-bottom: 1px solid var(--cfy-line);
+  vertical-align: top;
+}
+.cfy-table thead th { border-bottom: 2px solid var(--cfy-muted); }
+.cfy-table tbody tr:last-child td,
+.cfy-table tbody tr:last-child th { border-bottom: 2px solid var(--cfy-line); }
+.cfy-compare tbody th {
+  font-family: var(--cfy-font-serif);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--cfy-ink);
+  padding-right: var(--cfy-space-5);
+  white-space: nowrap;
+}
+
+
+/* ==========================================================================
+   5. CODE (D4) — pre-rendered Shiki v4 dual-theme output
+   ==========================================================================
+   The skill pre-renders with themes { light: "vitesse-light",
+   dark: "vitesse-dark" }; Shiki emits inline styles plus --shiki-dark /
+   --shiki-dark-bg custom properties, which this block flips. The container
+   background is overridden to sit on the paper palette.                    */
+
+/* inline code in prose */
+code {
+  font-family: var(--cfy-font-mono);
+  font-size: 0.875em;
+}
+p code, li code, td code, th code, figcaption code, summary code, dd code {
+  background: var(--cfy-surface);
+  border: 1px solid var(--cfy-line);
+  border-radius: var(--cfy-radius-sm);
+  padding: 0.08em 0.35em;
+}
+
+/* block code — .shiki emitted by Shiki; bare <pre> gets the same frame */
+pre {
+  font-family: var(--cfy-font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  background: var(--cfy-code-bg);
+  border: 1px solid var(--cfy-line);
+  border-radius: var(--cfy-radius);
+  padding: var(--cfy-space-4) 0;
+  overflow-x: auto;
+  margin: var(--cfy-space-5) 0;
+  -webkit-overflow-scrolling: touch;
+}
+pre code {
+  display: block;
+  font-size: inherit;
+  min-width: max-content;   /* lines keep their padding when scrolled */
+}
+pre.shiki { background: var(--cfy-code-bg) !important; }
+
+/* per-line boxes so highlights span the full width */
+pre .line {
+  display: inline-block;
+  width: 100%;
+  padding-inline: var(--cfy-space-5);
+}
+
+@media (prefers-color-scheme: dark) {
+  .shiki, .shiki span {
+    color: var(--shiki-dark) !important;
+    font-style: var(--shiki-dark-font-style) !important;
+    font-weight: var(--shiki-dark-font-weight) !important;
+    text-decoration: var(--shiki-dark-text-decoration) !important;
+  }
+}
+
+/* line emphasis (transformerMetaHighlight / notation classes) */
+pre .line.highlighted {
+  background: var(--cfy-code-hl);
+  box-shadow: inset 2px 0 0 var(--cfy-code-hl-bar);
+}
+pre .highlighted-word {
+  background: var(--cfy-mark);
+  border-radius: 3px;
+  padding: 1px 2px;
+  margin: -1px -2px;
+}
+pre .line.diff.add    { background: color-mix(in srgb, var(--cfy-insight) 12%, transparent); }
+pre .line.diff.remove { background: color-mix(in srgb, var(--cfy-warning) 12%, transparent); opacity: 0.75; }
+
+/* ---- Listing wrapper: <figure class="cfy-listing"> ----------------------
+   <figcaption class="cfy-code-title">path/to/file.rs</figcaption>
+   <pre class="shiki">…</pre>
+   optional <ol class="cfy-code-notes"> for annotation callouts          */
+.cfy-listing { margin: var(--cfy-space-5) 0; }
+.cfy-listing > .cfy-code-title {
+  font-family: var(--cfy-font-mono);
+  font-size: var(--cfy-text-sm);
+  color: var(--cfy-muted);
+  background: var(--cfy-surface);
+  border: 1px solid var(--cfy-line);
+  border-bottom: none;
+  border-radius: var(--cfy-radius) var(--cfy-radius) 0 0;
+  padding: var(--cfy-space-2) var(--cfy-space-5);
+  margin: 0;
+}
+.cfy-listing > .cfy-code-title + pre {
+  margin-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+.cfy-listing > pre { margin-bottom: 0; }
+
+/* annotation callouts: circled numbers inside code lines…
+   <span class="cfy-code-mark">1</span>                                   */
+.cfy-code-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.5em;
+  height: 1.5em;
+  margin-left: 0.5em;
+  border-radius: 50%;
+  background: var(--cfy-accent);
+  color: var(--cfy-paper);
+  font-family: var(--cfy-font-sans);
+  font-size: 0.75em;
+  font-weight: 700;
+  vertical-align: -0.2em;
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* …explained in a matching list right after the listing:
+   <ol class="cfy-code-notes"><li>…</li></ol>                             */
+.cfy-code-notes {
+  list-style: none;
+  counter-reset: cfy-note;
+  margin: var(--cfy-space-3) 0 var(--cfy-space-5);
+  padding: 0;
+  font-size: 0.9375rem;
+}
+.cfy-code-notes > li {
+  counter-increment: cfy-note;
+  position: relative;
+  padding-left: 2.2rem;
+  margin-bottom: var(--cfy-space-2);
+  color: var(--cfy-muted);
+}
+.cfy-code-notes > li::before {
+  content: counter(cfy-note);
+  position: absolute;
+  left: 0.35rem;
+  top: 0.2rem;
+  display: grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  background: var(--cfy-accent);
+  color: var(--cfy-paper);
+  font-family: var(--cfy-font-sans);
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+
+/* Tier-2 offline fallback source (artifact-spec §7.2): keep it readable
+   and visibly "the source", not an error. */
+pre.cfy-fallback {
+  border-style: dashed;
+}
+pre.cfy-fallback code { padding-inline: var(--cfy-space-5); }
+
+
+/* ==========================================================================
+   6. DIAGRAMS (D5)
+   ==========================================================================
+   Hand-authored SVG uses currentColor and the --cfy-diagram-* tokens
+   directly (fill="var(--cfy-diagram-node)" etc.). Generated SVG (d2 / dot /
+   Mermaid) is themed at generation time with the same hex values (see
+   design-system.md for the mapping table).                                  */
+
+.cfy-diagram {
+  background: var(--cfy-surface);
+  border: 1px solid var(--cfy-line);
+  border-radius: var(--cfy-radius);
+  padding: var(--cfy-space-5);
+  color: var(--cfy-ink);         /* currentColor inside the SVG */
+}
+.cfy-diagram svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  font-family: var(--cfy-font-sans);
+}
+
+/* SVG helper classes for hand-authored diagrams. var() does NOT work in
+   SVG presentation attributes — use these classes (or style="") instead. */
+.cfy-diagram .cfy-node {
+  fill: var(--cfy-diagram-node);
+  stroke: var(--cfy-diagram-node-stroke);
+  stroke-width: 1.25;
+}
+.cfy-diagram .cfy-node-accent {
+  fill: var(--cfy-diagram-accent-bg);
+  stroke: var(--cfy-diagram-accent);
+  stroke-width: 1.25;
+}
+.cfy-diagram .cfy-edge {
+  stroke: var(--cfy-diagram-edge);
+  fill: none;
+  stroke-width: 1.25;
+}
+.cfy-diagram .cfy-arrow { fill: var(--cfy-diagram-edge); stroke: none; }
+.cfy-diagram .cfy-label {
+  fill: var(--cfy-diagram-label);
+  font-size: 13px;
+  font-weight: 600;
+}
+.cfy-diagram .cfy-label-sub {
+  fill: var(--cfy-muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+.cfy-diagram .cfy-edge-label {
+  fill: var(--cfy-diagram-edge);
+  font-size: 11px;
+  font-weight: 500;
+}
+/* hand-drawn flavor: <figure class="cfy-diagram cfy-hand"> + d2 --sketch /
+   Mermaid handDrawn */
+.cfy-hand svg { font-family: var(--cfy-font-hand); }
+
+/* anchored diagram elements must stay clickable (FR-4.2):
+   never set pointer-events: none on a [data-cfy-id] group */
+
+
+/* ==========================================================================
+   7. MOTION (D6)
+   ==========================================================================
+   Compositor-friendly only: transform + opacity (WKWebView is 60fps-capped
+   pre-macOS-26). SVG stroke-dash* is cheap at accent scale. ALL animation
+   is gated behind prefers-reduced-motion: no-preference.
+
+   HARD RULE — verified against WKWebView: occluded/off-screen webviews
+   SUSPEND CSS animations indefinitely, so an animation's from-state can
+   become the permanent state (e.g. in FR-6.3 headless snapshots). Therefore
+   no animation in this scaffold (or in artifact-specific styles) may hide
+   content in its from-state: no opacity-0 fade-ins with fill-mode, no
+   stroke draw-ins from a fully-hidden stroke. Every from-state must be
+   fully legible on its own.                                                 */
+
+@keyframes cfy-rise {
+  from { transform: translateY(0.85rem); }
+  to   { transform: none; }
+}
+@keyframes cfy-march {
+  to { stroke-dashoffset: -14; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* staged rise-into-place on load — set --cfy-reveal-n: 0,1,2,… per
+     element. Intro use only (≤ ~6 items). Transform-only by design: if the
+     animation never runs, content sits 0.85rem low and fully readable. */
+  .cfy-reveal {
+    animation: cfy-rise 0.55s cubic-bezier(0.22, 0.9, 0.3, 1) both;
+    animation-delay: calc(var(--cfy-reveal-n, 0) * 90ms);
+  }
+  /* continuous marching-dash flow along an edge — use sparingly (≤ 3
+     per view); dash pattern 8 6 gives a 14-unit period matching -14.
+     Resting state is an ordinary dashed stroke — always visible. */
+  .cfy-flow {
+    stroke-dasharray: 8 6;
+    animation: cfy-march 0.9s linear infinite;
+  }
+  .cfy-details > summary::before { transition: transform 0.18s ease; }
+}
+
+
+/* ==========================================================================
+   8. PRINT
+   ========================================================================== */
+@media print {
+  body { background: #fff; }
+  article { max-width: none; padding: 0; }
+  .cfy-reveal { animation: none; }
+  pre { white-space: pre-wrap; }
+  .cfy-details { border: none; background: none; }
+}
+</style>
+<style>
+/* ---- artifact-specific styles (always a second block, after the scaffold) */
+.x-mark { stroke: var(--cfy-warning); stroke-width: 2.5; stroke-linecap: round; }
+.x-label { fill: var(--cfy-warning); font-size: 11px; font-weight: 600; }
+</style>
+</head>
+<body>
+<article>
+
+  <p class="cfy-kicker cfy-reveal" style="--cfy-reveal-n:0">Conceptify internals</p>
+  <h1 class="cfy-reveal" style="--cfy-reveal-n:1" data-cfy-id="sec-title">How an artifact reaches your eyes</h1>
+  <p class="cfy-lede cfy-reveal" style="--cfy-reveal-n:2">Every explanation Conceptify shows you is a single HTML file sitting
+  in central storage — plain enough to open in any browser, forever. Yet inside the app that same file runs inside a
+  double-locked box: a custom URL scheme on the outside, an origin-less iframe on the inside. This artifact walks the path
+  a file takes from disk to pixels, and shows why the box is shaped the way it is.</p>
+
+  <h2 data-cfy-id="sec-mental-model">The mental model</h2>
+
+  <p>The viewer never loads artifact files directly. Instead the Rust core registers a
+  <dfn class="cfy-term">custom URL scheme</dfn> — <code>artifact://</code> — and answers each request itself: read the
+  bytes from central storage, attach security headers, inject the <dfn class="cfy-term">bridge script</dfn> that carries
+  comment clicks back to the shell, and hand the result to WebKit. Because <code>artifact://</code> is a different scheme
+  from the app's own UI, WebKit treats artifact content as a foreign website — real origin isolation, enforced by the
+  browser engine rather than by convention.</p>
+
+  <p>The second lock is the iframe itself. It is sandboxed <em>without</em> <code>allow-same-origin</code>, which places the
+  document in an <dfn class="cfy-term">opaque origin</dfn>: an origin equal to nothing, not even itself.</p>
+
+  <aside class="cfy-callout cfy-definition" data-cfy-id="def-opaque-origin">
+    <p class="cfy-callout-title">Definition — opaque origin</p>
+    <p>An origin that compares unequal to every origin, including its own. Documents in an opaque origin get no storage
+    (<code>localStorage</code> and friends throw), no cookies, and no way to reach the embedding page — <code>window.parent</code>
+    is cross-origin territory.</p>
+  </aside>
+
+  <!--cfy:src lang="d2" for="fig-serve-path" renderer="hand-rendered (m2 design-pass fixture)"
+direction: right
+disk: Artifact file\n(central storage)
+handler: artifact:// handler\n(Rust core)
+iframe: Sandboxed iframe\n(opaque origin)
+disk -> handler: read bytes
+handler -> iframe: CSP + bridge
+-->
+  <figure class="cfy-diagram" data-cfy-id="fig-serve-path">
+    <svg viewBox="0 40 700 85" role="img" aria-label="Flow diagram: artifact file on disk is read by the artifact:// handler, which adds the CSP and bridge script and serves it into the sandboxed iframe.">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path class="cfy-arrow" d="M 0 0 L 10 5 L 0 10 z"/>
+        </marker>
+      </defs>
+      <g data-cfy-id="fig-serve-path.disk">
+        <rect class="cfy-node" x="15" y="50" width="150" height="60" rx="10"/>
+        <text class="cfy-label" x="90" y="76" text-anchor="middle">Artifact file</text>
+        <text class="cfy-label-sub" x="90" y="94" text-anchor="middle">central storage</text>
+      </g>
+      <g data-cfy-id="fig-serve-path.disk-to-handler">
+        <path class="cfy-edge" d="M 170 80 H 266" marker-end="url(#arr)"/>
+        <text class="cfy-edge-label" x="220" y="68" text-anchor="middle">read bytes</text>
+      </g>
+      <g data-cfy-id="fig-serve-path.handler">
+        <rect class="cfy-node" x="275" y="50" width="150" height="60" rx="10"/>
+        <text class="cfy-label" x="350" y="76" text-anchor="middle">artifact:// handler</text>
+        <text class="cfy-label-sub" x="350" y="94" text-anchor="middle">Rust core</text>
+      </g>
+      <g data-cfy-id="fig-serve-path.handler-to-iframe">
+        <path class="cfy-edge cfy-flow" d="M 430 80 H 526" marker-end="url(#arr)"/>
+        <text class="cfy-edge-label" x="480" y="68" text-anchor="middle">CSP + bridge</text>
+      </g>
+      <g data-cfy-id="fig-serve-path.iframe">
+        <rect class="cfy-node-accent" x="535" y="50" width="150" height="60" rx="10"/>
+        <text class="cfy-label" x="610" y="76" text-anchor="middle">Sandboxed iframe</text>
+        <text class="cfy-label-sub" x="610" y="94" text-anchor="middle">opaque origin</text>
+      </g>
+    </svg>
+    <figcaption><strong>The serving path.</strong> The file never moves and never touches the network: the Rust core reads
+    it, stamps the per-response security policy onto it, and streams it straight into WebKit.</figcaption>
+  </figure>
+
+  <h2 data-cfy-id="sec-load-sequence">What happens on every load</h2>
+
+  <ol class="cfy-steps" data-cfy-id="steps-load-sequence">
+    <li><strong>Resolve.</strong> The viewer asks for <code>artifact://thread/&lt;slug&gt;/artifact.v3.html</code>; the
+    protocol handler maps the URL to a file under central storage — no path from the request ever touches the filesystem
+    directly.</li>
+    <li><strong>Read.</strong> The bytes are read from disk exactly as the generating agent saved them. Versions are
+    immutable files, so a crash mid-read can never observe a half-written artifact.</li>
+    <li><strong>Fortify.</strong> The response gains its Content-Security-Policy header and the sandbox attributes are
+    already waiting on the iframe — two locks, applied in two different places.</li>
+    <li><strong>Bridge.</strong> A small script is injected at serve time (never written to disk) that reports text
+    selections and <code>data-cfy-id</code> clicks to the shell for commenting.</li>
+    <li><strong>Render.</strong> WebKit parses the document in its opaque origin. Everything the artifact needs — styles,
+    diagrams, data — is already inline, so first paint is also final paint.</li>
+  </ol>
+
+  <aside class="cfy-callout cfy-insight">
+    <p class="cfy-callout-title">Insight</p>
+    <p>Because the policy travels on the <em>response</em> rather than in the file, tightening security ships with an app
+    update and applies retroactively to every artifact ever saved. The files on disk never need to be edited — which is
+    exactly what you want from documents meant to outlive the app that made them.</p>
+  </aside>
+
+  <h2 data-cfy-id="sec-csp">The policy, line by line</h2>
+
+  <p>The reference policy is small enough to read in one breath. Everything is denied by default; inline code and styles
+  are allowed (the artifact is self-contained, so "inline" is everything); and exactly one CDN host is carved out for the
+  opt-in interactive tier.</p>
+
+  <figure class="cfy-listing" data-cfy-id="fig-artifact-csp">
+    <figcaption class="cfy-code-title">src-tauri/src/artifact_protocol.rs (illustrative)</figcaption>
+    <pre class="shiki shiki-themes vitesse-light vitesse-dark" style="background-color:#ffffff;--shiki-dark-bg:#121212;color:#393a34;--shiki-dark:#dbd7ca" tabindex="0"><code><span class="line"><span style="color:#A0ADA0;--shiki-dark:#758575">// §9 containment: the policy every artifact:// response carries</span></span>
+<span class="line"><span style="color:#1E754F;--shiki-dark:#4D9375">const</span><span style="color:#393A34;--shiki-dark:#DBD7CA"> </span><span style="color:#B07D48;--shiki-dark:#BD976A">ARTIFACT_CSP</span><span style="color:#999999;--shiki-dark:#666666">: &amp;</span><span style="color:#2E808F;--shiki-dark:#5DA994">str</span><span style="color:#999999;--shiki-dark:#666666"> = </span><span style="color:#59873A;--shiki-dark:#80A665">concat!</span><span style="color:#999999;--shiki-dark:#666666">(</span></span>
+<span class="line"><span style="color:#B56959;--shiki-dark:#C98A7D">    "default-src 'none'; "</span><span style="color:#999999;--shiki-dark:#666666">,</span></span>
+<span class="line"><span style="color:#B56959;--shiki-dark:#C98A7D">    "script-src 'unsafe-inline' https://cdn.jsdelivr.net; "</span><span style="color:#999999;--shiki-dark:#666666">,</span></span>
+<span class="line"><span style="color:#B56959;--shiki-dark:#C98A7D">    "style-src 'unsafe-inline' https://cdn.jsdelivr.net; "</span><span style="color:#999999;--shiki-dark:#666666">,</span></span>
+<span class="line"><span style="color:#B56959;--shiki-dark:#C98A7D">    "font-src data: https://cdn.jsdelivr.net; img-src data:; "</span><span style="color:#999999;--shiki-dark:#666666">,</span></span>
+<span class="line highlighted"><span style="color:#B56959;--shiki-dark:#C98A7D">    "connect-src 'none'"</span></span>
+<span class="line"><span style="color:#999999;--shiki-dark:#666666">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#1E754F;--shiki-dark:#4D9375">fn</span><span style="color:#393A34;--shiki-dark:#DBD7CA"> </span><span style="color:#59873A;--shiki-dark:#80A665">artifact_response</span><span style="color:#999999;--shiki-dark:#666666">(</span><span style="color:#B07D48;--shiki-dark:#BD976A">body</span><span style="color:#999999;--shiki-dark:#666666">: </span><span style="color:#2E808F;--shiki-dark:#5DA994">Vec</span><span style="color:#999999;--shiki-dark:#666666">&lt;</span><span style="color:#2E808F;--shiki-dark:#5DA994">u8</span><span style="color:#999999;--shiki-dark:#666666">&gt;) -&gt; </span><span style="color:#2E808F;--shiki-dark:#5DA994">Response</span><span style="color:#999999;--shiki-dark:#666666">&lt;</span><span style="color:#2E808F;--shiki-dark:#5DA994">Vec</span><span style="color:#999999;--shiki-dark:#666666">&lt;</span><span style="color:#2E808F;--shiki-dark:#5DA994">u8</span><span style="color:#999999;--shiki-dark:#666666">&gt;&gt; {</span></span>
+<span class="line"><span style="color:#393A34;--shiki-dark:#DBD7CA">    </span><span style="color:#2E808F;--shiki-dark:#5DA994">Response</span><span style="color:#999999;--shiki-dark:#666666">::</span><span style="color:#59873A;--shiki-dark:#80A665">builder</span><span style="color:#999999;--shiki-dark:#666666">()</span></span>
+<span class="line highlighted"><span style="color:#999999;--shiki-dark:#666666">        .</span><span style="color:#59873A;--shiki-dark:#80A665">header</span><span style="color:#999999;--shiki-dark:#666666">(</span><span style="color:#B56959;--shiki-dark:#C98A7D">"Content-Security-Policy"</span><span style="color:#999999;--shiki-dark:#666666">, </span><span style="color:#B07D48;--shiki-dark:#BD976A">ARTIFACT_CSP</span><span style="color:#999999;--shiki-dark:#666666">)</span><span class="cfy-code-mark">1</span></span>
+<span class="line"><span style="color:#999999;--shiki-dark:#666666">        .</span><span style="color:#59873A;--shiki-dark:#80A665">header</span><span style="color:#999999;--shiki-dark:#666666">(</span><span style="color:#B56959;--shiki-dark:#C98A7D">"Content-Type"</span><span style="color:#999999;--shiki-dark:#666666">, </span><span style="color:#B56959;--shiki-dark:#C98A7D">"text/html; charset=utf-8"</span><span style="color:#999999;--shiki-dark:#666666">)</span></span>
+<span class="line"><span style="color:#999999;--shiki-dark:#666666">        .</span><span style="color:#59873A;--shiki-dark:#80A665">body</span><span style="color:#999999;--shiki-dark:#666666">(</span><span style="color:#B07D48;--shiki-dark:#BD976A">body</span><span style="color:#999999;--shiki-dark:#666666">)</span></span>
+<span class="line"><span style="color:#999999;--shiki-dark:#666666">        .</span><span style="color:#59873A;--shiki-dark:#80A665">expect</span><span style="color:#999999;--shiki-dark:#666666">(</span><span style="color:#B56959;--shiki-dark:#C98A7D">"static response parts are always valid"</span><span style="color:#999999;--shiki-dark:#666666">)</span><span class="cfy-code-mark">2</span></span>
+<span class="line"><span style="color:#999999;--shiki-dark:#666666">}</span></span></code></pre>
+    <ol class="cfy-code-notes">
+      <li>The policy rides on every response, so it can never drift out of sync with what is on disk — there is no
+      per-file configuration to forget.</li>
+      <li>Header names and values here are static; the only dynamic part is the body, which
+      <code>Response::body</code> accepts unconditionally. The <code>expect</code> documents that invariant.</li>
+    </ol>
+  </figure>
+
+  <aside class="cfy-callout cfy-warning">
+    <p class="cfy-callout-title">Warning</p>
+    <p><code>connect-src 'none'</code> means <strong>no network I/O of any kind</strong> from artifact JavaScript —
+    <code>fetch</code>, <code>XMLHttpRequest</code>, and WebSockets all fail, even toward the allowlisted CDN. Any data an
+    interactive artifact wants to chart, animate, or filter must already be embedded in the file.</p>
+  </aside>
+
+  <h3 data-cfy-id="sec-why-opaque">Why the opaque origin matters</h3>
+
+  <p>The custom scheme keeps artifact content out of the app's origin; the opaque origin keeps artifacts out of
+  <em>each other's</em>. Two artifacts loaded over the same scheme would otherwise share an origin — and with it, storage
+  and the ability to script one another across history navigation. Opaque origins make every load an island.</p>
+
+  <details class="cfy-details">
+    <summary>Deep dive: what <code>allow-same-origin</code> would give away</summary>
+    <p>Adding <code>allow-same-origin</code> to the sandbox would hand the document a real origin —
+    <code>artifact://</code>'s own. From there, every artifact could read and write a shared <code>localStorage</code>,
+    plant state for the next artifact to find, and — since the bridge script runs in the same document — inspect whatever
+    the bridge can see.</p>
+    <blockquote>The sandbox flag you leave out is worth more than the ten you put in.</blockquote>
+    <p>With the flag omitted, none of that surface exists. The bridge still works because it talks outward via
+    <code>postMessage</code>, which functions fine from an opaque origin; the shell verifies the message source rather than
+    trusting the origin string.</p>
+  </details>
+
+  <h2 data-cfy-id="sec-two-renderers">One file, two renderers</h2>
+
+  <p>The same bytes render in the app's viewer and in any browser via
+  <a href="https://developer.mozilla.org/en-US/docs/Web/HTML/Element/iframe#sandbox">"Open in browser"</a> — that is the
+  portability guarantee. What changes is not the document but the room it finds itself in:</p>
+
+  <div class="cfy-table-wrap">
+    <table class="cfy-table cfy-compare" data-cfy-id="tbl-viewer-vs-browser">
+      <thead>
+        <tr>
+          <th scope="col">Capability</th>
+          <th scope="col">In-app viewer</th>
+          <th scope="col">Standalone browser</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">Network access</th>
+          <td>Blocked — <code>connect-src 'none'</code></td>
+          <td>Unrestricted (artifact still works offline by design)</td>
+        </tr>
+        <tr>
+          <th scope="row">Storage APIs</th>
+          <td>Throw — opaque origin has none</td>
+          <td>Available, but never relied upon</td>
+        </tr>
+        <tr>
+          <th scope="row">Comment anchors</th>
+          <td>Live — bridge reports clicks on <code>data-cfy-id</code></td>
+          <td>Inert attributes, invisible to the reader</td>
+        </tr>
+        <tr>
+          <th scope="row">External links</th>
+          <td>Inert (no navigation permission)</td>
+          <td>Open normally</td>
+        </tr>
+        <tr>
+          <th scope="row">Tier-2 CDN libraries</th>
+          <td>Load from the one allowlisted host</td>
+          <td>Load normally; styled fallback when offline</td>
+        </tr>
+      </tbody>
+      <caption>The document is identical in both rooms; only the walls differ.</caption>
+    </table>
+  </div>
+
+  <figure class="cfy-diagram cfy-hand" data-cfy-id="fig-sandbox-layers">
+    <svg viewBox="0 0 460 240" role="img" aria-label="Sketch of three nested boxes — WKWebView process, opaque-origin iframe, artifact document — with a crossed-out arrow toward the network.">
+      <g data-cfy-id="fig-sandbox-layers.webview-process">
+        <rect class="cfy-node" x="15" y="15" width="320" height="210" rx="14"/>
+        <text class="cfy-label" x="30" y="40">WKWebView process</text>
+      </g>
+      <g data-cfy-id="fig-sandbox-layers.opaque-iframe">
+        <rect class="cfy-node" x="40" y="55" width="270" height="150" rx="12"/>
+        <text class="cfy-label" x="55" y="80">opaque-origin iframe</text>
+      </g>
+      <g data-cfy-id="fig-sandbox-layers.artifact-doc">
+        <rect class="cfy-node-accent" x="65" y="98" width="220" height="88" rx="10"/>
+        <text class="cfy-label" x="80" y="124">artifact document</text>
+        <text class="cfy-label-sub" x="80" y="144">everything inline</text>
+      </g>
+      <g data-cfy-id="fig-sandbox-layers.blocked-network">
+        <path class="cfy-edge" d="M 285 142 H 352" marker-end="url(#arr2)"/>
+        <path class="x-mark" d="M 311 134 L 327 150"/>
+        <path class="x-mark" d="M 327 134 L 311 150"/>
+        <text class="x-label" x="319" y="170" text-anchor="middle">connect-src 'none'</text>
+        <text class="cfy-label" x="368" y="147">network</text>
+      </g>
+      <defs>
+        <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path class="cfy-arrow" d="M 0 0 L 10 5 L 0 10 z"/>
+        </marker>
+      </defs>
+    </svg>
+    <figcaption><strong>Three boxes deep.</strong> A hand-authored sketch (no embedded source — bespoke visuals are edited
+    directly), wearing the optional hand-drawn flavor: <code>class="cfy-diagram cfy-hand"</code>.</figcaption>
+  </figure>
+
+  <h4 data-cfy-id="sec-threat-model-note">Threat model note</h4>
+
+  <p>All of this is containment and hygiene, not adversarial hardening: artifacts come from the user's own agent, not from
+  strangers. The box exists so that a buggy artifact — or a clever one — degrades into a boring document instead of a
+  problem.</p>
+
+  <hr>
+
+  <h2 data-cfy-id="sec-takeaway">The takeaway</h2>
+
+  <p>The whole design reduces to one sentence: <em>the file is permanent, the walls are per-response.</em> In practice
+  that means:</p>
+
+  <ul>
+    <li>Artifacts stay plain, portable HTML — openable anywhere, forever, offline.</li>
+    <li>Isolation comes from the serving path (scheme + CSP + sandbox), so it can be tightened without touching a single
+    saved file.</li>
+    <li>The bridge is injected at serve time and never exists on disk, so the browser-opened copy is exactly the document
+    and nothing more.</li>
+  </ul>
+
+</article>
+</body>
+</html>
