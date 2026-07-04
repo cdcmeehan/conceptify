@@ -36,9 +36,13 @@ if (!lang) {
   process.exit(2);
 }
 const input = arg("input");
-const code = (
-  input ? fs.readFileSync(input, "utf8") : fs.readFileSync(0, "utf8")
-).replace(/\n$/, "");
+// (async stdin read: readFileSync(0) EAGAINs on macOS non-blocking pipes)
+async function readStdin() {
+  const chunks = [];
+  for await (const c of process.stdin) chunks.push(c);
+  return Buffer.concat(chunks).toString("utf8");
+}
+const code = (input ? fs.readFileSync(input, "utf8") : await readStdin()).replace(/\n$/, "");
 
 // --highlight "3,7-9" -> Set{3,7,8,9} (1-based line numbers)
 const highlighted = new Set();

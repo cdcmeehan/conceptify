@@ -7,10 +7,12 @@ toolchain; the reader's browser gets finished, self-contained output.
 
 Contents: [Tiers](#the-tiers) · [Tools](#tool-availability) ·
 [D2](#d2--structured-diagrams-preferred) · [Graphviz](#graphviz-dot--pure-graphs) ·
-[Stamping ids](#stamping-data-cfy-id-on-generated-svg) ·
+[Post-processing script](#post-processing-generated-svg-postprocess-svgmjs) ·
 [Embedding sources](#embedding-the-dsl-source-cfysrc) ·
 [Hand-authored SVG](#hand-authored-svg--small-bespoke-visuals) ·
-[Code / Shiki](#code-blocks--shiki-v4) · [Tier 2](#tier-2--runtime-libraries-opt-in-escalation)
+[Code / Shiki](#code-blocks--shiki-v4) ·
+[Mermaid decision](#mermaid-pre-rendering--not-in-the-toolchain-oq5) ·
+[Tier 2](#tier-2--runtime-libraries-opt-in-escalation)
 
 ## The tiers
 
@@ -65,18 +67,22 @@ d2 --layout=elk --pad 0 diagram.d2 diagram.svg
   containers, so the diagram stays tall enough to read.
 
 **Post-processing (required)** — d2's raw SVG embeds base64 fonts and a
-baked light-only palette; transform it before inlining:
+baked light-only palette; run the bundled script before inlining
+([details + manual fallback](#post-processing-generated-svg-postprocess-svgmjs)):
 
-1. Drop the `<?xml …?>` prolog.
-2. Delete both `<style>…</style>` blocks inside the SVG (embedded
-   `@font-face` data + baked theme colors). The adapter CSS below
-   replaces them; this also cuts ~15 KB per diagram.
-3. Stamp `data-cfy-id` on the shape/connection groups (next section).
-4. Keep the nested double-`<svg>` structure and its `viewBox` as-is; the
-   scaffold's `.cfy-diagram svg { width:100%; height:auto }` handles
-   scaling.
-5. Wrap in `<figure class="cfy-diagram" data-cfy-id="fig-…">` +
-   `<figcaption>`, preceded by the `cfy:src` comment.
+```bash
+node <skill-dir>/scripts/postprocess-svg.mjs --fig fig-request-flow \
+  --input diagram.svg --write
+```
+
+It strips the prolog, deletes both `<style>` blocks (embedded
+`@font-face` data + baked theme colors — the adapter CSS below replaces
+them, and it cuts ~15 KB per diagram), stamps `data-cfy-id` on every
+shape/container/connection group, and leaves the nested double-`<svg>`
+structure and its `viewBox` as-is (the scaffold's
+`.cfy-diagram svg { width:100%; height:auto }` handles scaling). Then
+wrap the output in `<figure class="cfy-diagram" data-cfy-id="fig-…">` +
+`<figcaption>`, preceded by the `cfy:src` comment.
 
 **d2 adapter CSS** — paste once into the artifact's second `<style>`
 block whenever the artifact contains d2 output (mapping per
@@ -134,18 +140,22 @@ Prefer `node [shape=box, style=rounded]` and `rankdir=LR` in the source —
 default ellipses waste horizontal space. Keep node names lowercase and
 meaningful (they become `data-cfy-id`s).
 
-**Post-processing (required):**
+**Post-processing (required)** — same script
+([details + manual fallback](#post-processing-generated-svg-postprocess-svgmjs)):
 
-1. Strip everything before `<svg` (XML prolog, DOCTYPE, generator
-   comments).
-2. Remove the generated `id="…"` attributes (`graph0`, `node1`,
-   `edge1`, …) — they are positional and collide when the artifact
-   contains several DOT diagrams.
-3. Stamp `data-cfy-id` on each `<g class="node|edge|cluster">` (next
-   section). Keep the inner `<title>` elements — they double as hover
-   tooltips.
-4. Wrap in `<figure class="cfy-diagram" data-cfy-id="fig-…">` +
-   `<figcaption>`, preceded by the `cfy:src` comment.
+```bash
+node <skill-dir>/scripts/postprocess-svg.mjs --fig fig-deps \
+  --input graph.svg --write
+```
+
+It strips everything before `<svg` (prolog, DOCTYPE, generator
+comments), removes the generated positional `id="…"` attributes
+(`graph0`, `node1`, `edge1`, … — they collide when the artifact contains
+several DOT diagrams), and stamps `data-cfy-id` on each
+`<g class="node|edge|cluster">`. The inner `<title>` elements are kept —
+they double as hover tooltips. Then wrap in
+`<figure class="cfy-diagram" data-cfy-id="fig-…">` + `<figcaption>`,
+preceded by the `cfy:src` comment.
 
 **Graphviz adapter CSS** — paste once when the artifact contains DOT
 output (verified against Graphviz 15.1.0 defaults):
@@ -164,13 +174,35 @@ output (verified against Graphviz 15.1.0 defaults):
 .cfy-diagram .cluster polygon, .cfy-diagram .cluster rect { fill: var(--cfy-surface); stroke: var(--cfy-line); }
 ```
 
-## Stamping `data-cfy-id` on generated SVG
+## Post-processing generated SVG (`postprocess-svg.mjs`)
 
-Renderers don't emit `data-cfy-id`; add it by editing the SVG text. The
-derivation algorithm (lowercase → `->` becomes `-to-` → non-alphanumeric
-runs collapse to `-` → trim) and the grammar are normative in
-artifact-spec §4.2/§4.4; ids are namespaced under the figure:
-`fig-request-flow.client`, `fig-request-flow.client-to-middleware`.
+`scripts/postprocess-svg.mjs` is the **primary path** for both tools —
+zero dependencies (node built-ins only), deterministic, and idempotent
+(re-running on already-processed SVG is a no-op; already-stamped groups
+are left untouched, which also preserves ids across regenerations):
+
+```bash
+# in place:
+node <skill-dir>/scripts/postprocess-svg.mjs --fig fig-request-flow --input diagram.svg --write
+# or streaming (tool autodetected from the SVG; --tool d2|dot to force):
+d2 --layout=elk --pad 0 diagram.d2 - | node <skill-dir>/scripts/postprocess-svg.mjs --fig fig-request-flow > diagram.svg
+```
+
+`--fig` is the figure's `data-cfy-id`; every stamped id is namespaced
+under it (`fig-request-flow.client`,
+`fig-request-flow.client-to-middleware`). The script prints the stamped
+ids on stderr — use that list when referencing diagram elements in prose
+and to sanity-check coverage. It validates ids against the spec grammar
+and warns past 64 chars (shorten the DSL key, don't truncate by hand).
+It does **not** wrap the figure or write the `cfy:src` comment — those
+stay yours. Mermaid SVG is rejected by design
+([below](#mermaid-pre-rendering--not-in-the-toolchain-oq5)).
+
+**Manual fallback / reference** — what the script implements, if you
+must hand-edit or debug. The derivation algorithm (lowercase → `->`
+becomes `-to-` → non-alphanumeric runs collapse to `-` → trim; collision
+appends `-2`, `-3`, … in document order) and the grammar are normative
+in artifact-spec §4.2/§4.4.
 
 Where each tool exposes the DSL name (both verified):
 
@@ -262,6 +294,44 @@ scaffold's dark-mode rules expect, D4). Wrap it:
 unavailable, fall back to Tier-2 highlight.js
 (`@highlightjs/cdn-assets@11` on the allowlist) with the mandatory
 offline fallback pattern below.
+
+## Mermaid pre-rendering — NOT in the toolchain (OQ5)
+
+Decided empirically 2026-07 (conceptify-57l.5, PRD §12 OQ5): Mermaid
+pre-rendering via `mermaid-cli`/Puppeteer does **not** earn a place at
+generation time. Do not `npx @mermaid-js/mermaid-cli`. Measured on this
+machine (mmdc 11.16.0, `look: neo`/`handDrawn`, ELK, themeVariables):
+
+- **Weight/flakiness**: first `npx` run took ~70 s and downloaded full
+  Chrome *plus* chrome-headless-shell (~550 MB) into
+  `~/.cache/puppeteer`; every render boots headless Chrome (~3.5 s per
+  diagram vs. ~0.3 s for d2 — and d2/dot need no network, ever).
+- **Theming fragility**: `themeVariables` are *silently ignored* unless
+  `theme: "base"`; even then, neo/handDrawn sequence actors bake literal
+  `#eaeaea`/`#666` from variables outside the D5 token table
+  (`actorBkg`, …) — staying on-system needs per-diagram-type variable
+  maps.
+- **Anchorability (the killer)**: state-diagram edges emit only
+  positional ids (`edge0`, `edge1`, …) — exactly what artifact-spec §4.2
+  forbids; sequence messages have no bounding `<g>` grouping line +
+  label. Every mmdc SVG is `id="my-svg"` with an `#my-svg`-scoped
+  `<style>` and `url(#my-svg-*)` marker refs, so two Mermaid diagrams in
+  one artifact collide. Flowchart/state labels are HTML-in-
+  `foreignObject`, which artifact CSS can bleed into.
+- **What it would win**: denser sequence diagrams (notes, activations)
+  and Mermaid-only types (gantt, ER, gitgraph, journey).
+
+Verdict: d2 covers flow/architecture/sequence/state well — its sequence
+labels are masked, not overlapped (the knockout is an SVG `mask`; some
+thumbnailers drop it, browsers don't). For Mermaid-only types, first ask
+whether a `cfy-table`/`cfy-steps` re-expression is clearer (usually yes
+for gantt/ER in an explanation); if the reader genuinely needs the
+diagram interactively, use Tier-2 runtime Mermaid below.
+`postprocess-svg.mjs` rejects Mermaid SVG accordingly.
+
+Revisit if: quality iteration shows d2 sequence output failing on real
+content; artifacts repeatedly need gantt/ER at generation time; or a
+browser-free Mermaid renderer ships.
 
 ## Tier 2 — runtime libraries (opt-in escalation)
 

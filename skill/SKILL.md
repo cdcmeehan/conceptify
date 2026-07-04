@@ -39,6 +39,9 @@ Read these before authoring — they are the contract, not background:
   Read it before step 5; it is the FR-6.3 gate on every artifact.
 - **`scripts/highlight.mjs`** — Shiki v4 dual-theme code highlighting
   helper (run it; no need to read it).
+- **`scripts/postprocess-svg.mjs`** — post-processes d2/dot SVG for
+  inlining (prolog/style stripping + `data-cfy-id` stamping; see
+  rendering.md — run it, no need to read it).
 - **`examples/demo-artifact.html`** — a complete valid artifact exercising
   every component. Skim it as a reference rendering when unsure how
   components compose.
