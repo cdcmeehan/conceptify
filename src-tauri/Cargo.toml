@@ -39,6 +39,8 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 thiserror = "2"
 conceptify-types = { path = "../crates/conceptify-types" }
+scraper = "0.27.0"
+ego-tree = "0.11.0"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
@@ -49,4 +51,5 @@ tauri-plugin-window-state = "2"
 # `tauri::test::{mock_builder, get_ipc_response, ...}` is gated behind this
 # feature. Not enabled for normal builds.
 tauri = { version = "2", features = ["test"] }
+tower = { version = "0.5.3", features = ["util"] }
 

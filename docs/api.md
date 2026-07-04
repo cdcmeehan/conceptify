@@ -52,13 +52,18 @@ webview updates live instead of polling. The frontend subscribes with
 | `api-ping` | `GET /api/v1/ping` (demo/health-check route) | `{ message: string, unix_ms: number }` |
 | `projects-changed` | `POST /api/v1/projects/ensure`, `PATCH /api/v1/projects/:id`, `PUT /api/v1/projects/:id/archive` | `null` (no payload) |
 | `thread-created` | `POST /api/v1/threads` | `{ project_id: string, thread_id: string }` |
+| `artifact-updated` | `POST /api/v1/threads/:thread_id/artifact` | `{ project_id: string, thread_id: string, version: number }` |
 | `navigate` | `POST /api/v1/open` | `{ project_id: string, thread_id: string \| null }` |
+
+`artifact-updated` is the viewer's live-refresh trigger (PRD N2: save →
+visible refresh < 500ms): the frontend reloads the artifact iframe for
+`thread_id` at `version` when it arrives.
 
 `GET /api/v1/debug/db-check`, `GET /api/v1/projects`, and `GET /api/v1/threads`
 do not emit events — they're read-only.
 
-Future mutation endpoints (artifacts, comments) will add rows here as they land
-(`artifact-updated`, `comment-resolved`, per PRD §5.1).
+Future mutation endpoints (comments) will add rows here as they land
+(`comment-resolved`, per PRD §5.1).
 
 ## Endpoints
 
@@ -355,6 +360,94 @@ error.
 
 ---
 
+## Artifacts
+
+### `POST /api/v1/threads/:thread_id/artifact`
+
+Authenticated. **save-artifact** (PRD FR-3.6, §5.6): validate the submitted
+HTML file and store it as the thread's next artifact version (v1, v2, …; prior
+versions retained). This endpoint owns the thread's `→ ready` status
+transition.
+
+**Request body: the raw artifact HTML bytes** — not JSON, not multipart. Send
+`Content-Type: text/html` (not enforced). Rationale: a JSON wrapper cannot
+carry invalid UTF-8 (the validator's `E-UTF8` rule would be unreachable) and
+needlessly escapes multi-megabyte payloads; the CLI just streams the file it
+was given. Bodies over 60 MiB are rejected at the transport layer with a bare
+`413`; the spec's 50 MiB cap (`E-SIZE-MAX`) applies below that with a
+structured error.
+
+```
+POST /api/v1/threads/7c9e6679-7425-40de-944b-e07fc1f90ae7/artifact
+Authorization: Bearer <token>
+Content-Type: text/html
+
+<!doctype html> ...
+```
+
+**Validation** runs the rule set from
+[docs/artifact-spec.md](artifact-spec.md) §8 — that doc is the contract; rule
+IDs (`E-*` hard failures, `W-*` warnings) are stable identifiers and are not
+restated here. Hard failures reject the save (nothing is stored, no version
+consumed); warnings are returned in the success response for the CLI to print
+to stderr. `W-VERSION-MISMATCH` is checked against the server-assigned
+version, which is authoritative over the file's `cfy:version` meta.
+
+**Versioning & storage** (§5.6): the file is stored as
+`~/Documents/conceptify/artifacts/<project-id>/threads/<thread-slug>/artifact.vN.html`,
+and `artifact.html` in the same directory is atomically replaced with a copy
+of the new version (temp + rename, never a symlink — PRD N4; a `runs/`
+directory is also created, reserved for headless-agent transcripts). All
+writes are temp + rename; a crash mid-save never leaves a partial file visible
+or a DB row pointing at a missing file.
+
+**`created_by` is inferred, never caller-supplied**: version 1 → `initial`,
+version ≥ 2 → `follow_up`.
+
+Response `200 OK` (stored — possibly with warnings):
+
+```json
+{
+  "thread_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "project_id": "550e8400-e29b-41d4-a716-446655440000",
+  "version": 2,
+  "created_by": "follow_up",
+  "file_path": "/Users/chris/Documents/conceptify/artifacts/550e8400-…/threads/how-does-oauth-work/artifact.v2.html",
+  "warnings": [
+    { "code": "W-ANCHOR-DIAGRAM", "message": "svg \"fig-map\" has thin anchor coverage: 8 shape elements but only 1 data-cfy-id bearers (need ≥ 3)" }
+  ]
+}
+```
+
+Response `422 Unprocessable Entity` (validation hard failure — nothing
+stored). `error`/`code` carry the first violated rule (the shape promised by
+artifact-spec.md §8); `errors` lists every hard failure found:
+
+```json
+{
+  "error": "script src \"https://evil.example.com/x.js\" is not on the Tier-2 CDN allowlist",
+  "code": "E-EXTERNAL-CODE",
+  "errors": [
+    { "code": "E-EXTERNAL-CODE", "message": "script src \"https://evil.example.com/x.js\" is not on the Tier-2 CDN allowlist" }
+  ]
+}
+```
+
+Response `404 Not Found` (unknown `thread_id`):
+
+```json
+{ "error": "thread not found: <id>" }
+```
+
+Side effects: thread status → `ready` (and `updated_at` bumped), emits
+`artifact-updated` (see Events above).
+
+Errors: `401 Unauthorized` if bearer token missing/wrong; `404` unknown
+thread; `413` body over the 60 MiB transport cap; `422` validation hard
+failure; `500` on database or disk error.
+
+---
+
 ## Open / focus
 
 ### `POST /api/v1/open`
@@ -421,8 +514,6 @@ database error.
 
 ---
 
-_Endpoints to be added by later beads: `save-artifact`, `get-context`,
-`list-comments`, `resolve-comment`, `status` (§5.2). Each should get its own
-section here with request/response shapes and any events it emits.
-`save-artifact`'s validation rules (hard failures vs warnings) are defined in
-[docs/artifact-spec.md](artifact-spec.md) §8 — cite, don't restate._
+_Endpoints to be added by later beads: `get-context`, `list-comments`,
+`resolve-comment`, `status` (§5.2). Each should get its own section here with
+request/response shapes and any events it emits._

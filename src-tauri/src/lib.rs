@@ -1,3 +1,4 @@
+mod artifacts;
 mod commands;
 mod db;
 mod projects;

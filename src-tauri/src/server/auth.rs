@@ -77,8 +77,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 /// axum middleware: rejects any request whose `Authorization` header isn't
 /// exactly `Bearer <token>`.
-pub async fn require_bearer_token(
-    State(state): State<ApiState>,
+pub async fn require_bearer_token<R: tauri::Runtime>(
+    State(state): State<ApiState<R>>,
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {

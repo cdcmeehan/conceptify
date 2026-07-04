@@ -17,7 +17,7 @@ use crate::threads::{self, ThreadError};
 
 use super::state::ApiState;
 
-pub fn router() -> Router<ApiState> {
+pub fn router<R: tauri::Runtime>() -> Router<ApiState<R>> {
     Router::new()
         .route("/threads", axum::routing::post(create_thread))
         .route("/threads", axum::routing::get(list_threads))
@@ -28,8 +28,8 @@ struct ListThreadsQuery {
     project_id: String,
 }
 
-async fn create_thread(
-    State(state): State<ApiState>,
+async fn create_thread<R: tauri::Runtime>(
+    State(state): State<ApiState<R>>,
     Json(req): Json<CreateThreadRequest>,
 ) -> impl IntoResponse {
     let project_id = req.project_id.clone();
@@ -86,8 +86,8 @@ async fn create_thread(
     }
 }
 
-async fn list_threads(
-    State(state): State<ApiState>,
+async fn list_threads<R: tauri::Runtime>(
+    State(state): State<ApiState<R>>,
     Query(query): Query<ListThreadsQuery>,
 ) -> impl IntoResponse {
     let project_id = query.project_id;

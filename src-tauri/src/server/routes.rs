@@ -19,13 +19,14 @@ use crate::db;
 use super::auth;
 use super::state::ApiState;
 
-pub fn build_router(state: ApiState) -> Router {
+pub fn build_router<R: tauri::Runtime>(state: ApiState<R>) -> Router {
     // Authenticated routes, versioned from day one (FR-8 / §7.8).
     let protected = Router::new()
         .route("/ping", get(ping))
         .route("/debug/db-check", get(db_check))
         .merge(super::projects_routes::router())
         .merge(super::threads_routes::router())
+        .merge(super::artifacts_routes::router())
         .merge(super::open_routes::router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -56,7 +57,7 @@ async fn health() -> impl IntoResponse {
 /// Demo authenticated route. Also demonstrates an axum handler emitting a
 /// Tauri event that the webview can subscribe to (PRD §5.1: "the AppHandle
 /// is shared into axum state so HTTP handlers can emit Tauri events").
-async fn ping(State(state): State<ApiState>) -> impl IntoResponse {
+async fn ping<R: tauri::Runtime>(State(state): State<ApiState<R>>) -> impl IntoResponse {
     let payload = json!({
         "message": "pong",
         "unix_ms": std::time::SystemTime::now()
@@ -78,7 +79,7 @@ async fn ping(State(state): State<ApiState>) -> impl IntoResponse {
 /// trivial read (`SELECT count(*) FROM projects`) through `db::with_conn` so
 /// the query itself executes on a blocking-pool thread rather than an axum
 /// worker.
-async fn db_check(State(state): State<ApiState>) -> impl IntoResponse {
+async fn db_check<R: tauri::Runtime>(State(state): State<ApiState<R>>) -> impl IntoResponse {
     let result = db::with_conn(&state.db, |conn| {
         conn.query_row("SELECT count(*) FROM projects", [], |row| row.get::<_, i64>(0))
     })

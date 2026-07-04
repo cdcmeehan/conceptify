@@ -133,6 +133,47 @@ pub struct ListThreadsResponse {
     pub threads: Vec<ThreadListItem>,
 }
 
+// Artifacts API types (PRD §7.3 FR-3.6, §5.6)
+
+/// One validation-rule outcome from `save-artifact`. `code` is a stable rule
+/// identifier from docs/artifact-spec.md §8 (`E-*` = hard failure, `W-*` =
+/// warning); `message` is human-readable detail. The CLI prints warnings to
+/// stderr as `warning: <code>: <message>` lines.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactIssue {
+    pub code: String,
+    pub message: String,
+}
+
+/// Success response from `POST /api/v1/threads/{thread_id}/artifact`. The
+/// request body is the raw artifact HTML bytes (not JSON) — see docs/api.md.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveArtifactResponse {
+    pub thread_id: String,
+    pub project_id: String,
+    /// The server-assigned version (v1, v2, ...) — authoritative over the
+    /// file's `cfy:version` meta.
+    pub version: i64,
+    /// `initial` (version 1) or `follow_up` (version ≥ 2); inferred
+    /// server-side, never caller-supplied.
+    pub created_by: String,
+    /// Absolute path of the stored `artifact.vN.html` on disk.
+    pub file_path: String,
+    /// Spec §8.2 warnings — the artifact was stored despite these.
+    pub warnings: Vec<ArtifactIssue>,
+}
+
+/// Error body when `save-artifact` rejects the file (spec §8.1 hard
+/// failures). `error`/`code` carry the first violation (the shape the spec
+/// promises); `errors` lists every violated rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveArtifactErrorResponse {
+    pub error: String,
+    pub code: String,
+    #[serde(default)]
+    pub errors: Vec<ArtifactIssue>,
+}
+
 // Open / focus API types (PRD §5.2 `conceptify open`)
 
 /// Request to focus the app on a project or thread (`POST /api/v1/open`).

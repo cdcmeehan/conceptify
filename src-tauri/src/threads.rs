@@ -229,6 +229,28 @@ pub fn find_thread_project(
     .map_err(Into::into)
 }
 
+/// Transition a thread's status (PRD §4 status machine: generating | ready |
+/// updating | error), bumping `updated_at` so the thread rises in the
+/// last-activity sort. The caller owns the legality of the transition —
+/// save-artifact owns `→ ready` (bead `conceptify-nsy.3`), the run lifecycle
+/// owns `→ updating`/`→ error` (later beads). Returns
+/// `ThreadError::ProjectNotFound`-style semantics via a plain rusqlite error
+/// path: an unknown id simply updates zero rows, which callers that already
+/// validated existence (as save-artifact does) can ignore.
+pub fn set_thread_status(
+    conn: &Connection,
+    thread_id: &str,
+    status: ThreadStatus,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE threads
+         SET status = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1",
+        rusqlite::params![thread_id, status.as_str()],
+    )?;
+    Ok(())
+}
+
 /// Turn a human title into a filesystem-safe slug: lowercase ASCII
 /// alphanumerics, runs of any other character collapsed to a single hyphen,
 /// no leading/trailing hyphen, capped at `MAX_SLUG_LEN`.
@@ -463,6 +485,32 @@ mod tests {
         assert_eq!(list[0].open_comment_count, 0);
         assert_eq!(list[1].id, second.id);
         assert_eq!(list[1].open_comment_count, 2);
+    }
+
+    #[test]
+    fn set_status_updates_status_and_bumps_activity() {
+        let conn = test_conn();
+        let t = create_thread(&conn, "p1", "Status test", "q").unwrap();
+        assert_eq!(t.status, ThreadStatus::Generating);
+
+        // Backdate updated_at so the bump is observable.
+        conn.execute(
+            "UPDATE threads SET updated_at = '2000-01-01T00:00:00.000Z' WHERE id = ?1",
+            [&t.id],
+        )
+        .unwrap();
+
+        set_thread_status(&conn, &t.id, ThreadStatus::Ready).unwrap();
+
+        let (status, updated_at): (String, String) = conn
+            .query_row(
+                "SELECT status, updated_at FROM threads WHERE id = ?1",
+                [&t.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "ready");
+        assert!(updated_at > "2000-01-01T00:00:00.000Z".to_owned());
     }
 
     #[test]

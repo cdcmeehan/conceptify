@@ -11,6 +11,7 @@
 //! endpoints (projects, threads, artifacts, comments — later beads) get
 //! added to `routes.rs` as the domain model lands.
 
+mod artifacts_routes;
 mod auth;
 mod net;
 mod open_routes;

@@ -18,7 +18,7 @@ use crate::projects::{self, ProjectError};
 
 use super::state::ApiState;
 
-pub fn router() -> Router<ApiState> {
+pub fn router<R: tauri::Runtime>() -> Router<ApiState<R>> {
     Router::new()
         .route("/projects/ensure", axum::routing::post(ensure_project))
         .route("/projects", axum::routing::get(list_projects))
@@ -32,8 +32,8 @@ struct ListProjectsQuery {
     archived: bool,
 }
 
-async fn ensure_project(
-    State(state): State<ApiState>,
+async fn ensure_project<R: tauri::Runtime>(
+    State(state): State<ApiState<R>>,
     Json(req): Json<EnsureProjectRequest>,
 ) -> impl IntoResponse {
     let root_path = req.root_path.clone();
@@ -86,8 +86,8 @@ async fn ensure_project(
     }
 }
 
-async fn list_projects(
-    State(state): State<ApiState>,
+async fn list_projects<R: tauri::Runtime>(
+    State(state): State<ApiState<R>>,
     Query(query): Query<ListProjectsQuery>,
 ) -> impl IntoResponse {
     let include_archived = query.archived;
@@ -124,8 +124,8 @@ async fn list_projects(
     }
 }
 
-async fn rename_project(
-    State(state): State<ApiState>,
+async fn rename_project<R: tauri::Runtime>(
+    State(state): State<ApiState<R>>,
     Path(id): Path<String>,
     Json(req): Json<RenameProjectRequest>,
 ) -> impl IntoResponse {
@@ -160,8 +160,8 @@ async fn rename_project(
     }
 }
 
-async fn archive_project(
-    State(state): State<ApiState>,
+async fn archive_project<R: tauri::Runtime>(
+    State(state): State<ApiState<R>>,
     Path(id): Path<String>,
     Json(req): Json<ArchiveProjectRequest>,
 ) -> impl IntoResponse {

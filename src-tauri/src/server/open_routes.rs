@@ -25,7 +25,7 @@ use crate::threads;
 
 use super::state::ApiState;
 
-pub fn router() -> Router<ApiState> {
+pub fn router<R: tauri::Runtime>() -> Router<ApiState<R>> {
     Router::new().route("/open", axum::routing::post(open))
 }
 
@@ -81,8 +81,8 @@ fn resolve_target(
     }
 }
 
-async fn open(
-    State(state): State<ApiState>,
+async fn open<R: tauri::Runtime>(
+    State(state): State<ApiState<R>>,
     Json(req): Json<OpenRequest>,
 ) -> impl IntoResponse {
     let thread_id = req.thread_id.clone();
