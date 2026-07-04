@@ -53,25 +53,37 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+just dev          # app dev loop (npm install if needed + npm run tauri dev)
+just build        # release build: Conceptify.app bundle + CLI
+just install-cli  # release CLI symlinked onto PATH (~/.local/bin)
+just check        # cargo check + clippy -D warnings (quality gate)
+cargo test        # workspace tests
 ```
+
+`cargo` lives at `$HOME/.cargo/bin`. Build from the repo root; artifacts land in the root `target/` (Cargo workspace).
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
-
-## Conventions & Patterns
-
-_Add your project-specific conventions here_
+Tauri v2 macOS app (Preact + Tailwind v4 frontend, Rust core) with an embedded axum HTTP API on `127.0.0.1:4477` (bearer-token auth, port/token files under `~/Library/Application Support/conceptify/`) and a WAL-mode SQLite DB. Cargo workspace: `src-tauri` (app, binary `conceptify-app`), `crates/conceptify-cli` (binary `conceptify`), `crates/conceptify-types` (shared API types). Artifact HTML files live centrally under `~/Documents/conceptify/artifacts/<project-id>/`, never in target repos. See `prd.md` for the full spec, `docs/api.md` + `docs/cli.md` for the API/CLI surface, and `docs/startup.md` for the boot sequence.
 
 
 ### Using subagents for beads
-We have a subagent for harder tasks and one for easier tasks. When you, the orchestrator, are instructed to 
-"work through the beads", either to a certain point or indefitely, you should have a quick scan of the upcoming bead and decide whether it can be completed by a hard worker or an easier worker, and spin up the correct subagent accordingly.
 
-Also, you may as the orchestrator identify opportunities for parallel work such as beads that don't interact with each other much. In these cases you can spin up hard workers or easy workers or one or more of each to work in parallel as the tasks dictate.
+We have three worker subagents, tiered by task complexity. When you, the orchestrator, are instructed to "work through the beads" (to a certain point or indefinitely), scan each upcoming bead and route it to the cheapest tier that can genuinely complete it — escalate only when the bead's content demands it, not because it's long.
+
+| Tier | Agent | Model | Route these beads here |
+|------|-------|-------|------------------------|
+| High | `high-complexity-worker` | Fable 5 | Open design questions / decision-type beads; security- or isolation-relevant surfaces (auth, CSP, sandboxing, origin isolation); architecture-sensitive Rust core (protocol handlers, process management, async/state sharing); novel algorithms (anchor re-attachment, status machines, atomic versioning); anything expensive to unwind if the approach is wrong |
+| Medium | `medium-complexity-worker` | Opus 4.8 | The workhorse for most feature beads: multi-module implementation on a settled design, non-trivial API endpoints + domain logic, meaty UI with real state, integration across existing layers (server ↔ DB ↔ frontend ↔ CLI), refactors with clear intent |
+| Low | `low-complexity-worker` | Sonnet 4.5 | Fully-specified mechanical work: scaffolding, installs, config/justfile, docs/README, setup scripts, trivial CRUD wiring, copy/style tweaks |
+
+**Triage heuristics:**
+- Ask "what could a weaker model get *wrong* here?" If the answer is "nothing, the bead spells it out" → low. If "implementation details and edge cases" → medium. If "the actual approach" → high.
+- Decision-type beads and anything the PRD flags as an open question go straight to high.
+- Workers are told to escalate rather than guess: low → medium when real judgment appears, medium → high when design latitude or security surfaces appear. Take escalations seriously — re-dispatch, don't downplay.
+- When in doubt between two tiers, prefer the higher one for foundation code others will build on, the lower one for leaf work that's easy to redo.
+
+**Parallelism:** identify beads that don't interact (disjoint files/layers) and run workers concurrently — mixing tiers freely as the tasks dictate. Fence each worker's prompt with explicit file boundaries ("do not touch X, another agent is working there") when running in parallel; beads that converge on the same core files (e.g. `src-tauri/src/lib.rs`) should run sequentially.
+
+**Orchestrator duties per bead:** claim it (`bd update <id> --claim`) before dispatch, tell the worker whether you or it will close it, spot-check the result against the acceptance criteria (don't rubber-stamp reports — verify at least the load-bearing claim), then close and commit per the session protocol.
