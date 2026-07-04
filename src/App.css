@@ -21,3 +21,95 @@ body {
   /* Panes own their own scroll regions; the shell itself never scrolls. */
   overflow: hidden;
 }
+
+/* Agent answer HTML rendered in the comments sidebar (FR-4.5, bead 94m.6).
+   The fragment is authored by our own trusted follow-up agent and assigned via
+   innerHTML (see CommentsSidebar's AnswerHtml docstring for the PRD §9
+   threat-model rationale). These scoped rules give the fragment reasonable
+   typography without pulling in the Tailwind typography plugin. */
+.cfy-answer {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.cfy-answer > :first-child {
+  margin-top: 0;
+}
+.cfy-answer > :last-child {
+  margin-bottom: 0;
+}
+.cfy-answer p {
+  margin: 0.5em 0;
+}
+.cfy-answer ul,
+.cfy-answer ol {
+  margin: 0.5em 0;
+  padding-left: 1.25em;
+}
+.cfy-answer ul {
+  list-style: disc;
+}
+.cfy-answer ol {
+  list-style: decimal;
+}
+.cfy-answer li {
+  margin: 0.15em 0;
+}
+.cfy-answer h1,
+.cfy-answer h2,
+.cfy-answer h3,
+.cfy-answer h4 {
+  margin: 0.6em 0 0.3em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.cfy-answer h1 {
+  font-size: 1.05rem;
+}
+.cfy-answer h2 {
+  font-size: 1rem;
+}
+.cfy-answer h3 {
+  font-size: 0.9rem;
+}
+.cfy-answer code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  padding: 0.1em 0.3em;
+  border-radius: 0.25rem;
+  background: rgba(0, 0, 0, 0.06);
+}
+.cfy-answer pre {
+  margin: 0.5em 0;
+  padding: 0.6em 0.75em;
+  border-radius: 0.4rem;
+  overflow-x: auto;
+  background: rgba(0, 0, 0, 0.06);
+}
+.cfy-answer pre code {
+  padding: 0;
+  background: none;
+}
+.cfy-answer a {
+  color: #2563eb;
+  text-decoration: underline;
+}
+.cfy-answer blockquote {
+  margin: 0.5em 0;
+  padding-left: 0.75em;
+  border-left: 2px solid rgba(0, 0, 0, 0.15);
+  opacity: 0.85;
+}
+
+@media (prefers-color-scheme: dark) {
+  .cfy-answer code,
+  .cfy-answer pre {
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .cfy-answer a {
+    color: #60a5fa;
+  }
+  .cfy-answer blockquote {
+    border-left-color: rgba(255, 255, 255, 0.2);
+  }
+}

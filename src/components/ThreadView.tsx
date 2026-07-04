@@ -20,11 +20,16 @@ import type { Thread } from "../lib/api";
 import { artifactBridge } from "../lib/bridge";
 import { appStore, useAppStore } from "../store/appStore";
 import { ArtifactCommentLayer } from "./ArtifactCommentLayer";
+import { CommentsSidebar } from "./CommentsSidebar";
 import { StatusChip } from "./StatusChip";
 
 export function ThreadView({ thread }: { thread: Thread | null }) {
   const state = useAppStore();
   const [openError, setOpenError] = useState<string | null>(null);
+  // The comments sidebar (94m.6) is collapsible; the preference persists across
+  // thread switches (ThreadView isn't remounted per thread — only the iframe and
+  // comment layer are keyed). Default open: this is the interrogation home base.
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   // Register the viewer iframe with the bridge (src/lib/bridge.ts owns the
   // postMessage handshake; comment UI riding on it is 94m.3/94m.6). Stable
@@ -61,6 +66,9 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
   const hasArtifact = resolvedVersion != null;
   const waitingOnVersions =
     !hasArtifact && (state.artifactVersionsLoading || state.artifactVersionsError != null);
+  // Live open-comment count for the sidebar toggle badge (from the store, so it
+  // reflects API/CLI-driven changes without a refetch of the thread row).
+  const openCommentCount = state.comments.filter((c) => c.status === "open").length;
 
   function onVersionChange(e: Event) {
     const value = (e.currentTarget as HTMLSelectElement).value;
@@ -110,6 +118,24 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
               </button>
             </>
           )}
+          <button
+            type="button"
+            onClick={() => setSidebarOpen((v) => !v)}
+            aria-pressed={sidebarOpen}
+            title={sidebarOpen ? "Hide comments" : "Show comments"}
+            class={`inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
+              sidebarOpen
+                ? "border-blue-300 bg-blue-600/10 text-blue-700 dark:border-blue-500/40 dark:bg-blue-500/15 dark:text-blue-300"
+                : "border-neutral-300 bg-white text-neutral-700 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:bg-neutral-800"
+            }`}
+          >
+            Comments
+            {openCommentCount > 0 && (
+              <span class="rounded-full bg-blue-100 px-1.5 text-[11px] font-medium tabular-nums text-blue-700 dark:bg-blue-500/20 dark:text-blue-300">
+                {openCommentCount}
+              </span>
+            )}
+          </button>
         </div>
         {(viewingOldVersion || openError != null) && (
           <div class="mt-2 flex items-center gap-3">
@@ -125,45 +151,65 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
         )}
       </header>
 
-      {hasArtifact ? (
-        // S2 containment boundary: allow-scripts ONLY — never add
-        // allow-same-origin (opaque origin is the whole point).
-        <>
-          <iframe
-            key={thread.id}
-            ref={iframeRef}
-            src={`artifact://localhost/${thread.id}/${resolvedVersion}`}
-            sandbox="allow-scripts"
-            title="Artifact"
-            class="min-h-0 w-full flex-1 border-0 bg-white dark:bg-neutral-950"
-          />
-          {/* Text-selection + element-click commenting (94m.3/94m.4). Keyed by
-              thread so it remounts (fresh popover + bridge subscription) on
-              thread switch; version switches update via the prop. Only mounted
-              when an artifact exists → no commenting on a generating thread. */}
-          {resolvedVersion != null && (
-            <ArtifactCommentLayer
-              key={thread.id}
-              threadId={thread.id}
-              artifactVersion={resolvedVersion}
-              iframeRef={iframeElRef}
-            />
+      {/* Horizontal split: artifact viewer (left, flex) + comments sidebar
+          (right, collapsible, 94m.6). The sidebar renders whenever a thread is
+          selected — even with no artifact yet — so the direct-follow-up composer
+          (94m.5) is visible-but-disabled during generation. */}
+      <div class="flex min-h-0 flex-1">
+        <div class="flex min-w-0 flex-1 flex-col">
+          {hasArtifact ? (
+            // S2 containment boundary: allow-scripts ONLY — never add
+            // allow-same-origin (opaque origin is the whole point).
+            <>
+              <iframe
+                key={thread.id}
+                ref={iframeRef}
+                src={`artifact://localhost/${thread.id}/${resolvedVersion}`}
+                sandbox="allow-scripts"
+                title="Artifact"
+                class="min-h-0 w-full flex-1 border-0 bg-white dark:bg-neutral-950"
+              />
+              {/* Text-selection + element-click commenting (94m.3/94m.4). Keyed
+                  by thread so it remounts (fresh popover + bridge subscription)
+                  on thread switch; version switches update via the prop. Only
+                  mounted when an artifact exists → no anchored comments on a
+                  generating thread. */}
+              {resolvedVersion != null && (
+                <ArtifactCommentLayer
+                  key={thread.id}
+                  threadId={thread.id}
+                  artifactVersion={resolvedVersion}
+                  iframeRef={iframeElRef}
+                />
+              )}
+            </>
+          ) : waitingOnVersions ? (
+            // Version list still in flight (or failed): render nothing heavy —
+            // the list resolves in a beat; on error the state below takes over
+            // on the next successful fetch.
+            <div class="flex min-h-0 flex-1 items-center justify-center">
+              {state.artifactVersionsError != null ? (
+                <p class="max-w-md px-6 text-center text-xs text-rose-600 dark:text-rose-400">
+                  {state.artifactVersionsError}
+                </p>
+              ) : null}
+            </div>
+          ) : (
+            <NoArtifactState thread={thread} />
           )}
-        </>
-      ) : waitingOnVersions ? (
-        // Version list still in flight (or failed): render nothing heavy —
-        // the list resolves in a beat; on error the state below takes over
-        // on the next successful fetch.
-        <div class="flex min-h-0 flex-1 items-center justify-center">
-          {state.artifactVersionsError != null ? (
-            <p class="max-w-md px-6 text-center text-xs text-rose-600 dark:text-rose-400">
-              {state.artifactVersionsError}
-            </p>
-          ) : null}
         </div>
-      ) : (
-        <NoArtifactState thread={thread} />
-      )}
+
+        {sidebarOpen && (
+          <CommentsSidebar
+            comments={state.comments}
+            loading={state.commentsLoading}
+            error={state.commentsError}
+            threadId={threadId}
+            viewerVersion={resolvedVersion}
+            onClose={() => setSidebarOpen(false)}
+          />
+        )}
+      </div>
     </main>
   );
 }
