@@ -423,4 +423,6 @@ database error.
 
 _Endpoints to be added by later beads: `save-artifact`, `get-context`,
 `list-comments`, `resolve-comment`, `status` (§5.2). Each should get its own
-section here with request/response shapes and any events it emits._
+section here with request/response shapes and any events it emits.
+`save-artifact`'s validation rules (hard failures vs warnings) are defined in
+[docs/artifact-spec.md](artifact-spec.md) §8 — cite, don't restate._
