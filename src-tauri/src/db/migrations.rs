@@ -28,6 +28,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(COMMENTS),
         M::up(FOLLOW_UP_RUNS),
         M::up(SETTINGS),
+        M::up(THREAD_SLUG),
     ])
 }
 
@@ -140,4 +141,27 @@ CREATE TABLE settings (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
 );
+";
+
+/// Adds `threads.slug` — the filesystem-safe artifact-folder name (§5.6),
+/// unique within a project (bead `conceptify-qxr.2`).
+///
+/// A separate migration rather than a field folded into the original
+/// `THREADS` definition: this file's contract (see the module doc) is that
+/// shipped `M::up` entries are never edited, since `rusqlite_migration`
+/// tracks progress positionally by `user_version`. Databases already migrated
+/// to the `THREADS`-through-`SETTINGS` state would silently skip an in-place
+/// edit and end up without the column, so the change ships as an appended
+/// migration that both fresh and existing databases pick up.
+///
+/// SQLite's `ALTER TABLE ... ADD COLUMN` can't attach a `UNIQUE` constraint
+/// (or a non-constant default) inline, so uniqueness is enforced by a
+/// separate composite `UNIQUE INDEX` on `(project_id, slug)`. The `NOT NULL
+/// DEFAULT ''` placeholder only matters for rows that predate this migration;
+/// there are none, because no create-thread path existed before this bead, so
+/// the unique index has no `''` collisions to trip over. Every row inserted
+/// hereafter supplies a real, deduped slug.
+const THREAD_SLUG: &str = "
+ALTER TABLE threads ADD COLUMN slug TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX idx_threads_project_slug ON threads(project_id, slug);
 ";

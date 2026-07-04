@@ -51,13 +51,13 @@ webview updates live instead of polling. The frontend subscribes with
 |---|---|---|
 | `api-ping` | `GET /api/v1/ping` (demo/health-check route) | `{ message: string, unix_ms: number }` |
 | `projects-changed` | `POST /api/v1/projects/ensure`, `PATCH /api/v1/projects/:id`, `PUT /api/v1/projects/:id/archive` | `null` (no payload) |
+| `thread-created` | `POST /api/v1/threads` | `{ project_id: string, thread_id: string }` |
 
-`GET /api/v1/debug/db-check` and `GET /api/v1/projects` do not emit events —
-they're read-only.
+`GET /api/v1/debug/db-check`, `GET /api/v1/projects`, and `GET /api/v1/threads`
+do not emit events — they're read-only.
 
-Future mutation endpoints (threads, artifacts, comments) will add rows here
-as they land (`artifact-updated`, `comment-resolved`, `thread-created`, per
-PRD §5.1).
+Future mutation endpoints (artifacts, comments) will add rows here as they land
+(`artifact-updated`, `comment-resolved`, per PRD §5.1).
 
 ## Endpoints
 
@@ -263,7 +263,97 @@ not found; `500` on database error.
 
 ---
 
-_Endpoints to be added by later beads: `create-thread`, `save-artifact`,
-`get-context`, `list-comments`, `resolve-comment`, `open`, `status` (§5.2).
-Each should get its own section here with request/response shapes and any
-events it emits._
+## Threads
+
+### `POST /api/v1/threads`
+
+Authenticated. Create a thread (PRD FR-2.1). A filesystem-safe `slug` for the
+artifact folder (§5.6) is derived server-side from `title` and deduped to be
+unique within the project (`slug`, `slug-2`, `slug-3`, ...); the caller never
+supplies it. New threads start in status `generating` (OQ4: create early;
+`error`/retry transitions land in later milestones).
+
+Request body:
+
+```json
+{
+  "project_id": "550e8400-e29b-41d4-a716-446655440000",
+  "title": "How does OAuth work?",
+  "initial_question": "Explain the OAuth 2.0 authorization code flow."
+}
+```
+
+Response `200 OK`:
+
+```json
+{
+  "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "project_id": "550e8400-e29b-41d4-a716-446655440000",
+  "title": "How does OAuth work?",
+  "slug": "how-does-oauth-work",
+  "initial_question": "Explain the OAuth 2.0 authorization code flow.",
+  "status": "generating",
+  "created_at": "2026-07-04T12:34:56.789Z",
+  "updated_at": "2026-07-04T12:34:56.789Z"
+}
+```
+
+Response `400 Bad Request` (empty/whitespace-only title):
+
+```json
+{ "error": "title must not be empty" }
+```
+
+Response `404 Not Found` (unknown `project_id`):
+
+```json
+{ "error": "project not found: <id>" }
+```
+
+Side effect: emits `thread-created` (see Events above).
+
+Errors: `401 Unauthorized` if bearer token missing/wrong; `400` on empty
+title; `404` if the project doesn't exist; `500` on database error.
+
+---
+
+### `GET /api/v1/threads`
+
+Authenticated. List a project's threads (PRD FR-2.2), sorted by last activity
+(`updated_at`, most recent first), each with its status and open-comment count.
+
+Query parameters:
+- `project_id` (required): the project whose threads to list.
+
+Response `200 OK`:
+
+```json
+{
+  "threads": [
+    {
+      "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "project_id": "550e8400-e29b-41d4-a716-446655440000",
+      "title": "How does OAuth work?",
+      "slug": "how-does-oauth-work",
+      "initial_question": "Explain the OAuth 2.0 authorization code flow.",
+      "status": "generating",
+      "created_at": "2026-07-04T12:34:56.789Z",
+      "updated_at": "2026-07-04T12:34:56.789Z",
+      "open_comment_count": 0
+    }
+  ]
+}
+```
+
+`open_comment_count` counts comments still in the `open` state (a real
+`LEFT JOIN` on `comments`; 0 until the comments backend starts inserting rows).
+An unknown `project_id` returns an empty `threads` array rather than a 404.
+
+Errors: `401 Unauthorized` if bearer token missing/wrong; `500` on database
+error.
+
+---
+
+_Endpoints to be added by later beads: `save-artifact`, `get-context`,
+`list-comments`, `resolve-comment`, `open`, `status` (§5.2). Each should get
+its own section here with request/response shapes and any events it emits._

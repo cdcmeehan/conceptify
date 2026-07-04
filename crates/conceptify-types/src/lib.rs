@@ -77,3 +77,58 @@ pub struct ArchiveProjectRequest {
     /// True to archive, false to unarchive.
     pub archived: bool,
 }
+
+// Threads API types (PRD §7.2, FR-2.1, FR-2.2)
+
+/// Request to create a thread (PRD FR-2.1). The slug for the artifact folder
+/// (§5.6) is derived server-side from `title`, not supplied by the caller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateThreadRequest {
+    /// The project this thread belongs to.
+    pub project_id: String,
+    /// Human-readable title; the artifact-folder slug is derived from this.
+    pub title: String,
+    /// The question that seeds the thread's initial artifact.
+    pub initial_question: String,
+}
+
+/// Response from create thread. Includes the generated `id` and `slug`
+/// (filesystem-safe, unique within the project) that later beads use to lay
+/// out the artifact folder under `~/Documents/conceptify/artifacts/...`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateThreadResponse {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    /// Filesystem-safe slug, unique within the project (§5.6 folder name).
+    pub slug: String,
+    pub initial_question: String,
+    /// One of `generating` | `ready` | `updating` | `error`. Newly created
+    /// threads start `generating` (OQ4: create early, status transitions
+    /// owned by save-artifact / run lifecycle in later milestones).
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One thread in a list response (PRD FR-2.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadListItem {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub slug: String,
+    pub initial_question: String,
+    /// One of `generating` | `ready` | `updating` | `error`.
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    /// Number of comments on this thread still in the `open` state.
+    pub open_comment_count: i64,
+}
+
+/// Response from list threads, sorted by last activity (most recent first).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListThreadsResponse {
+    pub threads: Vec<ThreadListItem>,
+}

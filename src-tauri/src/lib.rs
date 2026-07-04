@@ -1,6 +1,7 @@
 mod db;
 mod projects;
 mod server;
+mod threads;
 
 use tauri::{Manager, RunEvent, WindowEvent};
 
@@ -144,6 +145,63 @@ mod tests {
             .expect("response should deserialize as an i64");
         assert_eq!(project_count, 0, "fresh test database should have no projects");
 
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    /// Exercises the threads domain (create + list) against the *real*
+    /// migration output — `db::init_at` runs the full `migrations()` chain,
+    /// including the appended `THREAD_SLUG` migration that adds the `slug`
+    /// column and the `(project_id, slug)` unique index. The `threads`-module
+    /// unit tests use a hand-written in-memory schema; this test proves the
+    /// shipped schema matches what the domain code expects (slug column
+    /// present, status CHECK accepts `generating`, unique index live).
+    #[test]
+    fn threads_create_and_list_against_real_migrations() {
+        let db_path = std::env::temp_dir().join(format!(
+            "conceptify-test-threads-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let db_handle = db::init_at(&db_path).expect("test db should init and migrate");
+        let conn = db_handle.lock().unwrap();
+
+        // Seed a project the threads can hang off of.
+        conn.execute(
+            "INSERT INTO projects (id, name, root_path) VALUES ('p1', 'Proj', '/tmp/p1')",
+            [],
+        )
+        .expect("insert project");
+
+        // Create returns id + slug; two same-title threads get distinct slugs.
+        let a = threads::create_thread(&conn, "p1", "Real Schema Test", "q1")
+            .expect("create first thread");
+        let b = threads::create_thread(&conn, "p1", "Real Schema Test", "q2")
+            .expect("create second thread");
+        assert_eq!(a.slug, "real-schema-test");
+        assert_eq!(b.slug, "real-schema-test-2");
+        assert_eq!(a.status, threads::ThreadStatus::Generating);
+
+        // The unique index from the migration is live: a raw duplicate insert
+        // on (project_id, slug) must be rejected.
+        let dup = conn.execute(
+            "INSERT INTO threads (id, project_id, title, slug, initial_question, status)
+             VALUES ('x', 'p1', 't', 'real-schema-test', 'q', 'generating')",
+            [],
+        );
+        assert!(dup.is_err(), "unique index should reject duplicate slug");
+
+        let list = threads::list_threads(&conn, "p1").expect("list threads");
+        assert_eq!(list.len(), 2);
+        // No comments table rows → all counts 0 through the real LEFT JOIN.
+        assert!(list.iter().all(|t| t.open_comment_count == 0));
+
+        drop(conn);
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));

@@ -17,6 +17,7 @@ pub(crate) mod paths;
 mod projects_routes;
 mod routes;
 mod state;
+mod threads_routes;
 
 use tauri::{AppHandle, Manager};
 
