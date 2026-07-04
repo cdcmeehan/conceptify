@@ -1,3 +1,4 @@
+mod commands;
 mod db;
 mod projects;
 mod server;
@@ -51,7 +52,15 @@ pub fn run() {
     }
 
     builder
-        .invoke_handler(tauri::generate_handler![greet, db_check])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            db_check,
+            commands::list_projects,
+            commands::list_threads,
+            commands::rename_project,
+            commands::set_project_archived,
+            commands::remap_project,
+        ])
         .setup(|app| {
             // Opened and migrated before anything else touches it: both the
             // axum server (spawned below) and any frontend `db_check`-style
