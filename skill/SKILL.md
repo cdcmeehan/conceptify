@@ -34,6 +34,9 @@ Read these before authoring — they are the contract, not background:
   verified render commands (d2, Graphviz, Shiki) and the SVG
   post-processing recipes. Read it before producing any diagram or code
   block.
+- **`references/self-review.md`** — the pre-save visual self-review loop
+  (headless render + screenshot inspection recipe + review checklist).
+  Read it before step 5; it is the FR-6.3 gate on every artifact.
 - **`scripts/highlight.mjs`** — Shiki v4 dual-theme code highlighting
   helper (run it; no need to read it).
 - **`examples/demo-artifact.html`** — a complete valid artifact exercising
@@ -52,7 +55,10 @@ command -v conceptify && conceptify status
 the app if it isn't running (allow ~10s). If the binary is missing, stop
 and tell the user to run `just install-cli` in the conceptify repo, then
 resume. If `status` exits non-zero after a launch attempt, surface its
-stderr to the user and stop.
+stderr to the user and stop. For a fuller diagnostic (app bundle, CLI,
+d2, graphviz, node, agent binary — with install hints), run
+`conceptify doctor`; it is the first debugging step when anything in
+this flow misbehaves.
 
 ### 2. Ensure the project
 
@@ -159,14 +165,24 @@ reminder, not a substitute):
 
 ### 5. Pre-save review
 
-Before saving, re-read the finished HTML against the checklist above and
-`artifact-spec.md` §8's warning list (heading ids, metas, diagram anchor
-coverage, orphaned `cfy:src` comments) so v1 saves clean. A visual
-self-review loop (headless render + screenshot inspection) will be added
-to this skill; until then, be rigorous at the source level — especially
-for hand-authored SVG, where overlapping labels and clipped text are the
-common failures (check text lengths against shape widths, and the
-`viewBox` against actual content extents).
+Two passes, both required. Do not save until both are clean.
+
+**Source review.** Re-read the finished HTML against the assembly
+checklist above and `artifact-spec.md` §8's warning list (heading ids,
+metas, diagram anchor coverage, orphaned `cfy:src` comments) so v1 saves
+clean. For hand-authored SVG specifically, sanity-check text lengths
+against shape widths and the `viewBox` against actual content extents.
+
+**Visual review (`references/self-review.md`).** Source review cannot see
+overlapping labels, clipped text, contrast, or narrow-pane overflow —
+only a render can. Render the finished HTML headlessly, screenshot it at
+**two widths (~460px and ~900px) in both light and dark**, **Read the
+PNGs**, and judge them against the visual checklist. Fix, re-render, and
+re-read until every frame is clean. The exact copy-pasteable
+`agent-browser` recipe (with the mechanical horizontal-overflow check) and
+the full checklist live in **`references/self-review.md`** — follow it.
+This is the FR-6.3 safety net for hand-authored SVG, the highest-variance
+tier; never skip it.
 
 ### 6. Save and verify
 
