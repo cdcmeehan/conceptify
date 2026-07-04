@@ -2,11 +2,12 @@
 //
 // State lives in `appStore` (src/store/appStore.ts); this component just wires
 // the current snapshot into the three panes and triggers the initial load.
-// Live updates (Tauri event → refetch) are bead conceptify-qxr.5 and slot into
-// the store's refetch seams — see the note in appStore.ts.
+// Live updates (Tauri event → refetch) live in `src/lib/events.ts` and drive the
+// store's refetch seams; they're set up once here at startup.
 
 import { useEffect } from "preact/hooks";
 import { appStore, useAppStore } from "./store/appStore";
+import { initEventListeners } from "./lib/events";
 import { ProjectSidebar } from "./components/ProjectSidebar";
 import { ThreadList } from "./components/ThreadList";
 import { ThreadView } from "./components/ThreadView";
@@ -17,6 +18,7 @@ function App() {
 
   useEffect(() => {
     void appStore.refetchProjects();
+    return initEventListeners();
   }, []);
 
   const selectedProject =
