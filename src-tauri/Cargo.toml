@@ -7,6 +7,13 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+# The CLI crate owns the `conceptify` binary name; the app binary is renamed
+# to avoid a workspace output-filename collision in target/. The bundler still
+# ships it as "Conceptify" (productName) via mainBinaryName in tauri.conf.json.
+[[bin]]
+name = "conceptify-app"
+path = "src/main.rs"
+
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
@@ -26,4 +33,20 @@ axum = "0.8"
 tokio = { version = "1", features = ["net", "time", "io-util", "rt-multi-thread", "macros"] }
 rand = "0.9"
 dirs = "6"
+rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite_migration = "2.6"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+thiserror = "2"
+conceptify-types = { path = "../crates/conceptify-types" }
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+
+[dev-dependencies]
+# Only for `cargo test`'s IPC-level test of the `db_check` command (lib.rs) —
+# `tauri::test::{mock_builder, get_ipc_response, ...}` is gated behind this
+# feature. Not enabled for normal builds.
+tauri = { version = "2", features = ["test"] }
 

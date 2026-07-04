@@ -13,11 +13,12 @@
 
 mod auth;
 mod net;
-mod paths;
+pub(crate) mod paths;
+mod projects_routes;
 mod routes;
 mod state;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 pub use state::ApiState;
 
@@ -27,6 +28,11 @@ pub use state::ApiState;
 /// Never propagates an error that would justify crashing the app (PRD N4);
 /// failures (no available port, another Conceptify already serving, token
 /// file unwritable) are logged and this future simply returns.
+///
+/// Expects a `crate::db::DbHandle` to already be in Tauri managed state
+/// (`app.manage(db)` in `lib.rs`'s `setup` hook, before this is spawned) —
+/// panics via `AppHandle::state` if it isn't, since that's a startup wiring
+/// bug, not a runtime condition to degrade gracefully from.
 pub async fn start(app_handle: AppHandle) {
     let token = match auth::load_or_create_token() {
         Ok(t) => t,
@@ -35,6 +41,8 @@ pub async fn start(app_handle: AppHandle) {
             return;
         }
     };
+
+    let db = app_handle.state::<crate::db::DbHandle>().inner().clone();
 
     match net::bind_with_fallback().await {
         net::BindOutcome::Bound(listener, port) => {
@@ -48,6 +56,7 @@ pub async fn start(app_handle: AppHandle) {
             let state = ApiState {
                 app_handle,
                 token: token.into(),
+                db,
             };
             let router = routes::build_router(state);
 

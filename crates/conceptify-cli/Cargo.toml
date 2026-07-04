@@ -1,0 +1,16 @@
+[package]
+name = "conceptify-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "conceptify"
+path = "src/main.rs"
+
+[dependencies]
+conceptify-types = { path = "../conceptify-types" }
+serde.workspace = true
+serde_json.workspace = true
+ureq = { version = "2", default-features = false, features = ["json"] }
+dirs = "6"
