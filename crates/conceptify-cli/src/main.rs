@@ -33,6 +33,7 @@ Usage: conceptify <command> [args...]
 
 Commands:
   status                                              app/API health, version, port
+  doctor                                              check prerequisites (app, CLI, d2, dot, node, agent)
   ensure-project --dir <path> [--name <name>]         find-or-create a project by directory
   create-thread  --project <id> --title <t> --question <q>   create a thread
   open           --thread <id> | --project <id>       focus the app on a project/thread
@@ -51,6 +52,7 @@ fn main() -> ExitCode {
 
     match command.as_str() {
         "status" => cmd_status(),
+        "doctor" => cmd_doctor(),
         "ensure-project" => cmd_ensure_project(rest),
         "create-thread" => cmd_create_thread(rest),
         "open" => cmd_open(rest),
@@ -524,6 +526,263 @@ fn cmd_open(args: &[String]) -> ExitCode {
     }
 }
 
+/// A single prerequisite check result.
+#[derive(Debug, Clone)]
+struct Check {
+    name: String,
+    ok: bool,
+    detail: String,
+    hint: Option<String>,
+}
+
+impl Check {
+    fn pass(name: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ok: true,
+            detail: detail.into(),
+            hint: None,
+        }
+    }
+
+    fn fail(name: impl Into<String>, detail: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ok: false,
+            detail: detail.into(),
+            hint: Some(hint.into()),
+        }
+    }
+}
+
+/// Check if the app is installed (bundle exists or app is running).
+fn check_app_installed() -> Check {
+    // First, read the bundle identifier from tauri.conf.json to use with mdfind.
+    let bundle_id = "com.chrismeehan.conceptify"; // from tauri.conf.json
+
+    // Try mdfind first (most reliable).
+    if let Ok(output) = Command::new("mdfind")
+        .arg(format!("kMDItemCFBundleIdentifier == '{}'", bundle_id))
+        .output()
+    {
+        if output.status.success() && !output.stdout.is_empty() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let paths: Vec<&str> = stdout
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !paths.is_empty() {
+                // Take the first path (usually /Applications/Conceptify.app if installed).
+                return Check::pass(
+                    "app-installed",
+                    format!("Conceptify.app found at {}", paths[0]),
+                );
+            }
+        }
+    }
+
+    // Fall back to checking standard app locations.
+    let app_paths = [
+        "/Applications/Conceptify.app",
+        &format!(
+            "{}/Applications/Conceptify.app",
+            std::env::var("HOME").unwrap_or_default()
+        ),
+    ];
+
+    for path in &app_paths {
+        if std::path::Path::new(path).exists() {
+            return Check::pass("app-installed", format!("Conceptify.app found at {}", path));
+        }
+    }
+
+    // Check if the app is running by probing health (may be a dev build).
+    let port = read_port_file();
+    if let Ok(response) = probe_health(port) {
+        if response.service == "conceptify" && response.status == "ok" {
+            return Check::pass(
+                "app-installed",
+                format!("Conceptify app is running on port {}", port),
+            );
+        }
+    }
+
+    Check::fail(
+        "app-installed",
+        "Conceptify.app not found in /Applications or ~/Applications, and not currently running",
+        "Run `just build` to create Conceptify.app, then install it to /Applications",
+    )
+}
+
+/// Check if `conceptify` CLI is on PATH.
+fn check_cli_on_path() -> Check {
+    match Command::new("which").arg("conceptify").output() {
+        Ok(output) if output.status.success() => {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // Check if it's running from target/ (dev build).
+            if path.contains("/target/") {
+                Check::pass(
+                    "cli-on-path",
+                    format!(
+                        "conceptify is resolvable at {} (dev build; consider `just install-cli`)",
+                        path
+                    ),
+                )
+            } else {
+                Check::pass("cli-on-path", format!("conceptify is on PATH at {}", path))
+            }
+        }
+        _ => Check::fail(
+            "cli-on-path",
+            "conceptify not found on PATH",
+            "Run `just install-cli` to symlink the CLI to ~/.local/bin",
+        ),
+    }
+}
+
+/// Check if `d2` is installed.
+fn check_d2_present() -> Check {
+    match Command::new("which").arg("d2").output() {
+        Ok(output) if output.status.success() => {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Check::pass("d2-present", format!("d2 is available at {}", path))
+        }
+        _ => Check::fail(
+            "d2-present",
+            "d2 not found on PATH",
+            "Install d2: brew install d2",
+        ),
+    }
+}
+
+/// Check if `dot` (graphviz) is installed.
+fn check_dot_present() -> Check {
+    match Command::new("which").arg("dot").output() {
+        Ok(output) if output.status.success() => {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Check::pass("dot-present", format!("dot (graphviz) is available at {}", path))
+        }
+        _ => Check::fail(
+            "dot-present",
+            "dot (graphviz) not found on PATH",
+            "Install graphviz: brew install graphviz",
+        ),
+    }
+}
+
+/// Check if `node` is installed and version >= 20.
+fn check_node_present() -> Check {
+    match Command::new("node").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // Parse version (e.g., "v20.10.0" -> 20).
+            let major_version = version_str
+                .strip_prefix('v')
+                .and_then(|s| s.split('.').next())
+                .and_then(|s| s.parse::<u32>().ok());
+
+            match major_version {
+                Some(v) if v >= 20 => Check::pass(
+                    "node-present",
+                    format!("node {} is available (>= v20)", version_str),
+                ),
+                Some(v) => Check::fail(
+                    "node-present",
+                    format!("node {} is installed but < v20 (found v{})", version_str, v),
+                    "Install node >= v20: brew install node",
+                ),
+                None => Check::fail(
+                    "node-present",
+                    format!(
+                        "node is installed ({}) but version is unparseable",
+                        version_str
+                    ),
+                    "Install node >= v20: brew install node",
+                ),
+            }
+        }
+        _ => Check::fail(
+            "node-present",
+            "node not found on PATH",
+            "Install node: brew install node",
+        ),
+    }
+}
+
+/// Check if the agent binary (`claude`) is resolvable via a login shell.
+fn check_agent_binary_resolvable() -> Check {
+    // Use a login shell to ensure PATH is fully loaded (PRD §5.1).
+    match Command::new("zsh")
+        .arg("-lc")
+        .arg("which claude")
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Check::pass(
+                "agent-binary-resolvable",
+                format!("claude is resolvable at {}", path),
+            )
+        }
+        _ => Check::fail(
+            "agent-binary-resolvable",
+            "claude not found via login shell (zsh -lc 'which claude')",
+            "Install Claude Code (note: settings can override the binary path later)",
+        ),
+    }
+}
+
+/// Shape a Check into JSON for stdout output.
+fn check_to_json(check: &Check) -> serde_json::Value {
+    json!({
+        "name": check.name,
+        "ok": check.ok,
+        "detail": check.detail,
+        "hint": check.hint,
+    })
+}
+
+/// `conceptify doctor` — check prerequisites and report results.
+fn cmd_doctor() -> ExitCode {
+    // Run all checks (never fail hard mid-run).
+    let checks = vec![
+        check_app_installed(),
+        check_cli_on_path(),
+        check_d2_present(),
+        check_dot_present(),
+        check_node_present(),
+        check_agent_binary_resolvable(),
+    ];
+
+    // Print human-readable results to stderr.
+    for check in &checks {
+        if check.ok {
+            eprintln!("[✓] {}: {}", check.name, check.detail);
+        } else {
+            eprintln!("[✗] {}: {}", check.name, check.detail);
+            if let Some(hint) = &check.hint {
+                eprintln!("    Hint: {}", hint);
+            }
+        }
+    }
+
+    // Print machine-readable JSON to stdout.
+    let all_ok = checks.iter().all(|c| c.ok);
+    let output = json!({
+        "ok": all_ok,
+        "checks": checks.iter().map(check_to_json).collect::<Vec<_>>(),
+    });
+    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+
+    // Exit 0 if all pass, 1 if any failed.
+    if all_ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,5 +916,43 @@ mod tests {
         };
         let out = save_artifact_output(&resp);
         assert_eq!(out, json!({ "version": 1, "warningsCount": 0 }));
+    }
+
+    #[test]
+    fn check_to_json_pass() {
+        let check = Check::pass("test-check", "everything is good");
+        let json = check_to_json(&check);
+        assert_eq!(json["name"], "test-check");
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["detail"], "everything is good");
+        assert_eq!(json["hint"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn check_to_json_fail() {
+        let check = Check::fail("test-check", "something is missing", "install it");
+        let json = check_to_json(&check);
+        assert_eq!(json["name"], "test-check");
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["detail"], "something is missing");
+        assert_eq!(json["hint"], "install it");
+    }
+
+    #[test]
+    fn check_pass_creates_correct_state() {
+        let check = Check::pass("foo", "bar");
+        assert_eq!(check.name, "foo");
+        assert_eq!(check.ok, true);
+        assert_eq!(check.detail, "bar");
+        assert!(check.hint.is_none());
+    }
+
+    #[test]
+    fn check_fail_creates_correct_state() {
+        let check = Check::fail("foo", "bar", "baz");
+        assert_eq!(check.name, "foo");
+        assert_eq!(check.ok, false);
+        assert_eq!(check.detail, "bar");
+        assert_eq!(check.hint, Some("baz".to_string()));
     }
 }

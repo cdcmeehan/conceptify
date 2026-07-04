@@ -75,6 +75,84 @@ Prints app health, version, and bound port as JSON. Useful for agent scripts to 
 
 ---
 
+### `conceptify doctor`
+
+Checks all prerequisites needed for Conceptify to function properly (PRD FR-6.5). Runs all checks without failing mid-run and reports a summary at the end. Each check prints an actionable pass/fail line to stderr with install hints on failure. A machine-readable JSON summary is printed to stdout.
+
+**Checks performed:**
+
+1. **App installed**: Verifies Conceptify.app exists via `mdfind` (using bundle identifier from `tauri.conf.json`) or in `/Applications` or `~/Applications`. Also probes `GET /health` to detect a running instance (which may be a dev build). Reports both installed state and running state distinctly.
+2. **CLI on PATH**: Checks if `conceptify` is resolvable on PATH. Notes if it's running from `target/` (dev build) and suggests `just install-cli`.
+3. **d2 present**: Checks if `d2` is installed (hint: `brew install d2`).
+4. **dot present**: Checks if `dot` (graphviz) is installed (hint: `brew install graphviz`).
+5. **node present**: Checks if `node` is installed and version >= 20 (needed for Shiki; hint: `brew install node`).
+6. **Agent binary resolvable**: Checks if `claude` is found via login-shell lookup (`zsh -lc 'which claude'`) per PRD §5.1 (hint: install Claude Code; note that settings can override the binary path later).
+
+**Output (stdout):**
+
+```json
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "app-installed",
+      "ok": true,
+      "detail": "Conceptify.app found at /Applications/Conceptify.app",
+      "hint": null
+    },
+    {
+      "name": "cli-on-path",
+      "ok": true,
+      "detail": "conceptify is on PATH at /usr/local/bin/conceptify",
+      "hint": null
+    },
+    {
+      "name": "d2-present",
+      "ok": true,
+      "detail": "d2 is available at /opt/homebrew/bin/d2",
+      "hint": null
+    },
+    {
+      "name": "dot-present",
+      "ok": true,
+      "detail": "dot (graphviz) is available at /opt/homebrew/bin/dot",
+      "hint": null
+    },
+    {
+      "name": "node-present",
+      "ok": true,
+      "detail": "node v20.10.0 is available (>= v20)",
+      "hint": null
+    },
+    {
+      "name": "agent-binary-resolvable",
+      "ok": true,
+      "detail": "claude is resolvable at /usr/local/bin/claude",
+      "hint": null
+    }
+  ]
+}
+```
+
+**Errors (stderr, with hints):**
+
+```
+[✗] d2-present: d2 not found on PATH
+    Hint: Install d2: brew install d2
+```
+
+**Exit codes:**
+
+- `0` — All checks passed.
+- `1` — One or more checks failed.
+
+**Notes:**
+
+- This command does **not** launch the app or have side effects — it only probes existing state.
+- The health probe uses a short timeout and does not trigger the launch-and-wait contract.
+
+---
+
 ### `conceptify ensure-project --dir <path> [--name <name>]`
 
 Find-or-create a project for a directory (PRD §5.2, maps to
