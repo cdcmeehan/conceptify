@@ -13,6 +13,7 @@
 
 mod artifacts_routes;
 mod auth;
+mod comments_routes;
 mod net;
 mod open_routes;
 pub(crate) mod paths;

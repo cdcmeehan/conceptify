@@ -1,6 +1,7 @@
 mod artifact_protocol;
 mod artifacts;
 mod commands;
+mod comments;
 mod db;
 mod projects;
 mod server;
@@ -221,6 +222,107 @@ mod tests {
         assert_eq!(list.len(), 2);
         // No comments table rows → all counts 0 through the real LEFT JOIN.
         assert!(list.iter().all(|t| t.open_comment_count == 0));
+
+        drop(conn);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    /// Exercises the comments domain (create + list + update) against the
+    /// *real* migration output — `db::init_at` runs the full `migrations()`
+    /// chain, including the appended `COMMENT_ANCHOR_STATE` migration that adds
+    /// the `anchor_state` column + CHECK. The `comments`-module unit tests use a
+    /// hand-written in-memory schema; this test proves the shipped schema
+    /// matches what the domain code expects: the `anchor_state` column is
+    /// present, the composite `(thread_id, artifact_version)` FK is enforced,
+    /// and both status/anchor_state CHECK constraints are live.
+    #[test]
+    fn comments_crud_against_real_migrations() {
+        let db_path = std::env::temp_dir().join(format!(
+            "conceptify-test-comments-mig-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let db_handle = db::init_at(&db_path).expect("test db should init and migrate");
+        let conn = db_handle.lock().unwrap();
+
+        // Seed project → thread → artifact v1 (the comment FK needs the row).
+        conn.execute(
+            "INSERT INTO projects (id, name, root_path) VALUES ('p1', 'Proj', '/tmp/cmig')",
+            [],
+        )
+        .expect("insert project");
+        let thread_id = threads::create_thread(&conn, "p1", "Real Schema", "q")
+            .expect("create thread")
+            .id;
+        conn.execute(
+            "INSERT INTO artifacts (id, thread_id, version, file_path, created_by)
+             VALUES ('a1', ?1, 1, '/tmp/x.html', 'initial')",
+            [&thread_id],
+        )
+        .expect("insert artifact");
+
+        // A comment with a full anchor commits against the real schema and its
+        // anchor_state defaults to `anchored`.
+        let anchor = serde_json::json!({
+            "v": 1, "type": "text", "cfy_id": "sec-x", "start": 0, "end": 3,
+            "quote": { "exact": "why", "prefix": "", "suffix": " token" }
+        });
+        let c = comments::create_comment(&conn, &thread_id, 1, Some(&anchor), "q")
+            .expect("create comment")
+            .comment;
+        assert_eq!(c.anchor_state, comments::AnchorState::Anchored);
+        assert_eq!(c.anchor.unwrap(), anchor);
+
+        // The composite FK rejects a comment against a nonexistent version.
+        let orphan = conn.execute(
+            "INSERT INTO comments (id, thread_id, artifact_version, body, status)
+             VALUES ('x', ?1, 99, 'b', 'open')",
+            [&thread_id],
+        );
+        assert!(
+            orphan.is_err(),
+            "composite FK should reject missing version"
+        );
+
+        // The anchor_state CHECK rejects an unknown value.
+        let bad_state = conn.execute(
+            "UPDATE comments SET anchor_state = 'bogus' WHERE id = ?1",
+            [&c.id],
+        );
+        assert!(
+            bad_state.is_err(),
+            "anchor_state CHECK should reject 'bogus'"
+        );
+
+        // Update transitions the comment and list filters by status.
+        comments::update_comment(
+            &conn,
+            &c.id,
+            Some(comments::CommentStatus::Answered),
+            Some("<p>a</p>"),
+            None,
+        )
+        .expect("answer comment");
+        let answered =
+            comments::list_comments(&conn, &thread_id, Some(comments::CommentStatus::Answered))
+                .expect("list answered");
+        assert_eq!(answered.len(), 1);
+        assert!(
+            comments::list_comments(&conn, &thread_id, Some(comments::CommentStatus::Open))
+                .expect("list open")
+                .is_empty()
+        );
+
+        // The threads list's open-comment count reflects the (now-answered)
+        // comment: 0 open.
+        let threads_list = threads::list_threads(&conn, "p1").expect("list threads");
+        assert_eq!(threads_list[0].open_comment_count, 0);
 
         drop(conn);
         let _ = std::fs::remove_file(&db_path);

@@ -53,17 +53,23 @@ webview updates live instead of polling. The frontend subscribes with
 | `projects-changed` | `POST /api/v1/projects/ensure`, `PATCH /api/v1/projects/:id`, `PUT /api/v1/projects/:id/archive` | `null` (no payload) |
 | `thread-created` | `POST /api/v1/threads` | `{ project_id: string, thread_id: string }` |
 | `artifact-updated` | `POST /api/v1/threads/:thread_id/artifact` | `{ project_id: string, thread_id: string, version: number }` |
+| `comment-created` | `POST /api/v1/comments` | `{ project_id: string, thread_id: string, comment_id: string }` |
+| `comment-updated` | `PATCH /api/v1/comments/:id` | `{ project_id: string, thread_id: string, comment_id: string, status: string }` |
 | `navigate` | `POST /api/v1/open` | `{ project_id: string, thread_id: string \| null }` |
 
 `artifact-updated` is the viewer's live-refresh trigger (PRD N2: save →
 visible refresh < 500ms): the frontend reloads the artifact iframe for
 `thread_id` at `version` when it arrives.
 
-`GET /api/v1/debug/db-check`, `GET /api/v1/projects`, and `GET /api/v1/threads`
-do not emit events — they're read-only.
+`comment-updated` is the live-sidebar trigger for every mutation to a comment —
+status transitions (the M5 `resolve-comment` flow), landing `answer_html`, and
+the `anchor_state` "reference moved" flip. It generalizes what PRD §5.1 sketched
+as `comment-resolved`: one event covers all comment mutations (consistent with
+`artifact-updated`), and the frontend scopes its refetch by the `project_id` /
+`thread_id` in the payload.
 
-Future mutation endpoints (comments) will add rows here as they land
-(`comment-resolved`, per PRD §5.1).
+Read-only routes (`GET /api/v1/debug/db-check`, `GET /api/v1/projects`,
+`GET /api/v1/threads`, `GET /api/v1/comments`) emit no events.
 
 ## Endpoints
 
@@ -445,6 +451,251 @@ Side effects: thread status → `ready` (and `updated_at` bumped), emits
 Errors: `401 Unauthorized` if bearer token missing/wrong; `404` unknown
 thread; `413` body over the 60 MiB transport cap; `422` validation hard
 failure; `500` on database or disk error.
+
+---
+
+## Comments
+
+Comments are the annotation layer (PRD §7.4, FR-4.1–FR-4.5/4.7): a user note
+anchored to a region of a specific artifact version, optionally carrying an
+agent resolution. A comment with a `null` anchor is a **direct follow-up
+question** (FR-4.3) — it flows through the identical machinery.
+
+### The anchor model (FR-4.4)
+
+The `anchor` is JSON stored on the comment. It is the load-bearing contract
+shared by the in-artifact bridge (which captures it), the re-attachment logic
+(which re-locates it after edits), and the headless follow-up agents (which read
+it via `get-context`). The canonical Rust definition lives in
+`crates/conceptify-types` (`Anchor`, `TextAnchor`, `ElementAnchor`, `TextQuote`).
+
+Design invariants:
+
+- **Versioned.** Every anchor object carries an integer `v` (currently `1`).
+  The server rejects an unsupported `v`. A breaking schema change bumps `v`.
+- **Discriminated.** A `type` field selects the variant. Two exist today:
+  `text` (a text selection, FR-4.1) and `element` (a whole `data-cfy-id`-bearing
+  element, FR-4.2). New types are additive.
+- **Extensible.** The server validates the envelope (`v`, `type`, required
+  fields) but stores the object **verbatim** and tolerates unknown extra fields,
+  so the bridge can add capture hints without a server change.
+- **Field naming is `snake_case`**, matching the rest of the API.
+- **`null` anchor** (the field absent/`null`) = a direct follow-up question.
+
+Every anchor pairs a **primary** anchor (fast, exact) with a **fallback**
+text-quote (W3C Web Annotation style) used to re-attach the comment after the
+artifact is edited when the primary no longer resolves.
+
+**`type: "text"`** (text selection). Primary = the nearest ancestor
+`data-cfy-id` (`cfy_id`) plus `start`/`end` character offsets within that
+element's normalized text content; fallback = `quote`. When the selection has no
+id-bearing ancestor, `cfy_id`/`start`/`end` are omitted and `quote` is the sole
+anchor.
+
+```json
+{
+  "v": 1,
+  "type": "text",
+  "cfy_id": "sec-walkthrough",
+  "start": 142,
+  "end": 210,
+  "quote": {
+    "exact": "the token is refreshed here",
+    "prefix": "I don't get why ",
+    "suffix": " on every request"
+  }
+}
+```
+
+**`type: "element"`** (diagram node / heading click). Primary = the clicked
+element's `cfy_id`; optional `quote` (the element's text) is a fallback for
+re-attachment if the id later disappears — omitted for purely graphical nodes
+with no text.
+
+```json
+{
+  "v": 1,
+  "type": "element",
+  "cfy_id": "fig-auth-flow.token-service",
+  "quote": { "exact": "Token Service" }
+}
+```
+
+`quote` is a text-quote selector: required `exact`, plus optional `prefix` /
+`suffix` context (absent at document edges) to disambiguate a repeated `exact`.
+
+The `data-cfy-id` values referenced here are the artifact's anchorability API —
+see [docs/artifact-spec.md](artifact-spec.md) §4 for the id grammar and the
+cross-version stability contract that makes re-attachment work.
+
+### Status machine
+
+A comment's `status` is one of `open` | `answered` | `applied`, and may only
+**advance** along that order (or stay put) — a regression is rejected `409`:
+
+```
+open ──→ answered ──→ applied
+  └──────────────────────┘   (open → applied directly is allowed)
+```
+
+- `open → answered`: the **Ask follow-ups** flow (FR-4.6) — an agent answers the
+  comment in the sidebar (`answer_html` lands).
+- `answered → applied` / `open → applied`: the **Apply to artifact** flow
+  (FR-4.7) resolved-with-update. `open → applied` directly supports the M5
+  `resolve-comment --applied` one-shot (apply without a separate answer step).
+
+`resolved_at` is stamped the first time a comment leaves `open` and is stable
+thereafter.
+
+Separately, `anchor_state` is `anchored` | `moved`. `moved` is FR-4.4's
+"reference moved" flag, set by the re-attachment bead (`conceptify-94m.7`) when a
+comment's anchor can't be re-located in the current artifact version — the
+comment is flagged, never silently dropped. It is independent of the status
+machine. Until re-attachment ships it stays `anchored`.
+
+### `POST /api/v1/comments`
+
+Authenticated. Create a comment (FR-4.1/4.2/4.3). The target thread and the
+`artifact_version` must exist (a comment always anchors to an artifact version
+that already exists). New comments start `open` / `anchored`.
+
+Request body (`anchor` is `null`/omitted for a direct follow-up):
+
+```json
+{
+  "thread_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "artifact_version": 1,
+  "anchor": {
+    "v": 1,
+    "type": "text",
+    "cfy_id": "sec-walkthrough",
+    "start": 142,
+    "end": 210,
+    "quote": { "exact": "the token is refreshed here", "prefix": "why ", "suffix": " each time" }
+  },
+  "body": "I don't get why the token is refreshed here."
+}
+```
+
+Response `200 OK` (the created comment):
+
+```json
+{
+  "id": "b3f1…",
+  "thread_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "artifact_version": 1,
+  "anchor": { "v": 1, "type": "text", "cfy_id": "sec-walkthrough", "start": 142, "end": 210, "quote": { "exact": "the token is refreshed here", "prefix": "why ", "suffix": " each time" } },
+  "body": "I don't get why the token is refreshed here.",
+  "status": "open",
+  "answer_html": null,
+  "anchor_state": "anchored",
+  "created_at": "2026-07-04T12:34:56.789Z",
+  "resolved_at": null
+}
+```
+
+Response `400 Bad Request`: empty body, or a malformed anchor (not an object,
+unsupported `v`, unknown/missing `type`, or a missing required field):
+
+```json
+{ "error": "invalid anchor: unsupported anchor schema version 2 (expected 1)" }
+```
+
+Response `404 Not Found`: unknown `thread_id`, or an `artifact_version` that
+doesn't exist for the thread:
+
+```json
+{ "error": "artifact version 9 not found for thread 7c9e6679-…" }
+```
+
+Side effect: emits `comment-created` (see Events above).
+
+Errors: `401` if bearer token missing/wrong; `400` empty body / bad anchor;
+`404` unknown thread or version; `500` on database error.
+
+---
+
+### `GET /api/v1/comments`
+
+Authenticated. List a thread's comments (FR-4.5, FR-6.4), oldest first (the
+sidebar reading order). Serves both the UI and the M5 `list-comments` CLI.
+
+Query parameters:
+- `thread_id` (required): the thread whose comments to list.
+- `status` (optional): filter to one of `open` | `answered` | `applied`.
+
+An unknown `thread_id` returns an empty `comments` array rather than a 404. An
+invalid `status` value is a `400`.
+
+Response `200 OK`:
+
+```json
+{
+  "comments": [
+    {
+      "id": "b3f1…",
+      "thread_id": "7c9e6679-…",
+      "artifact_version": 1,
+      "anchor": { "v": 1, "type": "element", "cfy_id": "fig-auth-flow.token-service", "quote": { "exact": "Token Service" } },
+      "body": "why does this node retry?",
+      "status": "answered",
+      "answer_html": "<p>Because the upstream can return 503…</p>",
+      "anchor_state": "anchored",
+      "created_at": "2026-07-04T12:34:56.789Z",
+      "resolved_at": "2026-07-04T12:40:01.234Z"
+    }
+  ]
+}
+```
+
+Errors: `401` if bearer token missing/wrong; `400` on an invalid `status`
+filter; `500` on database error.
+
+---
+
+### `PATCH /api/v1/comments/:id`
+
+Authenticated. Update a comment (FR-4.6/4.7); drives the M5 `resolve-comment`
+CLI. Supply any subset of the fields below (at least one); omitted fields are
+unchanged.
+
+Request body:
+
+```json
+{
+  "status": "answered",
+  "answer_html": "<p>Because the refresh token rotates on every use…</p>",
+  "anchor_state": "moved"
+}
+```
+
+- `status` — target status; must be a legal advance (see the status machine).
+- `answer_html` — the agent's resolution (rendered HTML/markdown fragment).
+- `anchor_state` — `anchored` | `moved` (driven by re-attachment; independent of
+  the status machine).
+
+Response `200 OK`: the full updated comment (same shape as the create response).
+
+Response `409 Conflict` (illegal status regression) — structured with the
+offending `from`/`to`:
+
+```json
+{ "error": "illegal status transition: applied -> answered", "from": "applied", "to": "answered" }
+```
+
+Response `404 Not Found` (unknown comment id):
+
+```json
+{ "error": "comment not found: <id>" }
+```
+
+Response `400 Bad Request`: no fields supplied, or an invalid `status` /
+`anchor_state` value.
+
+Side effect: emits `comment-updated` (see Events above).
+
+Errors: `401` if bearer token missing/wrong; `400` bad/empty update; `404`
+unknown comment; `409` illegal status transition; `500` on database error.
 
 ---
 

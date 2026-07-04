@@ -29,6 +29,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(FOLLOW_UP_RUNS),
         M::up(SETTINGS),
         M::up(THREAD_SLUG),
+        M::up(COMMENT_ANCHOR_STATE),
     ])
 }
 
@@ -164,4 +165,33 @@ CREATE TABLE settings (
 const THREAD_SLUG: &str = "
 ALTER TABLE threads ADD COLUMN slug TEXT NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX idx_threads_project_slug ON threads(project_id, slug);
+";
+
+/// Adds `comments.anchor_state` — the FR-4.4 re-attachment flag (bead
+/// `conceptify-94m.2`), driven by the re-anchoring bead (`conceptify-94m.7`).
+///
+/// The comment's `anchor` JSON is the *authoring-time* selection (what the user
+/// picked, against `artifact_version`); it is immutable once written. Whether
+/// that anchor still resolves in the artifact's current version is a separate,
+/// mutable concern, so it lives in its own first-class column rather than being
+/// folded into the (verbatim-stored, opaque) anchor blob: a plain `UPDATE ...
+/// SET anchor_state` avoids a read-parse-rewrite of the JSON, and the sidebar
+/// (`conceptify-94m.6`) can badge "reference moved" off a queryable field.
+///
+/// `anchored` = the anchor resolves / is a fresh or unchecked comment / is a
+/// null-anchor direct follow-up (which can never move). `moved` = re-attachment
+/// could not locate the anchor in the current version → surface "reference
+/// moved", never silently drop the comment.
+///
+/// Appended (not folded into the original `COMMENTS` definition) per this
+/// file's append-only contract: `rusqlite_migration` tracks progress
+/// positionally by `user_version`, so an in-place edit would be silently
+/// skipped by databases already migrated past `COMMENTS`. SQLite's `ALTER TABLE
+/// ... ADD COLUMN` accepts a column-local `CHECK` and a constant `NOT NULL`
+/// default, so both ship inline here; the `'anchored'` default only backfills
+/// rows predating this migration (there are none — no create-comment path
+/// existed before this bead).
+const COMMENT_ANCHOR_STATE: &str = "
+ALTER TABLE comments ADD COLUMN anchor_state TEXT NOT NULL DEFAULT 'anchored'
+    CHECK (anchor_state IN ('anchored', 'moved'));
 ";

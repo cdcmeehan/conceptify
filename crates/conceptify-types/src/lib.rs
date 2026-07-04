@@ -199,3 +199,146 @@ pub struct OpenResponse {
     pub project_id: String,
     pub thread_id: Option<String>,
 }
+
+// Comments API types (PRD §7.4, FR-4.1–FR-4.5/4.7)
+//
+// The anchor model (FR-4.4) is the load-bearing contract shared by the
+// in-artifact bridge (`conceptify-94m.1`), the re-attachment logic
+// (`conceptify-94m.7`), and the headless follow-up agents (M5). It is
+// documented as prose in docs/api.md; the `Anchor` types below are its
+// canonical machine-readable definition. Field naming is snake_case throughout,
+// matching the rest of the API (the JS bridge emits snake_case too).
+
+/// A W3C-Web-Annotation-style text-quote selector: the exact target text plus a
+/// little surrounding context. It is the FR-4.4 **fallback** anchor — used to
+/// re-locate a comment after the artifact is edited when the primary
+/// `data-cfy-id` anchor no longer resolves. `prefix`/`suffix` disambiguate a
+/// repeated `exact` string; both are optional (absent at document edges).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextQuote {
+    /// The exact selected/target text.
+    pub exact: String,
+    /// A short run of text immediately preceding `exact` (context for
+    /// disambiguation during re-attachment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// A short run of text immediately following `exact`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
+}
+
+/// A text-selection anchor (FR-4.1): the user highlighted a run of prose.
+///
+/// **Primary** anchor = the nearest ancestor `data-cfy-id` (`cfy_id`) plus the
+/// `start`/`end` character offsets of the selection within that element's
+/// normalized text content. **Fallback** = `quote`. When the selection has no
+/// id-bearing ancestor, `cfy_id`/`start`/`end` are omitted and `quote` is the
+/// sole anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextAnchor {
+    /// Anchor schema version. Currently `1`.
+    pub v: u32,
+    /// `data-cfy-id` of the nearest id-bearing ancestor of the selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfy_id: Option<String>,
+    /// Selection start offset within `cfy_id`'s normalized text content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u32>,
+    /// Selection end offset within `cfy_id`'s normalized text content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<u32>,
+    /// Text-quote fallback (always captured).
+    pub quote: TextQuote,
+}
+
+/// A diagram/heading element anchor (FR-4.2): the user clicked a whole
+/// `data-cfy-id`-bearing element.
+///
+/// **Primary** anchor = that `cfy_id`. Optional `quote` (the element's text
+/// content) is a re-attachment fallback if the id later disappears — omitted
+/// for purely graphical nodes that carry no text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ElementAnchor {
+    /// Anchor schema version. Currently `1`.
+    pub v: u32,
+    /// The clicked element's `data-cfy-id`.
+    pub cfy_id: String,
+    /// Optional text-quote fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<TextQuote>,
+}
+
+/// The FR-4.4 anchor model, stored as JSON on a comment. Internally tagged by
+/// `type`; each variant carries a `v` schema version for forward compatibility.
+/// A `null` anchor (the absence of this object) models a direct follow-up
+/// question (FR-4.3) — it flows through the identical comment machinery.
+///
+/// The server stores a submitted anchor **verbatim** (so the bridge may add
+/// capture hints as extra fields without a server change) after validating it
+/// deserializes into one of these variants with a supported `v`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Anchor {
+    Text(TextAnchor),
+    Element(ElementAnchor),
+}
+
+/// Request to create a comment (PRD FR-4.1–FR-4.3).
+///
+/// `anchor` is `null` for a direct follow-up question (FR-4.3) and otherwise an
+/// `Anchor` object (validated against the `Anchor` schema, then stored
+/// verbatim). `artifact_version` is the version the anchor was captured
+/// against; an artifact of that version must already exist for the thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCommentRequest {
+    pub thread_id: String,
+    pub artifact_version: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<serde_json::Value>,
+    pub body: String,
+}
+
+/// A comment as returned by the API (the create response, and each list item).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommentResponse {
+    pub id: String,
+    pub thread_id: String,
+    pub artifact_version: i64,
+    /// The stored anchor JSON (see `Anchor`), or `null` for a direct follow-up.
+    pub anchor: Option<serde_json::Value>,
+    pub body: String,
+    /// One of `open` | `answered` | `applied`.
+    pub status: String,
+    /// The agent's resolution, rendered HTML/markdown (FR-4.5); `null` until
+    /// resolved.
+    pub answer_html: Option<String>,
+    /// One of `anchored` | `moved`. `moved` is FR-4.4's "reference moved" flag,
+    /// driven by the re-attachment bead (`conceptify-94m.7`); `anchored` until
+    /// then.
+    pub anchor_state: String,
+    pub created_at: String,
+    /// When the comment first left `open` (was answered/applied); `null` while
+    /// still open.
+    pub resolved_at: Option<String>,
+}
+
+/// Response from list-comments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListCommentsResponse {
+    pub comments: Vec<CommentResponse>,
+}
+
+/// Request to update a comment (PRD FR-4.6/4.7; drives the M5 `resolve-comment`
+/// CLI). Every field is optional — supply the subset to change; an empty body
+/// is rejected. `status` transitions are validated: status may only **advance**
+/// `open` → `answered` → `applied`, never regress. `anchor_state` is driven by
+/// the re-attachment bead (FR-4.4) and is independent of the status machine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateCommentRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_html: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_state: Option<String>,
+}
