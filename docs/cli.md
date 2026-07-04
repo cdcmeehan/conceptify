@@ -157,6 +157,56 @@ routes on — so the artifact is on screen when an agent finishes (UC1). Supply
 
 ---
 
+### `conceptify save-artifact --thread <id> --file <path>`
+
+Save an artifact HTML file to a thread (PRD §5.2, maps to
+`POST /api/v1/threads/:thread_id/artifact`). This is the final step in the UC1
+flow — the agent authors the artifact, writes it to disk, and publishes it via
+this command. The endpoint validates, stores, versions, and triggers live
+refresh in the app.
+
+The file is read on the CLI side and sent as raw HTML bytes to the server.
+Validation failures (hard errors from docs/artifact-spec.md §8.1) are surfaced
+with each violated rule's code and message. Warnings (§8.2) are printed to
+stderr but the artifact is still stored.
+
+After a successful save, the CLI focuses the app on the thread via
+`POST /api/v1/open` so the artifact appears on screen immediately (UC1 feel).
+
+**Output (stdout):**
+
+```json
+{
+  "version": 2,
+  "warningsCount": 1
+}
+```
+
+`version` is the server-assigned version number (v1, v2, ...). `warningsCount`
+is the number of spec warnings returned (details printed to stderr).
+
+**Warnings (stderr):**
+
+```
+warning: W-ANCHOR-DIAGRAM: svg "fig-map" has thin anchor coverage: 8 shape elements but only 1 data-cfy-id bearers (need ≥ 3)
+```
+
+Each warning is printed as `warning: <code>: <message>` (agent-visible).
+
+**Errors (stderr, exit 1):**
+
+- `Error: failed to read <path>: ...` — file doesn't exist or can't be read.
+- `Error: save-artifact requires --thread <id> --file <path>` — a flag is missing.
+- Validation errors (HTTP 422) are printed with all violated rules:
+  ```
+  Error: script src "https://evil.example.com/x.js" is not on the Tier-2 CDN allowlist (E-EXTERNAL-CODE)
+    E-EXTERNAL-CODE: script src "https://evil.example.com/x.js" is not on the Tier-2 CDN allowlist
+  ```
+- `Error: thread not found: <id> (HTTP 404)` — unknown thread.
+- API errors are surfaced verbatim.
+
+---
+
 ## Output contract
 
 All commands print stable, parseable JSON to **stdout** on success and
@@ -186,7 +236,6 @@ Shared types (e.g., `HealthResponse`) live in `conceptify-types` and are used by
 
 The following commands are specified in PRD §5.2 but not yet implemented:
 
-- `conceptify save-artifact --thread <id> --file <path>`
 - `conceptify get-context --thread <id>`
 - `conceptify list-comments --thread <id> [--status open]`
 - `conceptify resolve-comment --id <id> --answer-file <path> [--applied]`

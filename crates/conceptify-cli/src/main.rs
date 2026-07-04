@@ -20,7 +20,7 @@ use serde_json::json;
 
 use conceptify_types::{
     CreateThreadRequest, CreateThreadResponse, EnsureProjectRequest, EnsureProjectResponse,
-    HealthResponse, OpenRequest, OpenResponse,
+    HealthResponse, OpenRequest, OpenResponse, SaveArtifactErrorResponse, SaveArtifactResponse,
 };
 
 const DEFAULT_PORT: u16 = 4477;
@@ -35,7 +35,8 @@ Commands:
   status                                              app/API health, version, port
   ensure-project --dir <path> [--name <name>]         find-or-create a project by directory
   create-thread  --project <id> --title <t> --question <q>   create a thread
-  open           --thread <id> | --project <id>       focus the app on a project/thread";
+  open           --thread <id> | --project <id>       focus the app on a project/thread
+  save-artifact  --thread <id> --file <path>          save an artifact file to a thread";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -53,6 +54,7 @@ fn main() -> ExitCode {
         "ensure-project" => cmd_ensure_project(rest),
         "create-thread" => cmd_create_thread(rest),
         "open" => cmd_open(rest),
+        "save-artifact" => cmd_save_artifact(rest),
         _ => {
             eprintln!("Unknown command: {}", command);
             eprintln!("{USAGE}");
@@ -188,6 +190,41 @@ where
         .set("Authorization", &format!("Bearer {}", token))
         .timeout(REQUEST_TIMEOUT)
         .send_json(body)
+    {
+        Ok(response) => response
+            .into_json::<R>()
+            .map_err(|e| format!("invalid JSON from {}: {}", path, e)),
+        Err(ureq::Error::Status(code, response)) => {
+            let msg = response
+                .into_json::<serde_json::Value>()
+                .ok()
+                .as_ref()
+                .and_then(|v| v.get("error"))
+                .and_then(|e| e.as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("HTTP {}", code));
+            Err(format!("{} (HTTP {})", msg, code))
+        }
+        Err(ureq::Error::Transport(e)) => Err(format!("failed to reach app: {}", e)),
+    }
+}
+
+/// POST raw bytes to an authenticated `/api/v1/*` endpoint and deserialize
+/// the JSON response. Like `authed_post` but sends raw bytes instead of JSON
+/// (used for save-artifact, which takes raw HTML).
+fn authed_post_bytes<R>(port: u16, path: &str, bytes: &[u8]) -> Result<R, String>
+where
+    R: DeserializeOwned,
+{
+    let token = read_token()
+        .map_err(|e| format!("failed to read auth token (has the app run once?): {}", e))?;
+    let url = format!("http://127.0.0.1:{}{}", port, path);
+
+    match ureq::post(&url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .set("Content-Type", "text/html")
+        .timeout(REQUEST_TIMEOUT)
+        .send_bytes(bytes)
     {
         Ok(response) => response
             .into_json::<R>()
@@ -360,6 +397,95 @@ fn open_output(resp: &OpenResponse) -> serde_json::Value {
     })
 }
 
+/// Shape the API's save-artifact response into the CLI's JSON output (camelCase).
+/// Includes the version and warnings count for agent consumption.
+fn save_artifact_output(resp: &SaveArtifactResponse) -> serde_json::Value {
+    json!({
+        "version": resp.version,
+        "warningsCount": resp.warnings.len(),
+    })
+}
+
+/// `conceptify save-artifact --thread <id> --file <path>` — save an artifact.
+fn cmd_save_artifact(args: &[String]) -> ExitCode {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => return fail(e),
+    };
+
+    let (thread, file_path) = match (flags.get("thread"), flags.get("file")) {
+        (Some(t), Some(f)) => (t, f),
+        _ => {
+            return fail("save-artifact requires --thread <id> --file <path>");
+        }
+    };
+
+    // Read the file bytes on the CLI side.
+    let bytes = match fs::read(file_path) {
+        Ok(b) => b,
+        Err(e) => return fail(format!("failed to read {}: {}", file_path, e)),
+    };
+
+    let port = match ensure_app_healthy() {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+
+    // POST the raw HTML bytes to the artifact endpoint.
+    let path = format!("/api/v1/threads/{}/artifact", thread);
+    let result: Result<SaveArtifactResponse, String> = authed_post_bytes(port, &path, &bytes);
+
+    match result {
+        Ok(resp) => {
+            // Print warnings to stderr (agent-visible).
+            for warning in &resp.warnings {
+                eprintln!("warning: {}: {}", warning.code, warning.message);
+            }
+
+            // Focus the app on the thread after successful save (the endpoint
+            // doesn't handle this — checked in src-tauri/server/artifacts_routes.rs).
+            let open_req = OpenRequest {
+                thread_id: Some(thread.clone()),
+                project_id: None,
+            };
+            if let Err(e) = authed_post::<_, OpenResponse>(port, "/api/v1/open", &open_req) {
+                eprintln!("warning: saved artifact but failed to focus app: {}", e);
+            }
+
+            emit(&save_artifact_output(&resp))
+        }
+        Err(e) => {
+            // For validation errors (422), try to parse the structured error
+            // response and surface the specific rule violations.
+            if e.contains("HTTP 422") {
+                // Re-attempt the request to get the structured error body.
+                // (We can't get it from the Err above because ureq consumed it.)
+                // This is a bit redundant but keeps the normal path clean.
+                let token = match read_token() {
+                    Ok(t) => t,
+                    Err(err) => return fail(format!("failed to read auth token: {}", err)),
+                };
+                let url = format!("http://127.0.0.1:{}{}", port, path);
+                if let Err(ureq::Error::Status(422, response)) = ureq::post(&url)
+                    .set("Authorization", &format!("Bearer {}", token))
+                    .set("Content-Type", "text/html")
+                    .timeout(REQUEST_TIMEOUT)
+                    .send_bytes(&bytes)
+                {
+                    if let Ok(err_resp) = response.into_json::<SaveArtifactErrorResponse>() {
+                        eprintln!("Error: {} ({})", err_resp.error, err_resp.code);
+                        for issue in &err_resp.errors {
+                            eprintln!("  {}: {}", issue.code, issue.message);
+                        }
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            fail(e)
+        }
+    }
+}
+
 /// `conceptify open --thread <id> | --project <id>` — focus the app on target.
 fn cmd_open(args: &[String]) -> ExitCode {
     let flags = match parse_flags(args) {
@@ -494,5 +620,42 @@ mod tests {
         let out = open_output(&resp);
         assert_eq!(out["threadId"], serde_json::Value::Null);
         assert_eq!(out["projectId"], json!("proj-123"));
+    }
+
+    #[test]
+    fn save_artifact_output_stable_camelcase_contract() {
+        use conceptify_types::ArtifactIssue;
+        let resp = SaveArtifactResponse {
+            thread_id: s("thr-42"),
+            project_id: s("proj-123"),
+            version: 3,
+            created_by: s("follow_up"),
+            file_path: s("/Users/chris/Documents/conceptify/artifacts/proj-123/threads/slug/artifact.v3.html"),
+            warnings: vec![
+                ArtifactIssue {
+                    code: s("W-ANCHOR-DIAGRAM"),
+                    message: s("diagram has thin anchor coverage"),
+                },
+            ],
+        };
+        let out = save_artifact_output(&resp);
+        assert_eq!(out, json!({ "version": 3, "warningsCount": 1 }));
+        // Stable, parseable JSON with exactly the documented keys.
+        assert!(out.get("version").is_some());
+        assert!(out.get("warningsCount").is_some());
+    }
+
+    #[test]
+    fn save_artifact_output_no_warnings() {
+        let resp = SaveArtifactResponse {
+            thread_id: s("thr-42"),
+            project_id: s("proj-123"),
+            version: 1,
+            created_by: s("initial"),
+            file_path: s("/path/to/artifact.v1.html"),
+            warnings: vec![],
+        };
+        let out = save_artifact_output(&resp);
+        assert_eq!(out, json!({ "version": 1, "warningsCount": 0 }));
     }
 }
