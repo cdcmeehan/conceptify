@@ -49,3 +49,7 @@ install-skill:
 check:
     cargo check --workspace
     cargo clippy --workspace -- -D warnings
+
+# Run the automated setup script (checks prereqs, builds, installs CLI + skill, runs doctor)
+setup:
+    ./scripts/setup.sh
