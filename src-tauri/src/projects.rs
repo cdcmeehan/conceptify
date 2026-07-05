@@ -4,7 +4,7 @@
 //! name), list (with thread counts + last activity), rename, and archive.
 
 use rusqlite::{Connection, OptionalExtension};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A project row (mirrors the schema, minus the derived fields list returns).
 #[derive(Debug, Clone)]
@@ -35,6 +35,12 @@ pub enum ProjectError {
 
     #[error("project not found: {0}")]
     NotFound(String),
+
+    #[error("project name must not be empty")]
+    EmptyName,
+
+    #[error("failed to create project directory: {0}")]
+    MkdirFailed(#[source] std::io::Error),
 
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
@@ -103,6 +109,98 @@ pub fn ensure_project(
         project,
         created: true,
     })
+}
+
+/// Create a fresh project directory under `base_dir` for a non-codebase topic
+/// (FR-1.2 / UC6 "create a folder for me"), then map it as a project.
+///
+/// `name` is the human topic (e.g. "Distributed Systems"); it is slugified for
+/// the directory name and deduped against what already exists on disk under
+/// `base_dir` (`slug`, `slug-2`, `slug-3`, …) so a fresh call always makes a
+/// new directory. The directory is created (`mkdir -p`), then the existing
+/// [`ensure_project`] canonicalization path maps it, with the human `name` as
+/// the project's display name (itself deduped in the DB by `ensure_project`).
+///
+/// Because `ensure_project` keeps one project per canonical path and this dir
+/// is brand-new, the result is always a freshly-created project — never a
+/// collision with an existing mapping. Dir-name dedupe and project-name dedupe
+/// are independent: the on-disk slug avoids clobbering a sibling topic folder,
+/// while the DB name dedupe keeps the sidebar labels distinct.
+pub fn create_auto_project(
+    conn: &Connection,
+    base_dir: &Path,
+    name: &str,
+) -> Result<EnsureProjectResult, ProjectError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ProjectError::EmptyName);
+    }
+
+    let dir = dedupe_dir(base_dir, &slugify(name));
+    std::fs::create_dir_all(&dir).map_err(ProjectError::MkdirFailed)?;
+
+    let dir_str = dir.to_string_lossy();
+    ensure_project(conn, &dir_str, Some(name))
+}
+
+/// Pick a not-yet-existing directory under `base_dir`: `base_slug`, then
+/// `base_slug-2`, `base_slug-3`, … The filesystem is the integrity backstop
+/// (`create_dir_all` on a fresh path); this loop keeps two auto-created topics
+/// with the same slug from landing in the same folder.
+fn dedupe_dir(base_dir: &Path, base_slug: &str) -> PathBuf {
+    let first = base_dir.join(base_slug);
+    if !first.exists() {
+        return first;
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = base_dir.join(format!("{base_slug}-{suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+/// Turn a human topic name into a filesystem-safe directory slug: lowercase
+/// ASCII alphanumerics, runs of anything else collapsed to a single hyphen, no
+/// leading/trailing hyphen, capped length. Falls back to `"project"` when the
+/// name reduces to nothing (all punctuation / non-Latin script).
+///
+/// ASCII-only and dependency-free — the same approach as `threads::slugify`,
+/// kept local (a small, private helper) so the project-directory and
+/// thread-folder slug rules stay independently owned rather than coupling the
+/// two domain modules through a shared util for ~20 lines.
+fn slugify(name: &str) -> String {
+    const MAX_SLUG_LEN: usize = 80;
+
+    let mut slug = String::new();
+    let mut pending_sep = false;
+
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_sep && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_sep = false;
+            slug.push(ch.to_ascii_lowercase());
+        } else {
+            pending_sep = true;
+        }
+    }
+
+    if slug.len() > MAX_SLUG_LEN {
+        slug.truncate(MAX_SLUG_LEN);
+        while slug.ends_with('-') {
+            slug.pop();
+        }
+    }
+
+    if slug.is_empty() {
+        slug.push_str("project");
+    }
+
+    slug
 }
 
 /// Find a project by its canonicalized root_path (the UNIQUE column).
@@ -299,5 +397,101 @@ mod tests {
         // Third call: both taken → "myproj-3".
         let name3 = dedupe_name(&conn, "myproj").unwrap();
         assert_eq!(name3, "myproj-3");
+    }
+
+    #[test]
+    fn slugify_is_filesystem_safe_with_project_fallback() {
+        assert_eq!(slugify("Distributed Systems"), "distributed-systems");
+        assert_eq!(slugify("  Music Theory!  "), "music-theory");
+        assert_eq!(slugify("a/b\\c"), "a-b-c");
+        // Non-Latin / all-punctuation collapse to the "project" fallback (not
+        // "thread", so the projects and threads slug rules stay distinct).
+        assert_eq!(slugify("你好"), "project");
+        assert_eq!(slugify("***"), "project");
+        let s = slugify("Weird::Name");
+        assert!(!s.contains('/') && !s.contains(' '));
+        assert!(!s.starts_with('-') && !s.ends_with('-'));
+    }
+
+    /// Projects table matching the shipped schema columns `ensure_project`
+    /// reads back (id, name, root_path, created_at, archived).
+    fn projects_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                root_path TEXT UNIQUE,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                archived INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn unique_base(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "conceptify-autoproj-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn create_auto_project_makes_dir_dedupes_and_maps() {
+        let conn = projects_conn();
+        let base = unique_base("make");
+
+        // First call: slug dir created + project mapped under the human name.
+        let r1 = create_auto_project(&conn, &base, "Distributed Systems").unwrap();
+        assert!(r1.created);
+        assert_eq!(r1.project.name, "Distributed Systems");
+        assert!(base.join("distributed-systems").is_dir());
+        assert!(r1.project.root_path.ends_with("distributed-systems"));
+
+        // Second call, same name: the DIR dedupes to `-2` and a distinct fresh
+        // project is created (one project per canonical path); the NAME dedupes
+        // in the DB independently.
+        let r2 = create_auto_project(&conn, &base, "Distributed Systems").unwrap();
+        assert!(r2.created);
+        assert_ne!(r1.project.id, r2.project.id);
+        assert!(base.join("distributed-systems-2").is_dir());
+        assert_eq!(r2.project.name, "Distributed Systems-2");
+        assert!(r2.project.root_path.ends_with("distributed-systems-2"));
+
+        // Empty / whitespace name is rejected before touching the filesystem.
+        assert!(matches!(
+            create_auto_project(&conn, &base, "   ").unwrap_err(),
+            ProjectError::EmptyName
+        ));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn create_auto_project_reuses_existing_mapping_for_same_dir() {
+        // If the slug dir already exists AND is already mapped, dedupe makes a
+        // fresh sibling dir rather than colliding — but pointing ensure_project
+        // at an already-mapped canonical path lands on the existing project.
+        let conn = projects_conn();
+        let base = unique_base("reuse");
+        std::fs::create_dir_all(&base).unwrap();
+
+        let dir = base.join("topic");
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = ensure_project(&conn, &dir.to_string_lossy(), Some("Topic")).unwrap();
+        assert!(first.created);
+
+        // ensure_project on the same canonical path → existing project, no error.
+        let again = ensure_project(&conn, &dir.to_string_lossy(), Some("Topic")).unwrap();
+        assert!(!again.created);
+        assert_eq!(again.project.id, first.project.id);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

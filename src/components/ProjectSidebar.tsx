@@ -4,6 +4,7 @@
 // selection when the list has focus.
 
 import { useState } from "preact/hooks";
+import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
 import type { Project } from "../lib/api";
 import { appStore } from "../store/appStore";
 import { relativeTime } from "../lib/time";
@@ -24,6 +25,54 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
   const [remapPath, setRemapPath] = useState("");
   const [remapError, setRemapError] = useState<string | null>(null);
   const [remapBusy, setRemapBusy] = useState(false);
+
+  // FR-1.2 / UC6 "New project": pick an existing folder (native dir picker) or
+  // create a fresh topic folder for a non-codebase subject.
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [newProjectError, setNewProjectError] = useState<string | null>(null);
+  const [newProjectBusy, setNewProjectBusy] = useState(false);
+
+  function closeNewProject() {
+    setNewProjectOpen(false);
+    setNewFolderName("");
+    setNewProjectError(null);
+    setNewProjectBusy(false);
+  }
+
+  async function pickDirectory() {
+    setNewProjectError(null);
+    try {
+      // Native NSOpenPanel via the dialog plugin (WKWebView-safe). `null` =
+      // cancelled; a single directory returns its absolute path.
+      const selected = await openDirectoryDialog({
+        directory: true,
+        multiple: false,
+        title: "Choose a project folder",
+      });
+      if (typeof selected !== "string") return; // cancelled
+      setNewProjectBusy(true);
+      await appStore.createProjectFromDir(selected);
+      closeNewProject();
+    } catch (e) {
+      setNewProjectError(String(e));
+      setNewProjectBusy(false);
+    }
+  }
+
+  function createFolder() {
+    const name = newFolderName.trim();
+    if (name.length === 0) return;
+    setNewProjectBusy(true);
+    setNewProjectError(null);
+    appStore
+      .createProjectFolder(name)
+      .then(() => closeNewProject())
+      .catch((e) => {
+        setNewProjectError(String(e));
+        setNewProjectBusy(false);
+      });
+  }
 
   function startRename(project: Project) {
     setEditingId(project.id);
@@ -94,6 +143,79 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
           Archived
         </label>
       </header>
+
+      {/* FR-1.2 / UC6: create a project — pick an existing folder or make one. */}
+      <div class="px-2 pb-2">
+        {newProjectOpen ? (
+          <div class="flex flex-col gap-2 rounded-lg border border-neutral-200 bg-white p-2.5 dark:border-neutral-800 dark:bg-neutral-950">
+            <button
+              type="button"
+              disabled={newProjectBusy}
+              onClick={() => void pickDirectory()}
+              class="rounded-md border border-neutral-300 bg-white px-2 py-1.5 text-xs font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:bg-neutral-800"
+            >
+              Choose an existing folder…
+            </button>
+            <div class="flex items-center gap-2 text-[10px] uppercase tracking-wide text-neutral-400">
+              <span class="h-px flex-1 bg-neutral-200 dark:bg-neutral-800" />
+              or make one
+              <span class="h-px flex-1 bg-neutral-200 dark:bg-neutral-800" />
+            </div>
+            <input
+              type="text"
+              value={newFolderName}
+              placeholder="New topic (e.g. Distributed Systems)"
+              disabled={newProjectBusy}
+              autoFocus
+              onInput={(e) => setNewFolderName((e.currentTarget as HTMLInputElement).value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") createFolder();
+                else if (e.key === "Escape") closeNewProject();
+              }}
+              class="rounded-md border border-neutral-300 bg-white px-2 py-1.5 text-sm text-neutral-800 placeholder:text-neutral-400 focus:border-blue-400 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+            />
+            {newProjectError != null && (
+              <p class="break-words text-[11px] text-rose-600 dark:text-rose-400">
+                {newProjectError}
+              </p>
+            )}
+            <div class="flex items-center justify-end gap-1.5">
+              <button
+                type="button"
+                onClick={closeNewProject}
+                disabled={newProjectBusy}
+                class="rounded-md px-2.5 py-1 text-xs font-medium text-neutral-500 transition-colors hover:bg-neutral-200 disabled:opacity-50 dark:text-neutral-400 dark:hover:bg-neutral-800"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={createFolder}
+                disabled={newProjectBusy || newFolderName.trim().length === 0}
+                class="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400 dark:disabled:bg-neutral-800 dark:disabled:text-neutral-600"
+              >
+                {newProjectBusy ? "Creating…" : "Create folder"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setNewProjectOpen(true)}
+            class="flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-neutral-300 px-2 py-1.5 text-xs font-medium text-neutral-500 transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-neutral-700 dark:text-neutral-400 dark:hover:border-blue-500/50 dark:hover:text-blue-300"
+          >
+            <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5" aria-hidden="true">
+              <path
+                d="M10 4.5v11M4.5 10h11"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+              />
+            </svg>
+            New project
+          </button>
+        )}
+      </div>
 
       <div class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         {error != null ? (
@@ -241,6 +363,30 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
             })}
           </ul>
         )}
+      </div>
+
+      {/* Settings entry (FR-7.x) in the sidebar footer. */}
+      <div class="border-t border-neutral-200 px-2 py-2 dark:border-neutral-800">
+        <button
+          type="button"
+          onClick={() => appStore.openSettings()}
+          class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs font-medium text-neutral-500 transition-colors hover:bg-neutral-200/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800/60 dark:hover:text-neutral-200"
+        >
+          <svg viewBox="0 0 20 20" fill="none" class="h-4 w-4" aria-hidden="true">
+            <path
+              d="M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"
+              stroke="currentColor"
+              stroke-width="1.4"
+            />
+            <path
+              d="M10 2.5v1.6M10 15.9v1.6M4.7 4.7l1.1 1.1M14.2 14.2l1.1 1.1M2.5 10h1.6M15.9 10h1.6M4.7 15.3l1.1-1.1M14.2 5.8l1.1-1.1"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
+          </svg>
+          Settings
+        </button>
       </div>
     </nav>
   );

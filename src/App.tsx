@@ -8,9 +8,12 @@
 import { useEffect } from "preact/hooks";
 import { appStore, useAppStore } from "./store/appStore";
 import { initEventListeners } from "./lib/events";
+import { getAgentSettings } from "./lib/api";
+import { setAppearance } from "./lib/theme";
 import { ProjectSidebar } from "./components/ProjectSidebar";
 import { ThreadList } from "./components/ThreadList";
 import { ThreadView } from "./components/ThreadView";
+import { SettingsView } from "./components/SettingsView";
 import "./App.css";
 
 function App() {
@@ -18,6 +21,13 @@ function App() {
 
   useEffect(() => {
     void appStore.refetchProjects();
+    // Apply the stored appearance (FR-7.2). theme.ts already applied `system`
+    // before first paint (main.tsx); this replaces it with the saved value.
+    void getAgentSettings()
+      .then((s) => setAppearance(s.appearance))
+      .catch(() => {
+        /* keep the system default */
+      });
     return initEventListeners();
   }, []);
 
@@ -27,7 +37,7 @@ function App() {
     state.threads.find((t) => t.id === state.selectedThreadId) ?? null;
 
   return (
-    <div class="flex h-full w-full overflow-hidden bg-neutral-100 text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100">
+    <div class="relative flex h-full w-full overflow-hidden bg-neutral-100 text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100">
       <ProjectSidebar
         projects={state.projects}
         selectedProjectId={state.selectedProjectId}
@@ -44,6 +54,7 @@ function App() {
         error={state.threadsError}
       />
       <ThreadView thread={selectedThread} />
+      {state.settingsOpen && <SettingsView />}
     </div>
   );
 }

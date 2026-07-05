@@ -59,6 +59,36 @@ export function remapProject(id: string, rootPath: string): Promise<void> {
   return invoke<void>("remap_project", { id, root_path: rootPath });
 }
 
+/**
+ * A project mapped or created via the "New project" affordance (FR-1.2 / UC6).
+ * Mirrors the Rust `EnsuredProjectDto` (snake_case `root_path`). `created` is
+ * `false` when an existing directory was already mapped (UC6: land on it, don't
+ * error).
+ */
+export interface EnsuredProject {
+  id: string;
+  name: string;
+  root_path: string;
+  created: boolean;
+}
+
+/** Map an existing directory as a project (native dir-picker path, FR-1.2). */
+export function ensureProject(rootPath: string, name?: string | null): Promise<EnsuredProject> {
+  return invoke<EnsuredProject>("ensure_project", { root_path: rootPath, name: name ?? null });
+}
+
+/** Create a fresh topic folder under the auto-project base dir and map it
+ *  (FR-1.2 "create a folder for me"). */
+export function createProjectFolder(name: string): Promise<EnsuredProject> {
+  return invoke<EnsuredProject>("create_project_folder", { name });
+}
+
+/** Delete a thread and all its data (bead conceptify-0kt hygiene): the DB row
+ *  (cascading to artifacts/comments/runs) plus its on-disk artifact dir. */
+export function deleteThread(threadId: string): Promise<void> {
+  return invoke<void>("delete_thread", { thread_id: threadId });
+}
+
 /** One saved artifact version (FR-2.4). Lists come back ascending by version. */
 export interface ArtifactVersion {
   version: number;
@@ -267,4 +297,64 @@ export interface LatestRun {
 
 export function getLatestRun(threadId: string): Promise<LatestRun | null> {
   return invoke<LatestRun | null>("get_latest_run", { thread_id: threadId });
+}
+
+// ---------------------------------------------------------------------------
+// Agent settings (PRD §5.5, FR-7.1–7.4) — the Settings UI surface.
+//
+// Mirrors the Rust `AgentSettings` (camelCase serde). Command templates edit
+// the `adapters` map; per-purpose models live under `models`. `agentBinaryPath`
+// / `autoProjectBaseDir` are `null` when unset (code defaults apply, FR-7.4).
+// ---------------------------------------------------------------------------
+
+export type Appearance = "system" | "light" | "dark";
+
+/** One agent invocation template (§5.5). `args`/`cwd`/`command` may contain the
+ *  `{prompt}`, `{model}`, `{project_root}` placeholders. */
+export interface AgentAdapter {
+  command: string;
+  args: string[];
+  cwd: string;
+}
+
+/** Per-purpose model ids (§5.5). */
+export interface PurposeModels {
+  followUp: string;
+  artifactUpdate: string;
+  inAppAsk: string;
+}
+
+export interface AgentSettings {
+  /** name → adapter template. Phase 1 ships only `"claude"`. */
+  adapters: Record<string, AgentAdapter>;
+  /** Which adapter runs; must be a key of `adapters` (backend-validated). */
+  defaultAdapter: string;
+  models: PurposeModels;
+  /** Agent run timeout in seconds (default 900 = 15 min). */
+  timeoutSecs: number;
+  /** Absolute-path override for the agent binary; `null`/empty = auto (FR-7.3). */
+  agentBinaryPath: string | null;
+  /** App appearance (FR-7.2). */
+  appearance: Appearance;
+  /** Base dir for auto-created project folders; `null`/empty = default
+   *  `~/Documents/conceptify/projects` (FR-7.3). */
+  autoProjectBaseDir: string | null;
+}
+
+/** Read the agent settings (stored overrides merged over code defaults, or pure
+ *  defaults when nothing is saved — FR-7.4). */
+export function getAgentSettings(): Promise<AgentSettings> {
+  return invoke<AgentSettings>("get_agent_settings");
+}
+
+/** Persist the agent settings. Rejects (user-facing message) when the config is
+ *  invalid (e.g. `defaultAdapter` names no adapter). */
+export function setAgentSettings(settings: AgentSettings): Promise<void> {
+  return invoke<void>("set_agent_settings", { settings });
+}
+
+/** Reset to code defaults (FR-7.4): deletes the stored override and returns the
+ *  now-default settings. */
+export function resetAgentSettings(): Promise<AgentSettings> {
+  return invoke<AgentSettings>("reset_agent_settings");
 }

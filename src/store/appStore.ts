@@ -83,6 +83,8 @@ export interface AppState {
   activeRun: ActiveRunState | null;
   /** The latest failed/timed-out run on the selected thread (FR-4.8). */
   runFailure: RunFailureState | null;
+  /** Whether the Settings overlay is open (FR-7.x). App-level UI state. */
+  settingsOpen: boolean;
 }
 
 type Listener = () => void;
@@ -106,6 +108,7 @@ const initialState: AppState = {
   commentsError: null,
   activeRun: null,
   runFailure: null,
+  settingsOpen: false,
 };
 
 /** Fresh viewer state, applied whenever the selected thread changes/vanishes.
@@ -560,6 +563,58 @@ class AppStore {
   async remapProject(id: string, rootPath: string): Promise<void> {
     await api.remapProject(id, rootPath);
     await this.refetchProjects();
+  }
+
+  /**
+   * Map an existing directory as a project (FR-1.2 / UC6, native dir-picker
+   * path), then refetch and select it. Picking an already-mapped directory
+   * lands on the existing project (`created: false`) rather than erroring, so
+   * either way the sidebar ends up focused on the right project. Throws
+   * (invalid/missing path) so the caller can surface the message inline.
+   */
+  async createProjectFromDir(rootPath: string): Promise<void> {
+    const result = await api.ensureProject(rootPath, null);
+    await this.refetchProjects();
+    this.selectProject(result.id);
+  }
+
+  /**
+   * Create a fresh topic folder under the auto-project base dir and map it
+   * (FR-1.2 / UC6 "create a folder for me"), then refetch and select the new
+   * project. Throws (empty name, unresolvable base dir, mkdir failure) so the
+   * caller can surface the message inline.
+   */
+  async createProjectFolder(name: string): Promise<void> {
+    const result = await api.createProjectFolder(name);
+    await this.refetchProjects();
+    this.selectProject(result.id);
+  }
+
+  /**
+   * Delete a thread and all its data (bead conceptify-0kt hygiene valve): the
+   * command removes the DB row (cascading to artifacts/comments/runs) and its
+   * on-disk artifact dir. If the deleted thread was selected, its selection +
+   * viewer state clear; then the thread list and project list (counts) refetch.
+   * Throws (unknown thread / DB error) so the caller can surface the message.
+   */
+  async deleteThread(threadId: string): Promise<void> {
+    const wasSelected = this.state.selectedThreadId === threadId;
+    await api.deleteThread(threadId);
+    if (wasSelected) {
+      this.set({ selectedThreadId: null, ...clearedViewer });
+    }
+    await this.refetchThreads();
+    await this.refetchProjects();
+  }
+
+  // ---- settings overlay (FR-7.x) ----
+
+  openSettings(): void {
+    if (!this.state.settingsOpen) this.set({ settingsOpen: true });
+  }
+
+  closeSettings(): void {
+    if (this.state.settingsOpen) this.set({ settingsOpen: false });
   }
 }
 

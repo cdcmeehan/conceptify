@@ -142,7 +142,10 @@ pub fn artifacts_root() -> io::Result<PathBuf> {
 }
 
 /// `<root>/<project-id>/threads/<thread-slug>` — the per-thread artifact dir.
-fn thread_dir(root: &Path, project_id: &str, slug: &str) -> PathBuf {
+/// Public so the thread-delete command (bead conceptify-0kt) can remove the
+/// whole directory when a thread is retired, using the same path construction
+/// as every save/version/log helper below (single source of truth).
+pub fn thread_dir(root: &Path, project_id: &str, slug: &str) -> PathBuf {
     root.join(project_id).join("threads").join(slug)
 }
 

@@ -59,6 +59,7 @@ webview updates live instead of polling. The frontend subscribes with
 | `run-progress` | agent-run engine (`runs` module, not an HTTP route) | `{ run_id: string, thread_id: string, kind: string, detail: string }` |
 | `run-finished` | agent-run engine (`runs` module, not an HTTP route) | `{ run_id: string, thread_id: string, status: string }` |
 | `thread-updated` | flow layer (`flows` module, not an HTTP route): thread status changes owned by the run lifecycle — apply-mode `updating` ↔ `ready`, and in-app-ask generation `generating` → `error` (or `generating` again on Retry), PRD §4 | `{ project_id: string, thread_id: string, status: string }` |
+| `settings-changed` | `set_agent_settings` / `reset_agent_settings` (Tauri commands, not HTTP) | `null` (no payload) |
 
 `artifact-updated` is the viewer's live-refresh trigger (PRD N2: save →
 visible refresh < 500ms): the frontend reloads the artifact iframe for
@@ -212,6 +213,53 @@ scoped so it does not flail against denials.
 Read-only routes (`GET /api/v1/debug/db-check`, `GET /api/v1/projects`,
 `GET /api/v1/threads`, `GET /api/v1/threads/:id/context`, `GET /api/v1/comments`)
 emit no events.
+
+### App-shell commands (Tauri, not HTTP — FR-1.2 / FR-7.x, thread hygiene)
+
+More app-only Tauri commands (`src-tauri/src/commands.rs`), invoked by the shell
+with snake_case args. Like the other command mutations they emit **no** Tauri
+event — the invoking window refetches after awaiting (the axum routes are the
+cross-surface event source; there is no CLI/API equivalent for these yet). The
+settings commands are the exception (they emit `settings-changed`, above).
+
+**Project creation (FR-1.2 / UC6, beads 959.3):**
+
+- `ensure_project { root_path, name? }` → `{ id, name, root_path, created }` —
+  map an existing directory as a project (native dir-picker path). Thin wrapper
+  over the same `projects::ensure_project` canonicalize → find-or-create path as
+  `POST /api/v1/projects/ensure`; picking an already-mapped directory lands on
+  the existing project (`created: false`), never an error. `name` overrides the
+  display name (the picker leaves it unset → directory name). The frontend gets
+  `root_path` from `@tauri-apps/plugin-dialog`'s `open({ directory: true })`.
+- `create_project_folder { name }` → same shape — "create a folder for me": makes
+  a fresh slugified, disk-deduped folder under the configured auto-project base
+  dir (FR-7.3, default `~/Documents/conceptify/projects`) and maps it, with
+  `name` as the display name. Errors (strings): empty name, unresolvable base
+  dir, mkdir failure.
+
+**Thread hygiene (bead 0kt):**
+
+- `delete_thread { thread_id }` → `void` — delete a thread and all its data: the
+  DB row (cascading to its artifacts/comments/follow_up_runs via the schema
+  `ON DELETE CASCADE` FKs) and, best-effort, its on-disk artifact directory
+  (`~/Documents/conceptify/artifacts/<project>/threads/<slug>/`). Errors
+  (string) only on unknown thread / DB failure; a dir-removal failure is logged,
+  not surfaced. The hygiene valve for a thread stuck in `generating` with no
+  artifact (and the general delete affordance).
+
+**Settings (FR-7.1–7.4, beads 959.4):**
+
+- `get_agent_settings {}` → `AgentSettings` — stored overrides merged over code
+  defaults, or pure defaults when nothing is saved (FR-7.4 zero-config). Shape
+  (camelCase): `{ adapters: { name → { command, args, cwd } }, defaultAdapter,
+  models: { followUp, artifactUpdate, inAppAsk }, timeoutSecs, agentBinaryPath,
+  appearance: "system"|"light"|"dark", autoProjectBaseDir }`. `agentBinaryPath`
+  and `autoProjectBaseDir` are `null` when unset (code default applies).
+- `set_agent_settings { settings }` → `void` — persist (validated: `defaultAdapter`
+  must name an existing adapter, else a user-facing error). Emits `settings-changed`.
+- `reset_agent_settings {}` → `AgentSettings` — delete the stored override so the
+  next read returns pure code defaults (FR-7.4 reset); returns those defaults.
+  Emits `settings-changed`.
 
 ## Endpoints
 

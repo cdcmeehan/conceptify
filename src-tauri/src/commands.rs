@@ -157,6 +157,126 @@ pub fn remap_project(db: State<DbHandle>, id: String, root_path: String) -> Resu
     Ok(())
 }
 
+/// A project mapped/created via the app's "New project" affordance (FR-1.2,
+/// UC6). `created` distinguishes a brand-new mapping from landing on an
+/// already-mapped directory (which is not an error — see `ensure_project`), so
+/// the shell can select the project either way.
+#[derive(Serialize)]
+pub struct EnsuredProjectDto {
+    pub id: String,
+    pub name: String,
+    pub root_path: String,
+    pub created: bool,
+}
+
+impl From<projects::EnsureProjectResult> for EnsuredProjectDto {
+    fn from(r: projects::EnsureProjectResult) -> Self {
+        EnsuredProjectDto {
+            id: r.project.id,
+            name: r.project.name,
+            root_path: r.project.root_path,
+            created: r.created,
+        }
+    }
+}
+
+/// Map an existing directory as a project (FR-1.2 / UC6 — native dir-picker
+/// path). Thin wrapper over `projects::ensure_project` — the same
+/// canonicalize → find-or-create path the HTTP `POST /projects/ensure` route
+/// uses. Picking an already-mapped directory lands on the existing project
+/// (`created: false`), never an error (UC6 acceptance). `name` is an optional
+/// display-name override; the picker leaves it unset so the directory name is
+/// used. The frontend passes the path returned by the `@tauri-apps/plugin-dialog`
+/// native directory picker.
+#[tauri::command(rename_all = "snake_case")]
+pub fn ensure_project(
+    db: State<DbHandle>,
+    root_path: String,
+    name: Option<String>,
+) -> Result<EnsuredProjectDto, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    projects::ensure_project(&conn, &root_path, name.as_deref())
+        .map(EnsuredProjectDto::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Create a fresh project folder for a non-codebase topic and map it (FR-1.2 /
+/// UC6 — "create a folder for me"). The folder is made under the configured
+/// auto-project base dir (FR-7.3, default `~/Documents/conceptify/projects`),
+/// its name slugified + deduped on disk; the human `name` becomes the project's
+/// display name. Domain logic lives in `projects::create_auto_project`; this
+/// wrapper resolves the base dir from settings and stringifies errors.
+#[tauri::command(rename_all = "snake_case")]
+pub fn create_project_folder(
+    db: State<DbHandle>,
+    name: String,
+) -> Result<EnsuredProjectDto, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let base = crate::settings::get_settings(&conn)
+        .map_err(|e| e.to_string())?
+        .resolved_auto_project_base_dir()
+        .map_err(|e| e.to_string())?;
+    projects::create_auto_project(&conn, &base, &name)
+        .map(EnsuredProjectDto::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Best-effort removal of a thread's on-disk artifact directory (bead
+/// conceptify-0kt). A missing dir (thread never saved an artifact) is treated
+/// as success; any other error is returned so the caller can log it — it is
+/// never fatal to the delete, which has already removed the authoritative DB
+/// row. Split out (with an explicit `root`) so it's unit-testable without the
+/// `artifacts_root()` environment dependency.
+fn remove_thread_artifact_dir(root: &Path, project_id: &str, slug: &str) -> std::io::Result<()> {
+    let dir = artifacts::thread_dir(root, project_id, slug);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Delete a thread and all of its data (bead conceptify-0kt — the hygiene valve
+/// for a thread stuck in `generating` with no artifact, or any thread the user
+/// no longer wants). Removes the DB row — which cascades to its
+/// artifacts/comments/follow_up_runs via the schema `ON DELETE CASCADE` FKs
+/// (`db::migrations`, enforced by the `foreign_keys = ON` pragma) — and then,
+/// best-effort, its on-disk artifact directory
+/// (`~/Documents/conceptify/artifacts/<project>/threads/<slug>/`). Errors
+/// (string) only when the thread doesn't exist or the DB delete fails; a
+/// failure to remove the directory is logged, not surfaced.
+///
+/// Like the other shell mutations here it emits no Tauri event — the invoking
+/// window refetches after awaiting (see this module's header). No other surface
+/// deletes threads, so there is no cross-surface change to broadcast; if a CLI
+/// delete is ever added it should emit `thread-deleted` and wire it in
+/// `events.ts`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn delete_thread(db: State<DbHandle>, thread_id: String) -> Result<(), String> {
+    // Resolve the project/slug BEFORE deleting so we can locate the artifact dir
+    // once the row (and its slug) is gone.
+    let (project_id, slug) = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let thread = threads::get_thread_opt(&conn, &thread_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("thread not found: {thread_id}"))?;
+        let deleted = threads::delete_thread(&conn, &thread_id).map_err(|e| e.to_string())?;
+        if !deleted {
+            return Err(format!("thread not found: {thread_id}"));
+        }
+        (thread.project_id, thread.slug)
+    };
+
+    if let Ok(root) = artifacts::artifacts_root() {
+        if let Err(e) = remove_thread_artifact_dir(&root, &project_id, &slug) {
+            eprintln!(
+                "[conceptify] delete_thread: failed to remove artifact dir for thread {thread_id}: {e}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// One saved artifact version for the viewer's version switcher (FR-2.4).
 /// Sorted ascending by `version`; the last entry is the thread's latest.
 #[derive(Serialize)]
@@ -700,6 +820,35 @@ mod tests {
         drop(conn);
         cleanup(&db_path, &root);
     }
+
+    /// `remove_thread_artifact_dir` (the best-effort dir removal behind
+    /// `delete_thread`): removes an existing thread dir and its contents, and
+    /// treats a missing dir as success (idempotent — the thread may never have
+    /// saved an artifact).
+    #[test]
+    fn remove_thread_artifact_dir_removes_then_tolerates_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "conceptify-test-rm-thread-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir = crate::artifacts::thread_dir(&root, "p1", "how-does-x-work");
+        std::fs::create_dir_all(dir.join("runs")).unwrap();
+        std::fs::write(dir.join("artifact.html"), b"<html></html>").unwrap();
+        std::fs::write(dir.join("artifact.v1.html"), b"<html></html>").unwrap();
+
+        // Existing dir + contents are removed.
+        remove_thread_artifact_dir(&root, "p1", "how-does-x-work").unwrap();
+        assert!(!dir.exists());
+
+        // A now-missing dir is success (best-effort / idempotent).
+        remove_thread_artifact_dir(&root, "p1", "how-does-x-work").unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -740,6 +889,27 @@ pub fn set_agent_settings(
     use tauri::Emitter;
     let _ = app.emit("settings-changed", &());
     Ok(())
+}
+
+/// Reset agent settings to the code defaults (FR-7.4 — the Settings "Reset to
+/// defaults" action): delete the stored override row so `get_agent_settings`
+/// returns pure defaults, exactly as a fresh install. Emits `settings-changed`
+/// like `set_agent_settings`, and returns the now-default settings so the UI
+/// can repaint without a second round-trip. Restores the true zero-config
+/// baseline rather than writing a "defaults" blob.
+#[tauri::command(rename_all = "snake_case")]
+pub fn reset_agent_settings(
+    app: tauri::AppHandle,
+    db: State<DbHandle>,
+) -> Result<crate::settings::AgentSettings, String> {
+    let defaults = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        crate::settings::clear_settings(&conn).map_err(|e| e.to_string())?;
+        crate::settings::get_settings(&conn).map_err(|e| e.to_string())?
+    };
+    use tauri::Emitter;
+    let _ = app.emit("settings-changed", &());
+    Ok(defaults)
 }
 
 // ---------------------------------------------------------------------------

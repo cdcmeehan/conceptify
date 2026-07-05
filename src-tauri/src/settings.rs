@@ -46,9 +46,16 @@
 //!               "artifactUpdate": "claude-sonnet-5",
 //!               "inAppAsk": "claude-sonnet-5" },
 //!   "timeoutSecs": 900,
-//!   "agentBinaryPath": null
+//!   "agentBinaryPath": null,
+//!   "appearance": "system",
+//!   "autoProjectBaseDir": null
 //! }
 //! ```
+//!
+//! `appearance` (FR-7.2) is `system`|`light`|`dark`, applied by the app shell.
+//! `autoProjectBaseDir` (FR-7.3) is the base dir under which "create a folder
+//! for me" (FR-1.2) makes project dirs; `null`/empty means the built-in default
+//! `~/Documents/conceptify/projects`.
 //!
 //! `timeoutSecs` is stored in **seconds** (default 900 = 15 min, FR-5.3) so the
 //! spawner can feed it straight into `Duration::from_secs`. `agentBinaryPath`
@@ -233,7 +240,31 @@ fn default_in_app_ask_model() -> String {
     "claude-sonnet-5".to_owned()
 }
 
+/// The built-in auto-project base directory, `~/Documents/conceptify/projects`
+/// (FR-7.3 default). `None` if the platform Documents directory can't be
+/// resolved (headless/unusual environments) — callers surface that as an error.
+/// Uses the same `dirs::document_dir()` root as the artifacts store (§5.6), so
+/// auto-created projects sit alongside their artifacts under `~/Documents/conceptify`.
+pub fn default_auto_project_base_dir() -> Option<PathBuf> {
+    dirs::document_dir().map(|d| d.join("conceptify").join("projects"))
+}
+
 // --- Data model -------------------------------------------------------------
+
+/// App appearance preference (FR-7.2). `System` follows the OS
+/// `prefers-color-scheme`; `Light`/`Dark` force that scheme in the app shell.
+/// Serialized lowercase to match the frontend `"system" | "light" | "dark"`.
+/// The artifact iframe keeps its own `prefers-color-scheme` regardless (S2
+/// origin isolation — the shell can't reach into it), so `System` is the path
+/// where the reading surface and shell always agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
 
 /// One agent invocation template. `args`/`cwd`/`command` may contain the
 /// placeholders `{prompt}`, `{model}`, `{project_root}`, substituted at
@@ -320,6 +351,15 @@ pub struct AgentSettings {
     /// "resolve via login-shell `which`" (see [`resolve_agent_binary`]).
     #[serde(default)]
     pub agent_binary_path: Option<String>,
+    /// App appearance (FR-7.2): follow the OS or force light/dark in the shell.
+    #[serde(default)]
+    pub appearance: Appearance,
+    /// Base directory under which "create a folder for me" (FR-1.2/UC6) makes
+    /// new project dirs (FR-7.3). `None`/empty means the built-in default
+    /// [`default_auto_project_base_dir`]; only stored when the user overrides,
+    /// so the zero-config default stays code-side (FR-7.4).
+    #[serde(default)]
+    pub auto_project_base_dir: Option<String>,
 }
 
 impl Default for AgentSettings {
@@ -330,6 +370,8 @@ impl Default for AgentSettings {
             models: PurposeModels::default(),
             timeout_secs: default_timeout_secs(),
             agent_binary_path: None,
+            appearance: Appearance::System,
+            auto_project_base_dir: None,
         }
     }
 }
@@ -361,6 +403,9 @@ pub enum SettingsError {
     #[error("invalid settings JSON: {0}")]
     Deserialize(#[source] serde_json::Error),
 
+    #[error("could not resolve the default auto-project base directory; set one in Settings")]
+    NoAutoProjectBaseDir,
+
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
 }
@@ -374,6 +419,24 @@ impl AgentSettings {
             return Err(SettingsError::UnknownAdapter(self.default_adapter.clone()));
         }
         Ok(())
+    }
+
+    /// The effective auto-project base dir (FR-7.3): the user override when set
+    /// and non-empty, else the built-in default
+    /// ([`default_auto_project_base_dir`]). Errors only when neither is
+    /// available (no override + no resolvable Documents dir). The path is
+    /// returned as-is (not created here); the project-creation domain code
+    /// (`crate::projects::create_auto_project`) makes the directory.
+    pub fn resolved_auto_project_base_dir(&self) -> Result<PathBuf, SettingsError> {
+        if let Some(p) = self
+            .auto_project_base_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Ok(PathBuf::from(p));
+        }
+        default_auto_project_base_dir().ok_or(SettingsError::NoAutoProjectBaseDir)
     }
 
     /// Resolve an invocation for `purpose` against `project_root` and `prompt`.
@@ -594,6 +657,14 @@ pub fn update_settings(conn: &Connection, settings: &AgentSettings) -> Result<()
     Ok(())
 }
 
+/// Delete the stored settings override (FR-7.4 "reset to defaults"): afterwards
+/// [`get_settings`] returns the pure code defaults, exactly as a fresh install
+/// with no `settings` row. A missing row is a no-op (already at defaults).
+pub fn clear_settings(conn: &Connection) -> Result<(), SettingsError> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", [SETTINGS_KEY])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,6 +806,8 @@ mod tests {
         assert_eq!(s.models.in_app_ask, "claude-sonnet-5");
         assert_eq!(s.timeout_secs, 900);
         assert_eq!(s.agent_binary_path, None);
+        assert_eq!(s.appearance, Appearance::System);
+        assert_eq!(s.auto_project_base_dir, None);
     }
 
     #[test]
@@ -744,10 +817,52 @@ mod tests {
         s.models.follow_up = "custom-fast".to_owned();
         s.timeout_secs = 60;
         s.agent_binary_path = Some("/opt/claude".to_owned());
+        s.appearance = Appearance::Dark;
+        s.auto_project_base_dir = Some("/custom/projects".to_owned());
 
         update_settings(&conn, &s).unwrap();
         let read = get_settings(&conn).unwrap();
         assert_eq!(read, s);
+    }
+
+    #[test]
+    fn appearance_serializes_lowercase() {
+        // The stored JSON must use the lowercase tags the frontend sends.
+        let mut s = AgentSettings::default();
+        s.appearance = Appearance::Dark;
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""appearance":"dark""#), "{json}");
+
+        // And a stored lowercase tag deserializes back to the enum.
+        let parsed: AgentSettings =
+            serde_json::from_str(r#"{"appearance":"light"}"#).unwrap();
+        assert_eq!(parsed.appearance, Appearance::Light);
+    }
+
+    #[test]
+    fn resolved_auto_project_base_dir_prefers_override() {
+        let mut s = AgentSettings::default();
+        // A whitespace-only override is treated as "unset" → the built-in default.
+        s.auto_project_base_dir = Some("   ".to_owned());
+        assert_eq!(
+            s.resolved_auto_project_base_dir().unwrap(),
+            default_auto_project_base_dir().unwrap(),
+        );
+
+        // A real override wins and is trimmed.
+        s.auto_project_base_dir = Some("  /my/projects  ".to_owned());
+        assert_eq!(
+            s.resolved_auto_project_base_dir().unwrap(),
+            PathBuf::from("/my/projects"),
+        );
+    }
+
+    #[test]
+    fn default_auto_project_base_dir_ends_in_conceptify_projects() {
+        // On any host with a resolvable Documents dir (macOS test env), the
+        // default lands under ~/Documents/conceptify/projects.
+        let dir = default_auto_project_base_dir().expect("documents dir on test host");
+        assert!(dir.ends_with("conceptify/projects"), "{}", dir.display());
     }
 
     #[test]
@@ -769,6 +884,9 @@ mod tests {
         assert_eq!(s.default_adapter, "claude");
         assert!(s.adapters.contains_key("claude"));
         assert_eq!(s.timeout_secs, 900);
+        // Fields added after this blob shape still fill from code defaults.
+        assert_eq!(s.appearance, Appearance::System);
+        assert_eq!(s.auto_project_base_dir, None);
     }
 
     #[test]
@@ -929,6 +1047,10 @@ mod tests {
             s.agent_binary_path = Some("/opt/claude".to_owned());
             update_settings(&conn, &s).unwrap();
             assert_eq!(get_settings(&conn).unwrap(), s);
+
+            // Reset (FR-7.4): clearing the row returns to pure code defaults.
+            clear_settings(&conn).unwrap();
+            assert_eq!(get_settings(&conn).unwrap(), AgentSettings::default());
         }
 
         drop(db_handle);

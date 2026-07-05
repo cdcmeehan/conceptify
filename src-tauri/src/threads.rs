@@ -288,6 +288,22 @@ pub fn transition_thread_status(
     Ok(changed > 0)
 }
 
+/// Delete a thread and everything hanging off it (thread-hygiene, bead
+/// conceptify-0kt: retire a dead/orphaned thread stuck in `generating`).
+///
+/// A single `DELETE`: the `ON DELETE CASCADE` foreign keys on `artifacts`,
+/// `comments`, and `follow_up_runs` (see `db::migrations`; enforced by the
+/// `foreign_keys = ON` pragma `db::open_and_migrate` sets) remove the child
+/// rows in the same statement. The thread's on-disk artifact directory is
+/// removed separately by the command layer, which resolves the artifacts root
+/// and the thread's project/slug *before* the row is gone (this fn
+/// intentionally touches only the DB). Returns whether a row was actually
+/// deleted (`false` for an unknown id — an idempotent no-op, not an error).
+pub fn delete_thread(conn: &Connection, thread_id: &str) -> Result<bool, ThreadError> {
+    let deleted = conn.execute("DELETE FROM threads WHERE id = ?1", [thread_id])?;
+    Ok(deleted > 0)
+}
+
 /// Turn a human title into a filesystem-safe slug: lowercase ASCII
 /// alphanumerics, runs of any other character collapsed to a single hyphen,
 /// no leading/trailing hyphen, capped at `MAX_SLUG_LEN`.
@@ -601,5 +617,20 @@ mod tests {
         let conn = test_conn();
         create_thread(&conn, "p1", "One", "q").unwrap();
         assert!(list_threads(&conn, "ghost").unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_thread_removes_row_and_is_idempotent() {
+        let conn = test_conn();
+        let t = create_thread(&conn, "p1", "To Delete", "q").unwrap();
+        // Deletes the row and reports it did.
+        assert!(delete_thread(&conn, &t.id).unwrap());
+        assert!(get_thread_opt(&conn, &t.id).unwrap().is_none());
+        // A second delete of the same (now-gone) id → false, no error.
+        assert!(!delete_thread(&conn, &t.id).unwrap());
+        // Unknown id → false, no error (idempotent hygiene op).
+        assert!(!delete_thread(&conn, "ghost").unwrap());
+        // The cascade (artifacts/comments/follow_up_runs) is exercised against
+        // the real FK-enabled schema in `lib.rs`'s migration tests.
     }
 }

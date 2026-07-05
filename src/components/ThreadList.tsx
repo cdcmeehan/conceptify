@@ -9,6 +9,19 @@ import { relativeTime } from "../lib/time";
 import { NewThreadComposer } from "./NewThreadComposer";
 import { StatusChip } from "./StatusChip";
 
+/** A `generating` thread idle this long is treated as stalled (bead
+ *  conceptify-0kt option b-lite) — the authoring run likely died. Visual only. */
+const STALL_MS = 30 * 60 * 1000;
+
+/** Whether a thread's chip should render as "stalled": still `generating` well
+ *  past the threshold (no artifact save has bumped `updated_at`). Cheap and
+ *  time-based — it re-evaluates on each render (selection, refetch), no timer. */
+function isStalled(thread: Thread): boolean {
+  if (thread.status !== "generating") return false;
+  const updated = Date.parse(thread.updated_at);
+  return Number.isFinite(updated) && Date.now() - updated > STALL_MS;
+}
+
 interface Props {
   threads: Thread[];
   selectedThreadId: string | null;
@@ -28,6 +41,21 @@ export function ThreadList({
 }: Props) {
   // FR-5.1 in-app ask composer, toggled by the "New thread" header button.
   const [composerOpen, setComposerOpen] = useState(false);
+  // Thread delete (bead conceptify-0kt): id awaiting inline confirmation, plus
+  // in-flight + error state for the delete request.
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  function confirmDelete(threadId: string) {
+    setDeleteBusy(true);
+    setDeleteError(null);
+    appStore
+      .deleteThread(threadId)
+      .then(() => setConfirmingDeleteId(null))
+      .catch((e) => setDeleteError(String(e)))
+      .finally(() => setDeleteBusy(false));
+  }
 
   function onListKeyDown(e: KeyboardEvent) {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
@@ -117,11 +145,62 @@ export function ThreadList({
                       )}
                     </div>
                     <div class="mt-1.5 flex items-center justify-between gap-2">
-                      <StatusChip status={thread.status} />
+                      <StatusChip status={thread.status} stalled={isStalled(thread)} />
                       <span class="shrink-0 text-xs text-neutral-400">
                         {relativeTime(thread.updated_at)}
                       </span>
                     </div>
+
+                    {/* Delete affordance (bead conceptify-0kt): the hygiene
+                        valve for a thread stuck in generating (also useful for
+                        any unwanted thread). Shown on the selected thread with
+                        an inline confirm — deletes the thread and all its data
+                        (comments/artifacts/runs cascade + artifact dir). */}
+                    {selected && (
+                      <div class="mt-1.5" onClick={(e) => e.stopPropagation()}>
+                        {confirmingDeleteId === thread.id ? (
+                          <div class="flex flex-col gap-1">
+                            <span class="text-xs text-neutral-500 dark:text-neutral-400">
+                              Delete this thread and all its data?
+                            </span>
+                            <div class="flex items-center gap-2">
+                              <button
+                                type="button"
+                                disabled={deleteBusy}
+                                onClick={() => confirmDelete(thread.id)}
+                                class="rounded bg-rose-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-rose-700 disabled:opacity-50"
+                              >
+                                {deleteBusy ? "Deleting…" : "Delete"}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={deleteBusy}
+                                onClick={() => setConfirmingDeleteId(null)}
+                                class="rounded px-2 py-0.5 text-xs text-neutral-500 hover:text-neutral-800 disabled:opacity-50 dark:hover:text-neutral-200"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                            {deleteError != null && (
+                              <span class="text-[11px] text-rose-600 dark:text-rose-400">
+                                {deleteError}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDeleteError(null);
+                              setConfirmingDeleteId(thread.id);
+                            }}
+                            class="text-xs text-neutral-500 hover:text-rose-600 dark:text-neutral-400 dark:hover:text-rose-400"
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </li>
               );

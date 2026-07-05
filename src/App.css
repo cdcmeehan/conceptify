@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+/* FR-7.2 appearance: drive Tailwind's `dark:` variant from a `data-theme`
+   attribute set by src/lib/theme.ts (system|light|dark) instead of the raw
+   `prefers-color-scheme` media query, so Settings can force light/dark. In
+   `system` mode theme.ts computes `data-theme` from the OS preference and
+   follows OS changes live. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-synthesis: none;
@@ -101,15 +108,16 @@ body {
   opacity: 0.85;
 }
 
-@media (prefers-color-scheme: dark) {
-  .cfy-answer code,
-  .cfy-answer pre {
-    background: rgba(255, 255, 255, 0.08);
-  }
-  .cfy-answer a {
-    color: #60a5fa;
-  }
-  .cfy-answer blockquote {
-    border-left-color: rgba(255, 255, 255, 0.2);
-  }
+/* Follows the shell's forced/system appearance (data-theme, set by theme.ts),
+   so the sidebar answer HTML stays in sync with light/dark toggling — not the
+   raw OS media query. */
+:root[data-theme="dark"] .cfy-answer code,
+:root[data-theme="dark"] .cfy-answer pre {
+  background: rgba(255, 255, 255, 0.08);
+}
+:root[data-theme="dark"] .cfy-answer a {
+  color: #60a5fa;
+}
+:root[data-theme="dark"] .cfy-answer blockquote {
+  border-left-color: rgba(255, 255, 255, 0.2);
 }

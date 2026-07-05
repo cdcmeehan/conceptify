@@ -52,6 +52,13 @@ pub fn run() {
 
     builder = builder.plugin(tauri_plugin_opener::init());
 
+    // PRD FR-1.2 / UC6: native directory picker for in-app project creation.
+    // The frontend calls `@tauri-apps/plugin-dialog`'s `open({ directory: true })`
+    // (native NSOpenPanel on macOS — WKWebView-safe, not a web API) and hands
+    // the chosen path to the `ensure_project` command. Only the `open` command
+    // is granted (`dialog:allow-open` in capabilities/default.json).
+    builder = builder.plugin(tauri_plugin_dialog::init());
+
     // PRD §5.4 / §9 S2: the artifact:// scheme the viewer's sandboxed
     // iframe loads from. Cross-scheme = real origin isolation from the app
     // shell; the handler applies the per-response CSP. Registered on the
@@ -76,12 +83,16 @@ pub fn run() {
             commands::rename_project,
             commands::set_project_archived,
             commands::remap_project,
+            commands::ensure_project,
+            commands::create_project_folder,
+            commands::delete_thread,
             commands::list_artifact_versions,
             commands::open_artifact_in_browser,
             commands::create_comment,
             commands::list_comments,
             commands::get_agent_settings,
             commands::set_agent_settings,
+            commands::reset_agent_settings,
             commands::ask_follow_ups,
             commands::apply_to_artifact,
             commands::get_active_run,
@@ -362,6 +373,104 @@ mod tests {
         // comment: 0 open.
         let threads_list = threads::list_threads(&conn, "p1").expect("list threads");
         assert_eq!(threads_list[0].open_comment_count, 0);
+
+        drop(conn);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    /// Exercises `threads::delete_thread`'s cascade against the *real*
+    /// FK-enabled migration output (bead conceptify-0kt): `db::init_at` runs the
+    /// full chain with `foreign_keys = ON`, so deleting a thread must remove its
+    /// artifacts, comments, AND follow_up_runs via `ON DELETE CASCADE` in one
+    /// statement — and must NOT touch a sibling thread's rows. This is the
+    /// load-bearing proof that no schema change is needed for thread deletion.
+    #[test]
+    fn delete_thread_cascades_against_real_migrations() {
+        let db_path = std::env::temp_dir().join(format!(
+            "conceptify-test-delete-cascade-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let db_handle = db::init_at(&db_path).expect("test db should init and migrate");
+        let conn = db_handle.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO projects (id, name, root_path) VALUES ('p1', 'Proj', '/tmp/del')",
+            [],
+        )
+        .expect("insert project");
+
+        // The thread we will delete, fully populated: artifact v1 + a comment
+        // anchored to it + a follow_up_run.
+        let victim = threads::create_thread(&conn, "p1", "Doomed", "q")
+            .expect("create victim thread")
+            .id;
+        conn.execute(
+            "INSERT INTO artifacts (id, thread_id, version, file_path, created_by)
+             VALUES ('a1', ?1, 1, '/tmp/a.html', 'initial')",
+            [&victim],
+        )
+        .expect("insert artifact");
+        conn.execute(
+            "INSERT INTO comments (id, thread_id, artifact_version, body, status)
+             VALUES ('c1', ?1, 1, 'why?', 'open')",
+            [&victim],
+        )
+        .expect("insert comment");
+        conn.execute(
+            "INSERT INTO follow_up_runs (id, thread_id, agent, model, mode, status, log_path)
+             VALUES ('r1', ?1, 'claude', 'm', 'ask', 'failed', '/tmp/r.log')",
+            [&victim],
+        )
+        .expect("insert run");
+
+        // A sibling thread with its own artifact — must survive untouched.
+        let keeper = threads::create_thread(&conn, "p1", "Keeper", "q")
+            .expect("create keeper thread")
+            .id;
+        conn.execute(
+            "INSERT INTO artifacts (id, thread_id, version, file_path, created_by)
+             VALUES ('a2', ?1, 1, '/tmp/b.html', 'initial')",
+            [&keeper],
+        )
+        .expect("insert keeper artifact");
+
+        // Delete the victim → cascades to its children only.
+        assert!(threads::delete_thread(&conn, &victim).expect("delete victim"));
+
+        let count = |sql: &str, id: &str| -> i64 {
+            conn.query_row(sql, [id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(count("SELECT COUNT(*) FROM threads WHERE id = ?1", &victim), 0);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM artifacts WHERE thread_id = ?1", &victim),
+            0,
+            "artifacts should cascade-delete"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM comments WHERE thread_id = ?1", &victim),
+            0,
+            "comments should cascade-delete"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM follow_up_runs WHERE thread_id = ?1", &victim),
+            0,
+            "follow_up_runs should cascade-delete"
+        );
+
+        // The sibling thread and its artifact are untouched.
+        assert_eq!(count("SELECT COUNT(*) FROM threads WHERE id = ?1", &keeper), 1);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM artifacts WHERE thread_id = ?1", &keeper),
+            1,
+            "sibling artifact must survive"
+        );
 
         drop(conn);
         let _ = std::fs::remove_file(&db_path);
