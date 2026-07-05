@@ -300,7 +300,7 @@ pub fn list_comments(
         FROM comments
         WHERE thread_id = ?1
           AND (?2 IS NULL OR status = ?2)
-        ORDER BY created_at ASC, id ASC
+        ORDER BY created_at ASC, rowid ASC
         ",
     )?;
 
@@ -387,7 +387,7 @@ pub fn reattach_candidates(
         WHERE thread_id = ?1
           AND artifact_version < ?2
           AND status IN ('open', 'answered')
-        ORDER BY created_at ASC, id ASC
+        ORDER BY created_at ASC, rowid ASC
         ",
     )?;
     let rows = stmt.query_map(rusqlite::params![thread_id, new_version], row_to_comment)?;

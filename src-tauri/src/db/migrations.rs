@@ -30,6 +30,10 @@ pub fn migrations() -> Migrations<'static> {
         M::up(SETTINGS),
         M::up(THREAD_SLUG),
         M::up(COMMENT_ANCHOR_STATE),
+        // The only table-rebuild migration in the chain; `foreign_key_check`
+        // validates that the DROP/RENAME preserved referential integrity
+        // before the migration's transaction commits (see the const's doc).
+        M::up(FOLLOW_UP_RUNS_ASK_MODE).foreign_key_check(),
     ])
 }
 
@@ -195,3 +199,268 @@ const COMMENT_ANCHOR_STATE: &str = "
 ALTER TABLE comments ADD COLUMN anchor_state TEXT NOT NULL DEFAULT 'anchored'
     CHECK (anchor_state IN ('anchored', 'moved'));
 ";
+
+/// Extends `follow_up_runs.mode`'s CHECK from `('answer', 'apply')` to
+/// `('answer', 'apply', 'ask')` so the in-app ask flow (bead `conceptify-959.1`)
+/// can record its runs as `mode = 'ask'` → `RunMode::Ask`/`Purpose::InAppAsk`,
+/// giving them the same log/status/guard machinery as follow-up and apply runs
+/// (decision recorded on bead `conceptify-b12.2`, this bead `conceptify-iho`).
+///
+/// SQLite cannot `ALTER` a column's `CHECK` constraint in place, so this
+/// rebuilds the table via the standard create-copy-drop-rename procedure. The
+/// new table is **byte-for-byte identical** to the original `FOLLOW_UP_RUNS`
+/// definition except for the one widened `CHECK` — every column, type, default,
+/// the `PRIMARY KEY`, the `REFERENCES threads(id) ON DELETE CASCADE` foreign
+/// key, and the absence of a `status` CHECK (free-form `TEXT` by design) are
+/// preserved. The `INSERT ... SELECT` names every column explicitly and copies
+/// `started_at`/`finished_at` verbatim, so pre-existing rows survive unchanged
+/// (their original `started_at` is copied, never re-defaulted). The index is
+/// dropped with the old table and recreated identically.
+///
+/// Appended (not folded into the original `FOLLOW_UP_RUNS` definition) per this
+/// file's append-only contract: `rusqlite_migration` tracks progress
+/// positionally by `user_version`, so an in-place edit would be silently
+/// skipped by databases already migrated past `FOLLOW_UP_RUNS`.
+///
+/// Foreign keys: `db::open_and_migrate` runs the chain with `PRAGMA
+/// foreign_keys = ON`, and `rusqlite_migration` wraps each migration in a
+/// transaction — inside which `PRAGMA foreign_keys` is a no-op — so the usual
+/// "turn FKs off around a rebuild" dance is neither possible nor needed here.
+/// It is unnecessary because `follow_up_runs` is a *leaf*: it only holds an
+/// outbound FK to `threads`, and no table references it, so dropping and
+/// renaming it cannot orphan any child rows or rewrite any other table's
+/// schema. The copied rows keep referencing the same still-present `threads`,
+/// so integrity holds throughout; `.foreign_key_check()` on the `M::up` entry
+/// asserts exactly that before the transaction commits.
+const FOLLOW_UP_RUNS_ASK_MODE: &str = "
+CREATE TABLE follow_up_runs_new (
+    id           TEXT PRIMARY KEY,
+    thread_id    TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    agent        TEXT NOT NULL,
+    model        TEXT NOT NULL,
+    mode         TEXT NOT NULL CHECK (mode IN ('answer', 'apply', 'ask')),
+    status       TEXT NOT NULL,
+    log_path     TEXT NOT NULL,
+    started_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    finished_at  TEXT
+);
+INSERT INTO follow_up_runs_new
+    (id, thread_id, agent, model, mode, status, log_path, started_at, finished_at)
+    SELECT id, thread_id, agent, model, mode, status, log_path, started_at, finished_at
+    FROM follow_up_runs;
+DROP TABLE follow_up_runs;
+ALTER TABLE follow_up_runs_new RENAME TO follow_up_runs;
+CREATE INDEX idx_follow_up_runs_thread_id ON follow_up_runs(thread_id);
+";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// `user_version` after the full chain — the count of `M::up` entries in
+    /// [`migrations`]. The `follow_up_runs` ask-mode rebuild is the last one,
+    /// so `LATEST - 1` is the schema state immediately before it.
+    const LATEST: usize = 9;
+
+    /// Open an in-memory DB with the same `foreign_keys = ON` posture
+    /// `db::open_and_migrate` uses in production, so the rebuild migration is
+    /// exercised under real FK enforcement.
+    fn fresh_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("enable foreign keys");
+        conn
+    }
+
+    fn user_version(conn: &Connection) -> usize {
+        conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .expect("read user_version") as usize
+    }
+
+    /// Seed a project + thread so `follow_up_runs` rows have a valid FK target.
+    fn seed_thread(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO projects (id, name, root_path) VALUES ('p1', 'Proj', '/tmp/p1')",
+            [],
+        )
+        .expect("seed project");
+        conn.execute(
+            "INSERT INTO threads (id, project_id, title, initial_question, status)
+             VALUES ('t1', 'p1', 'Title', 'q', 'generating')",
+            [],
+        )
+        .expect("seed thread");
+    }
+
+    /// The whole `follow_up_runs` row, in schema column order, for
+    /// byte-identical before/after comparison across the rebuild.
+    type Row = (
+        String,         // id
+        String,         // thread_id
+        String,         // agent
+        String,         // model
+        String,         // mode
+        String,         // status
+        String,         // log_path
+        String,         // started_at
+        Option<String>, // finished_at
+    );
+
+    fn read_run(conn: &Connection, id: &str) -> Row {
+        conn.query_row(
+            "SELECT id, thread_id, agent, model, mode, status, log_path, started_at, finished_at
+             FROM follow_up_runs WHERE id = ?1",
+            [id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            },
+        )
+        .expect("row should exist")
+    }
+
+    /// The whole chain applies cleanly on a fresh database and lands on the
+    /// expected `user_version` (guards against an off-by-one if an entry is
+    /// added/removed without updating [`LATEST`]).
+    #[test]
+    fn full_chain_migrates_cleanly() {
+        let mut conn = fresh_conn();
+        migrations().to_latest(&mut conn).expect("to_latest");
+        assert_eq!(user_version(&conn), LATEST);
+    }
+
+    /// The load-bearing test: rows written under the pre-rebuild schema
+    /// (`CHECK (mode IN ('answer','apply'))`) survive the rebuild
+    /// byte-for-byte, including explicitly-set `started_at`/`finished_at` that
+    /// must be *copied*, never re-defaulted.
+    #[test]
+    fn rebuild_preserves_existing_rows_byte_identical() {
+        let mut conn = fresh_conn();
+        let m = migrations();
+
+        // Migrate to just before the ask-mode rebuild.
+        m.to_version(&mut conn, LATEST - 1).expect("to pre-rebuild");
+        seed_thread(&conn);
+
+        // Two rows with distinct pre-migration modes and hand-set timestamps
+        // (one with a real finished_at, one with NULL) so the copy — not a
+        // default — is what we observe afterward.
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path, started_at, finished_at)
+             VALUES
+                 ('r-answer', 't1', 'claude', 'model-a', 'answer', 'completed',
+                  '/logs/r-answer.log', '2020-01-02T03:04:05.678Z', '2020-01-02T03:05:06.789Z')",
+            [],
+        )
+        .expect("insert answer row");
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path, started_at, finished_at)
+             VALUES
+                 ('r-apply', 't1', 'claude', 'model-b', 'apply', 'running',
+                  '/logs/r-apply.log', '2021-06-07T08:09:10.111Z', NULL)",
+            [],
+        )
+        .expect("insert apply row");
+
+        // At the pre-rebuild version the old CHECK must still reject 'ask'.
+        assert!(
+            conn.execute(
+                "INSERT INTO follow_up_runs
+                     (id, thread_id, agent, model, mode, status, log_path)
+                 VALUES ('r-ask-early', 't1', 'claude', 'm', 'ask', 'running', '/l.log')",
+                [],
+            )
+            .is_err(),
+            "pre-rebuild CHECK must reject mode = 'ask'"
+        );
+
+        let before_answer = read_run(&conn, "r-answer");
+        let before_apply = read_run(&conn, "r-apply");
+
+        // Apply the rebuild.
+        m.to_version(&mut conn, LATEST).expect("apply ask-mode rebuild");
+
+        // Rows survive completely unchanged.
+        assert_eq!(read_run(&conn, "r-answer"), before_answer);
+        assert_eq!(read_run(&conn, "r-apply"), before_apply);
+
+        // And are the only two rows.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM follow_up_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    /// After the rebuild the widened CHECK accepts `'ask'`, still rejects
+    /// anything else, and the FK to `threads` is intact.
+    #[test]
+    fn rebuild_accepts_ask_rejects_bogus_and_keeps_fk() {
+        let mut conn = fresh_conn();
+        migrations().to_latest(&mut conn).expect("to_latest");
+        seed_thread(&conn);
+
+        // 'ask' now inserts.
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path)
+             VALUES ('r-ask', 't1', 'claude', 'm', 'ask', 'running', '/l.log')",
+            [],
+        )
+        .expect("post-rebuild insert of mode = 'ask'");
+
+        // A mode outside the widened set is still rejected.
+        assert!(
+            conn.execute(
+                "INSERT INTO follow_up_runs
+                     (id, thread_id, agent, model, mode, status, log_path)
+                 VALUES ('r-bogus', 't1', 'claude', 'm', 'bogus', 'running', '/l.log')",
+                [],
+            )
+            .is_err(),
+            "widened CHECK must still reject an unknown mode"
+        );
+
+        // The rebuilt table's FK to threads is live (unknown thread rejected).
+        assert!(
+            conn.execute(
+                "INSERT INTO follow_up_runs
+                     (id, thread_id, agent, model, mode, status, log_path)
+                 VALUES ('r-orphan', 'no-such-thread', 'claude', 'm', 'ask', 'running', '/l.log')",
+                [],
+            )
+            .is_err(),
+            "rebuilt FK to threads(id) must reject an orphan run"
+        );
+    }
+
+    /// The `idx_follow_up_runs_thread_id` index is recreated by the rebuild
+    /// (it was dropped along with the old table).
+    #[test]
+    fn rebuild_recreates_thread_id_index() {
+        let mut conn = fresh_conn();
+        migrations().to_latest(&mut conn).expect("to_latest");
+
+        let idx: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_follow_up_runs_thread_id'
+                   AND tbl_name = 'follow_up_runs'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(idx.as_deref(), Some("idx_follow_up_runs_thread_id"));
+    }
+}

@@ -112,13 +112,12 @@ const DETAIL_MAX_CHARS: usize = 200;
 // ---------------------------------------------------------------------------
 
 /// What kind of run this is — maps 1:1 onto the `follow_up_runs.mode` CHECK
-/// (`'answer' | 'apply'`, §4) and selects the per-purpose model (§5.5).
+/// (`'answer' | 'apply' | 'ask'`, §4) and selects the per-purpose model (§5.5).
 ///
-/// The in-app ask (bead 959.1) will want a third `Ask` variant mapping to
-/// [`Purpose::InAppAsk`], but the shipped schema's CHECK constraint does not
-/// admit an `'ask'` mode value — that needs an appended migration (filed as
-/// its own bead, blocking 959.1). The engine is otherwise mode-agnostic:
-/// adding the variant + migration is the whole change.
+/// `Ask` is the in-app "new thread" question flow (bead `conceptify-959.1`),
+/// added once the ask-mode migration (bead `conceptify-iho`) widened the CHECK
+/// to admit `'ask'`. The engine is mode-agnostic: the variant plus its two
+/// match arms below are the whole engine-side change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
     /// Batch sidebar answers (FR-4.6) — answers land in comments, artifact
@@ -126,6 +125,13 @@ pub enum RunMode {
     Answer,
     /// Apply-to-artifact (FR-4.7) — the agent publishes a new version.
     Apply,
+    /// In-app ask (FR-5.1) — a fresh question composed inside Conceptify,
+    /// answered into a new thread's initial artifact.
+    // Constructed by the in-app ask flow (bead conceptify-959.1); until that
+    // lands, only this module's tests build it — same holding pattern as the
+    // `active_run_for_thread` wrapper above.
+    #[allow(dead_code)]
+    Ask,
 }
 
 impl RunMode {
@@ -133,6 +139,7 @@ impl RunMode {
         match self {
             RunMode::Answer => "answer",
             RunMode::Apply => "apply",
+            RunMode::Ask => "ask",
         }
     }
 
@@ -141,6 +148,7 @@ impl RunMode {
         match self {
             RunMode::Answer => Purpose::FollowUp,
             RunMode::Apply => Purpose::ArtifactUpdate,
+            RunMode::Ask => Purpose::InAppAsk,
         }
     }
 }
@@ -1245,6 +1253,17 @@ mod tests {
         assert_eq!(RunStatus::TimedOut.as_str(), "timeout");
         assert_eq!(RunMode::Answer.as_str(), "answer");
         assert_eq!(RunMode::Apply.as_str(), "apply");
+        assert_eq!(RunMode::Ask.as_str(), "ask");
+    }
+
+    #[test]
+    fn run_mode_purposes_map_to_settings() {
+        assert_eq!(RunMode::Answer.purpose(), Purpose::FollowUp);
+        assert_eq!(RunMode::Apply.purpose(), Purpose::ArtifactUpdate);
+        // `Ask` -> in-app-ask model bucket (§5.5); its `as_str` must match the
+        // migrated `follow_up_runs.mode` CHECK value.
+        assert_eq!(RunMode::Ask.purpose(), Purpose::InAppAsk);
+        assert_eq!(RunMode::Ask.as_str(), "ask");
     }
 
     // -- lifecycle -----------------------------------------------------------
@@ -1316,6 +1335,36 @@ mod tests {
         // Registry slot freed.
         assert_eq!(h.registry().active_run_for_thread(&h.thread_id), None);
         assert_eq!(active_run_for_thread(&h.handle, &h.thread_id), None);
+    }
+
+    #[tokio::test]
+    async fn ask_mode_run_records_ask_row_and_completes() {
+        // End-to-end proof that the ask-mode migration (bead conceptify-iho)
+        // took: the engine's `INSERT ... mode = 'ask'` lands against the real
+        // migrated schema (harness uses `db::init_at` → full chain), and the
+        // run drives to a terminal `completed` state like any other mode.
+        let h = harness("ask");
+        h.install_fake_agent(
+            "#!/bin/sh\n\
+             echo '{\"type\":\"result\",\"subtype\":\"success\"}'\n\
+             exit 0\n",
+            60,
+        );
+
+        let started = h.start(RunMode::Ask, "start a new thread").await.unwrap();
+        let run_id = started.run_id.clone();
+
+        let fin = finished(started).await;
+        assert_eq!(fin.status, RunStatus::Completed);
+
+        let (status, mode, agent, finished_at) = h.run_row(&run_id);
+        assert_eq!(status, "completed");
+        assert_eq!(mode, "ask");
+        assert_eq!(agent, "fake");
+        assert!(finished_at.is_some());
+
+        let fin_events = h.finished_events.lock().unwrap().clone();
+        assert_eq!(fin_events[0]["status"], "completed");
     }
 
     #[tokio::test]
