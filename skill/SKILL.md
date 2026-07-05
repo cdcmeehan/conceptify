@@ -37,6 +37,10 @@ Read these before authoring — they are the contract, not background:
 - **`references/self-review.md`** — the pre-save visual self-review loop
   (headless render + screenshot inspection recipe + review checklist).
   Read it before step 5; it is the FR-6.3 gate on every artifact.
+- **`references/follow-ups.md`** — the house rules for headless follow-up
+  runs (answering reader comments via `resolve-comment`, and apply-mode
+  updates that publish a new artifact version). Read it when a run's prompt
+  points you here; not needed for initial authoring.
 - **`scripts/highlight.mjs`** — Shiki v4 dual-theme code highlighting
   helper (run it; no need to read it).
 - **`scripts/postprocess-svg.mjs`** — post-processes d2/dot SVG for
@@ -211,11 +215,11 @@ element in the app.
 
 - This skill covers **initial artifact creation**. Guidance for follow-up
   runs (answering reader comments via `get-context`/`resolve-comment`,
-  producing new artifact versions in apply mode) ships as
-  `references/follow-ups.md` in a future revision — when updating an
-  existing artifact meanwhile, obey artifact-spec.md §4.3: never rename
-  existing `data-cfy-id`s, regenerate diagrams from their embedded
-  sources, and bump `cfy:version`.
+  producing new artifact versions in apply mode) lives in
+  `references/follow-ups.md` — read it when a headless run's prompt points
+  you there. The core rule for any update: obey artifact-spec.md §4.3 —
+  never rename existing `data-cfy-id`s, regenerate diagrams from their
+  embedded sources, and bump `cfy:version`.
 - Artifacts are stored centrally by the app
   (`~/Documents/conceptify/artifacts/…`) — they never touch the target
   repo, so there is nothing to gitignore.
