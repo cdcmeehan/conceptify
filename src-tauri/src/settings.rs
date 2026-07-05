@@ -45,7 +45,7 @@
 //!   "models": { "followUp": "claude-haiku-4-5",
 //!               "artifactUpdate": "claude-sonnet-5",
 //!               "inAppAsk": "claude-sonnet-5" },
-//!   "timeoutSecs": 900,
+//!   "timeoutSecs": 1800,
 //!   "agentBinaryPath": null,
 //!   "appearance": "system",
 //!   "autoProjectBaseDir": null
@@ -57,7 +57,7 @@
 //! for me" (FR-1.2) makes project dirs; `null`/empty means the built-in default
 //! `~/Documents/conceptify/projects`.
 //!
-//! `timeoutSecs` is stored in **seconds** (default 900 = 15 min, FR-5.3) so the
+//! `timeoutSecs` is stored in **seconds** (default 1800 = 30 min, FR-5.3) so the
 //! spawner can feed it straight into `Duration::from_secs`. `agentBinaryPath`
 //! (FR-7.3) is an absolute-path override; `null`/empty means "resolve via
 //! login-shell `which`."
@@ -222,9 +222,19 @@ fn default_default_adapter() -> String {
     "claude".to_owned()
 }
 
-/// 15 minutes (FR-5.3), expressed in seconds.
+/// 30 minutes (FR-5.3), expressed in seconds. Raised from the PRD's original
+/// 15-minute default after live QA (bead `conceptify-bc4`): a full in-app-ask
+/// authoring loop (research + diagram renders + agent-browser visual
+/// self-review) routinely costs 12–20 min, so a 15-min ceiling killed healthy,
+/// near-complete runs (a run that finished in ~830 s under an 1800 s ceiling
+/// had been SIGKILLed at 900 s the try before). This is only the zero-config
+/// default; the value stays user-configurable per FR-5.3. Note the timeout is a
+/// *kill ceiling*, not a fixed wait — short follow-up answers still exit in
+/// seconds — so a generous global ceiling costs nothing for fast runs and only
+/// spares long ones, which is why a per-purpose timeout map was not worth its
+/// added settings/type/doc surface (recorded on the bead).
 fn default_timeout_secs() -> u64 {
-    15 * 60
+    30 * 60
 }
 
 /// A newly-added adapter that omits `cwd` runs in the project root — the only
@@ -349,7 +359,7 @@ pub struct AgentSettings {
     /// Per-purpose model ids.
     #[serde(default)]
     pub models: PurposeModels,
-    /// Agent run timeout in seconds (FR-5.3, default 900 = 15 min).
+    /// Agent run timeout in seconds (FR-5.3, default 1800 = 30 min).
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     /// Absolute-path override for the agent binary (FR-7.3). `None`/empty means
@@ -810,7 +820,7 @@ mod tests {
         assert_eq!(s.models.follow_up, "claude-haiku-4-5");
         assert_eq!(s.models.artifact_update, "claude-sonnet-5");
         assert_eq!(s.models.in_app_ask, "claude-sonnet-5");
-        assert_eq!(s.timeout_secs, 900);
+        assert_eq!(s.timeout_secs, 1800);
         assert_eq!(s.agent_binary_path, None);
         assert_eq!(s.appearance, Appearance::System);
         assert_eq!(s.auto_project_base_dir, None);
@@ -889,7 +899,7 @@ mod tests {
         assert_eq!(s.models.in_app_ask, "claude-sonnet-5");
         assert_eq!(s.default_adapter, "claude");
         assert!(s.adapters.contains_key("claude"));
-        assert_eq!(s.timeout_secs, 900);
+        assert_eq!(s.timeout_secs, 1800);
         // Fields added after this blob shape still fill from code defaults.
         assert_eq!(s.appearance, Appearance::System);
         assert_eq!(s.auto_project_base_dir, None);

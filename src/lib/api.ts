@@ -330,7 +330,7 @@ export interface AgentSettings {
   /** Which adapter runs; must be a key of `adapters` (backend-validated). */
   defaultAdapter: string;
   models: PurposeModels;
-  /** Agent run timeout in seconds (default 900 = 15 min). */
+  /** Agent run timeout in seconds (default 1800 = 30 min). */
   timeoutSecs: number;
   /** Absolute-path override for the agent binary; `null`/empty = auto (FR-7.3). */
   agentBinaryPath: string | null;

@@ -1318,18 +1318,12 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
 
     // -- flow harness ----------------------------------------------------------
 
-    /// Same deterministic shared-artifacts-root formula as `runs.rs`'s tests
-    /// (the env var is process-wide; isolation comes from unique project ids).
+    /// The one shared per-process scratch artifacts root (bead
+    /// `conceptify-028`). Delegates to `artifacts::test_artifacts_root`, the
+    /// single source of truth `artifacts::artifacts_root` also resolves to in
+    /// test builds; isolation comes from unique per-test project ids under it.
     fn shared_artifacts_root() -> PathBuf {
-        if let Ok(v) = std::env::var("CONCEPTIFY_TEST_ARTIFACTS_DIR") {
-            return PathBuf::from(v);
-        }
-        let root = std::env::temp_dir().join(format!(
-            "conceptify-test-artifact-roots-{}",
-            std::process::id()
-        ));
-        std::env::set_var("CONCEPTIFY_TEST_ARTIFACTS_DIR", root.as_os_str());
-        root
+        crate::artifacts::test_artifacts_root()
     }
 
     /// Install a process-wide `CONCEPTIFY_CLI` stub so `resolve_cli_path`

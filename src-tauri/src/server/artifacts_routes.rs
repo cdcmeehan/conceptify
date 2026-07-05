@@ -187,20 +187,15 @@ mod tests {
         _app: tauri::App<tauri::test::MockRuntime>,
     }
 
-    /// The artifacts-root override env var is process-wide, so it's set
-    /// exactly once to a shared per-process root; isolation between the
-    /// parallel route tests comes from each harness using a unique project
-    /// id (and its own subtree under the shared root).
+    /// The one shared per-process scratch artifacts root (bead
+    /// `conceptify-028`). Delegates to `artifacts::test_artifacts_root`, the
+    /// single source of truth that the route handlers' own `artifacts_root()`
+    /// call also resolves to in test builds. Isolation between the parallel
+    /// route tests comes from each harness using a unique project id (its own
+    /// subtree under this shared root).
     fn shared_artifacts_root() -> &'static std::path::Path {
         static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-        ROOT.get_or_init(|| {
-            let root = std::env::temp_dir().join(format!(
-                "conceptify-test-artifact-roots-{}",
-                std::process::id()
-            ));
-            std::env::set_var("CONCEPTIFY_TEST_ARTIFACTS_DIR", root.as_os_str());
-            root
-        })
+        ROOT.get_or_init(crate::artifacts::test_artifacts_root)
     }
 
     fn harness(tag: &str) -> Harness {

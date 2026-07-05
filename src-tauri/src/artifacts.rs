@@ -119,26 +119,75 @@ pub enum ArtifactError {
 
 /// `~/Documents/conceptify/artifacts` (created if missing). Centralized per
 /// the OQ2 decision — never inside the mapped project directory.
+///
+/// # Test isolation (bead `conceptify-028`)
+///
+/// In `cfg(test)` builds the real-Documents branch is compiled out entirely:
+/// `artifacts_root()` can *only* resolve to a per-process scratch dir under
+/// `std::env::temp_dir()` ([`test_artifacts_root`]). This is structural, not a
+/// convention a test must remember. Previously a test-ordering race let any
+/// code path that reached `artifacts_root()` *before* a harness had set
+/// `CONCEPTIFY_TEST_ARTIFACTS_DIR` fall through here and write `proj-*` dirs
+/// into the user's real `~/Documents/conceptify/artifacts`; the harness `Drop`
+/// then cleaned up the (empty) scratch subtree instead, so the real dirs
+/// leaked. Now there is no production fall-through to reach in test builds.
 pub fn artifacts_root() -> io::Result<PathBuf> {
-    // Test-only escape hatch so HTTP-level tests (server::artifacts_routes)
-    // never write into the user's real Documents directory. Compiled out of
-    // production builds entirely.
     #[cfg(test)]
-    if let Ok(dir) = std::env::var("CONCEPTIFY_TEST_ARTIFACTS_DIR") {
-        let dir = PathBuf::from(dir);
+    {
+        // The real ~/Documents root is unreachable under `cfg(test)`: resolve to
+        // the shared per-process scratch root instead (single source of truth,
+        // so harness cleanup converges on the same dir).
+        let dir = test_artifacts_root();
         fs::create_dir_all(&dir)?;
         return Ok(dir);
     }
 
-    let base = dirs::document_dir().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "could not resolve the platform Documents directory",
-        )
-    })?;
-    let dir = base.join("conceptify").join("artifacts");
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
+    #[cfg(not(test))]
+    {
+        let base = dirs::document_dir().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "could not resolve the platform Documents directory",
+            )
+        })?;
+        let dir = base.join("conceptify").join("artifacts");
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+}
+
+/// The single process-wide scratch artifacts root every test path resolves to
+/// (bead `conceptify-028`). The real `~/Documents` root is unreachable in test
+/// builds, so this is the *only* place tests ever write artifacts.
+///
+/// Source of truth for both the production [`artifacts_root`] (under
+/// `cfg(test)`) and every module's test harness (`runs`, `flows`,
+/// `server::artifacts_routes`), which delegate here. Computed exactly once via
+/// a `OnceLock` — so at most one `set_var` runs per process, avoiding the
+/// multi-writer env races the old per-module helpers had. An explicit
+/// `CONCEPTIFY_TEST_ARTIFACTS_DIR` pinned before first use is honored (an escape
+/// hatch, e.g. `CONCEPTIFY_TEST_ARTIFACTS_DIR=/dir cargo test`); otherwise a
+/// deterministic per-process path under `temp_dir()` is derived and published
+/// back to the env var so any out-of-process consumer converges too. Isolation
+/// between concurrent tests comes from unique per-test project ids under this
+/// shared root, matching the existing harness design.
+#[cfg(test)]
+pub(crate) fn test_artifacts_root() -> PathBuf {
+    use std::sync::OnceLock;
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let root = std::env::var_os("CONCEPTIFY_TEST_ARTIFACTS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!(
+                    "conceptify-test-artifact-roots-{}",
+                    std::process::id()
+                ))
+            });
+        std::env::set_var("CONCEPTIFY_TEST_ARTIFACTS_DIR", root.as_os_str());
+        root
+    })
+    .clone()
 }
 
 /// `<root>/<project-id>/threads/<thread-slug>` — the per-thread artifact dir.
@@ -2010,5 +2059,38 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), html);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Regression (bead `conceptify-028`): in test builds `artifacts_root()`
+    /// must resolve to the shared per-process scratch root and can NEVER return
+    /// the user's real `~/Documents/conceptify/artifacts` — the leak that dumped
+    /// `proj-*` dirs there. The real-Documents branch is `cfg(not(test))`, so
+    /// this holds by construction; the test pins it so a future refactor that
+    /// re-introduces a production fall-through fails loudly here instead of on a
+    /// user's disk.
+    #[test]
+    fn artifacts_root_never_resolves_under_real_documents() {
+        let root = artifacts_root().expect("test artifacts root resolves");
+
+        // Never under the real Documents artifacts dir.
+        if let Some(docs) = dirs::document_dir() {
+            let real = docs.join("conceptify").join("artifacts");
+            assert!(
+                !root.starts_with(&real),
+                "artifacts_root() resolved under the REAL documents dir {}: {}",
+                real.display(),
+                root.display(),
+            );
+        }
+
+        // It resolves to the single shared scratch root, which lives under the
+        // process temp dir (or an explicitly pinned override).
+        assert_eq!(root, test_artifacts_root());
+        assert!(
+            root.starts_with(std::env::temp_dir())
+                || std::env::var_os("CONCEPTIFY_TEST_ARTIFACTS_DIR").is_some(),
+            "expected a temp scratch root, got {}",
+            root.display(),
+        );
     }
 }

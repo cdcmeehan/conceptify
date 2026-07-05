@@ -41,7 +41,7 @@ export function SettingsView() {
   const [followUp, setFollowUp] = useState("");
   const [artifactUpdate, setArtifactUpdate] = useState("");
   const [inAppAsk, setInAppAsk] = useState("");
-  const [timeoutMins, setTimeoutMins] = useState("15");
+  const [timeoutMins, setTimeoutMins] = useState("30");
   const [binaryPath, setBinaryPath] = useState("");
   const [autoBaseDir, setAutoBaseDir] = useState("");
   const [adaptersText, setAdaptersText] = useState("");

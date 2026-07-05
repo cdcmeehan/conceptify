@@ -1039,20 +1039,15 @@ mod tests {
 
     use crate::settings::{Adapter, AgentSettings};
 
-    /// The artifacts-root override env var is process-wide; use the SAME
-    /// deterministic path formula as `server::artifacts_routes`'s tests so
-    /// both modules converge on one root regardless of init order. Isolation
-    /// comes from unique per-test project ids.
+    /// The one shared per-process scratch artifacts root (bead
+    /// `conceptify-028`). Delegates to `artifacts::test_artifacts_root`, the
+    /// single source of truth that `artifacts::artifacts_root` also resolves to
+    /// in test builds — so the run engine's own `artifacts_root()` call and this
+    /// harness's `Drop` cleanup can never disagree (the leak that dumped
+    /// `proj-*` dirs into the real ~/Documents). Isolation comes from unique
+    /// per-test project ids under this root.
     fn shared_artifacts_root() -> std::path::PathBuf {
-        if let Ok(v) = std::env::var("CONCEPTIFY_TEST_ARTIFACTS_DIR") {
-            return PathBuf::from(v);
-        }
-        let root = std::env::temp_dir().join(format!(
-            "conceptify-test-artifact-roots-{}",
-            std::process::id()
-        ));
-        std::env::set_var("CONCEPTIFY_TEST_ARTIFACTS_DIR", root.as_os_str());
-        root
+        crate::artifacts::test_artifacts_root()
     }
 
     struct Harness {
