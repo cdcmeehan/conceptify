@@ -60,7 +60,7 @@ export function CommentComposer({ threadId, viewerVersion }: Props) {
   }
 
   return (
-    <div class="shrink-0 border-t border-neutral-200 bg-white p-2.5 dark:border-neutral-800 dark:bg-neutral-950">
+    <div class="shrink-0 border-t border-line bg-paper p-2.5">
       <label class="sr-only" for="follow-up-composer">
         Ask a direct follow-up
       </label>
@@ -80,13 +80,13 @@ export function CommentComposer({ threadId, viewerVersion }: Props) {
             submit();
           }
         }}
-        class="w-full resize-none rounded border border-neutral-300 bg-white px-2 py-1.5 text-sm text-neutral-900 outline-none focus:border-blue-400 disabled:cursor-not-allowed disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
+        class="cfy-input resize-none"
       />
       {error != null && (
-        <p class="mt-1 text-[11px] text-rose-600 dark:text-rose-400">{error}</p>
+        <p class="mt-1 text-[11px] text-danger">{error}</p>
       )}
       <div class="mt-1.5 flex items-center justify-between gap-2">
-        <span class="text-[11px] text-neutral-400">
+        <span class="text-[11px] text-muted">
           {disabled ? "Available once the artifact is ready" : "⌘⏎ to ask"}
         </span>
         <button
@@ -94,7 +94,7 @@ export function CommentComposer({ threadId, viewerVersion }: Props) {
           onClick={submit}
           disabled={!canSubmit}
           title={disabled ? "The thread has no artifact version to attach to yet" : undefined}
-          class="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+          class="cfy-btn cfy-btn-primary px-3 py-1"
         >
           {saving ? "Asking…" : "Ask"}
         </button>

@@ -5,6 +5,18 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Conceptify</title>
+    <!-- Pre-paint background in the shell's paper tones so the window never
+         flashes white (or black) before the bundle applies the real theme. -->
+    <style>
+      html {
+        background: #f1ede2;
+      }
+      @media (prefers-color-scheme: dark) {
+        html {
+          background: #100d08;
+        }
+      }
+    </style>
   </head>
 
   <body>

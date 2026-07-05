@@ -7,14 +7,153 @@
    follows OS changes live. */
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
+/* ---------------------------------------------------------------------------
+   Shell design tokens (bead conceptify-vxc).
+
+   Adapted from the artifact design system's token block
+   (skill/design-system.css, between the @cfy:tokens sentinels) so the shell
+   and the artifacts it frames read as one product (PRD §6 visual continuity):
+   the same warm paper/charcoal palette, the same single terracotta accent,
+   the same type stacks. Differences from the artifact tokens are deliberate:
+
+   - The artifact tokens switch on `prefers-color-scheme`; the shell switches
+     on `[data-theme]` (set by theme.ts) so Settings can force an appearance.
+   - The shell needs a three-level surface scale (well < paper < raised) for
+     its pane chrome; artifacts only need paper/surface.
+   - Status colors (info/ok/warn/danger) extend the artifact callout palette
+     (definition/insight/warning) with an `ok` green designed to match their
+     muted print saturation. All fg/bg pairs pass WCAG AA (>= 4.5:1) in both
+     themes — verified with a contrast script during the vxc design pass.
+--------------------------------------------------------------------------- */
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  /* Type stacks — identical to the artifact tokens. The shell UI is set in
+     the system sans; the serif appears only in display moments (thread
+     titles, section headings) as the editorial signature. */
+  --cfy-font-serif:
+    ui-serif, "New York", "Iowan Old Style", "Palatino Nova", Palatino,
+    Georgia, "Times New Roman", serif;
+  --cfy-font-sans:
+    -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --cfy-font-mono:
+    ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", monospace;
+
+  /* Surfaces: well (window chrome / sidebar / viewer backdrop) < paper
+     (content panes) < raised (cards, inputs, popovers). */
+  --cfy-well: #f1ede2;
+  --cfy-paper: #fbf9f4;
+  --cfy-raised: #fffefb;
+
+  --cfy-ink: #211d16;
+  --cfy-muted: #635c4d; /* darkened from the artifact muted for AA on `well` */
+  --cfy-line: #e4dfd2;
+
+  /* The one accent: terracotta. `accent-ink` is accent-colored TEXT sitting
+     on tinted surfaces (needs to be darker than the accent in light mode);
+     `on-accent` is text on a solid accent fill. */
+  --cfy-accent: #a34d24;
+  --cfy-accent-strong: #8a3f1c;
+  --cfy-accent-ink: #8a3f1c;
+  --cfy-on-accent: #fdfbf6;
+  --cfy-accent-bg: #f0ddcf;
+  --cfy-mark: #f3e5c3;
+
+  /* Status families (chip/panel fg + wash). info = open/answering/updating,
+     ok = ready/answered, warn = generating/moved/stale, danger = error. */
+  --cfy-info: #33586b;
+  --cfy-info-bg: #e8eef1;
+  --cfy-ok: #3e6b44;
+  --cfy-ok-bg: #e4eee1;
+  --cfy-warn: #7a5a12;
+  --cfy-warn-bg: #f5edd8;
+  --cfy-danger: #9b3a2a;
+  --cfy-danger-bg: #f7e8e0;
+
+  /* Interaction washes + elevation. */
+  --cfy-hover: color-mix(in srgb, var(--cfy-ink) 6%, transparent);
+  --cfy-shadow-pop:
+    0 12px 32px rgba(42, 30, 12, 0.16), 0 2px 8px rgba(42, 30, 12, 0.08);
+}
+
+:root[data-theme="dark"] {
+  /* Warm charcoal, not blue-black — mirrors the artifact dark palette. */
+  --cfy-well: #100d08;
+  --cfy-paper: #17140f;
+  --cfy-raised: #221e17;
+
+  --cfy-ink: #eae4d8;
+  --cfy-muted: #a89f8d;
+  --cfy-line: #383226;
+
+  --cfy-accent: #e09863;
+  --cfy-accent-strong: #e8a97c;
+  --cfy-accent-ink: #e09863;
+  --cfy-on-accent: #231407;
+  --cfy-accent-bg: #46301f;
+  --cfy-mark: #4a3a1c;
+
+  --cfy-info: #9dc2d6;
+  --cfy-info-bg: #1d2b33;
+  --cfy-ok: #9cc79e;
+  --cfy-ok-bg: #1e2b1e;
+  --cfy-warn: #e3c377;
+  --cfy-warn-bg: #322a15;
+  --cfy-danger: #e89b85;
+  --cfy-danger-bg: #3a211a;
+
+  --cfy-hover: color-mix(in srgb, var(--cfy-ink) 8%, transparent);
+  --cfy-shadow-pop:
+    0 12px 32px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+/* Expose the tokens to Tailwind as utility namespaces (`bg-paper`,
+   `text-muted`, `border-line`, `font-serif`, `rounded-card`, ...). `inline`
+   keeps utilities pointing at the vars, so the [data-theme] switch above
+   re-colors everything without `dark:` duplication in components. */
+@theme inline {
+  --font-sans: var(--cfy-font-sans);
+  --font-serif: var(--cfy-font-serif);
+  --font-mono: var(--cfy-font-mono);
+
+  --color-well: var(--cfy-well);
+  --color-paper: var(--cfy-paper);
+  --color-raised: var(--cfy-raised);
+  --color-ink: var(--cfy-ink);
+  --color-muted: var(--cfy-muted);
+  --color-line: var(--cfy-line);
+  --color-hover: var(--cfy-hover);
+  --color-accent: var(--cfy-accent);
+  --color-accent-strong: var(--cfy-accent-strong);
+  --color-accent-ink: var(--cfy-accent-ink);
+  --color-on-accent: var(--cfy-on-accent);
+  --color-accent-bg: var(--cfy-accent-bg);
+  --color-mark: var(--cfy-mark);
+  --color-info: var(--cfy-info);
+  --color-info-bg: var(--cfy-info-bg);
+  --color-ok: var(--cfy-ok);
+  --color-ok-bg: var(--cfy-ok-bg);
+  --color-warn: var(--cfy-warn);
+  --color-warn-bg: var(--cfy-warn-bg);
+  --color-danger: var(--cfy-danger);
+  --color-danger-bg: var(--cfy-danger-bg);
+
+  --radius-card: 10px; /* cards, popovers, panels  */
+  --radius-ctl: 6px;   /* buttons, inputs, chips-adjacent controls */
+}
+
+/* ---------------------------------------------------------------------------
+   Base
+--------------------------------------------------------------------------- */
+:root {
+  font-family: var(--cfy-font-sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   /* Let the WKWebView render native form controls for both appearances. */
   color-scheme: light dark;
+  accent-color: var(--cfy-accent);
 }
 
 html,
@@ -27,13 +166,232 @@ body,
 body {
   /* Panes own their own scroll regions; the shell itself never scrolls. */
   overflow: hidden;
+  /* macOS feel: UI chrome is not selectable text. Content that should be
+     copyable (comment bodies, answers, logs) opts back in via `select-text`;
+     form fields re-enable below. */
+  -webkit-user-select: none;
+  user-select: none;
 }
 
-/* Agent answer HTML rendered in the comments sidebar (FR-4.5, bead 94m.6).
+input,
+textarea,
+select {
+  -webkit-user-select: auto;
+  user-select: auto;
+}
+
+/* Text selection carries the artifact highlighter's warm swipe. */
+::selection {
+  background: var(--cfy-mark);
+}
+
+/* One focus vocabulary everywhere (WCAG 2.4.7): a 2px accent ring on
+   keyboard focus. Text controls swap the ring for a border+glow (below). */
+:focus-visible {
+  outline: 2px solid var(--cfy-accent);
+  outline-offset: 1px;
+}
+
+/* Motion: small, fast, compositor-friendly — and fully suppressed for
+   prefers-reduced-motion (spinners keep their meaning via adjacent labels). */
+@keyframes cfy-pop {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+}
+@keyframes cfy-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+@keyframes cfy-shimmer {
+  50% {
+    opacity: 0.45;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Shell primitives — the shared control vocabulary. Components compose these
+   with layout utilities; visual identity (color, radius, type) lives here so
+   it cannot drift per-surface.
+--------------------------------------------------------------------------- */
+@layer components {
+  /* Pane header label: small tracked caps, muted. */
+  .cfy-label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--cfy-muted);
+  }
+
+  /* Card: raised surface with hairline + the 10px artifact radius. */
+  .cfy-card {
+    background: var(--cfy-raised);
+    border: 1px solid var(--cfy-line);
+    border-radius: var(--radius-card);
+  }
+
+  /* Popover: a card that floats (comment popover). */
+  .cfy-popover {
+    background: var(--cfy-raised);
+    border: 1px solid var(--cfy-line);
+    border-radius: var(--radius-card);
+    box-shadow: var(--cfy-shadow-pop);
+    animation: cfy-pop 140ms ease-out;
+  }
+
+  /* Text control. */
+  .cfy-input {
+    width: 100%;
+    border: 1px solid var(--cfy-line);
+    border-radius: var(--radius-ctl);
+    background: var(--cfy-raised);
+    padding: 0.375rem 0.5rem;
+    font-size: 0.8125rem;
+    color: var(--cfy-ink);
+    transition:
+      border-color 120ms ease,
+      box-shadow 120ms ease;
+  }
+  .cfy-input::placeholder {
+    color: color-mix(in srgb, var(--cfy-muted) 80%, transparent);
+  }
+  .cfy-input:focus {
+    outline: none;
+    border-color: var(--cfy-accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--cfy-accent) 18%, transparent);
+  }
+  .cfy-input:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  /* Button base + variants. Default padding suits the shell's compact
+     controls; larger surfaces override with padding utilities. */
+  .cfy-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    padding: 0.3125rem 0.625rem;
+    border-radius: var(--radius-ctl);
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1.25;
+    white-space: nowrap;
+    transition:
+      background-color 120ms ease,
+      border-color 120ms ease,
+      color 120ms ease;
+  }
+  .cfy-btn:disabled {
+    cursor: not-allowed;
+  }
+
+  .cfy-btn-primary {
+    background: var(--cfy-accent);
+    color: var(--cfy-on-accent);
+  }
+  .cfy-btn-primary:hover:not(:disabled) {
+    background: var(--cfy-accent-strong);
+  }
+  .cfy-btn-primary:disabled {
+    background: color-mix(in srgb, var(--cfy-muted) 16%, transparent);
+    color: var(--cfy-muted);
+  }
+
+  .cfy-btn-secondary {
+    border: 1px solid var(--cfy-line);
+    background: var(--cfy-raised);
+    color: var(--cfy-ink);
+  }
+  .cfy-btn-secondary:hover:not(:disabled) {
+    background: var(--cfy-hover);
+  }
+  .cfy-btn-secondary:disabled {
+    opacity: 0.5;
+  }
+
+  .cfy-btn-ghost {
+    color: var(--cfy-muted);
+  }
+  .cfy-btn-ghost:hover:not(:disabled) {
+    background: var(--cfy-hover);
+    color: var(--cfy-ink);
+  }
+  .cfy-btn-ghost:disabled {
+    opacity: 0.5;
+  }
+
+  /* Tinted accents: quieter than a fill, still clearly actionable. `accent`
+     marks artifact-changing actions (Apply); `danger` destructive ones. */
+  .cfy-btn-accent {
+    border: 1px solid color-mix(in srgb, var(--cfy-accent) 35%, transparent);
+    background: var(--cfy-accent-bg);
+    color: var(--cfy-accent-ink);
+  }
+  .cfy-btn-accent:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--cfy-accent) 55%, transparent);
+  }
+  .cfy-btn-accent:disabled {
+    opacity: 0.5;
+  }
+
+  .cfy-btn-danger {
+    border: 1px solid color-mix(in srgb, var(--cfy-danger) 35%, transparent);
+    background: var(--cfy-danger-bg);
+    color: var(--cfy-danger);
+  }
+  .cfy-btn-danger:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--cfy-danger) 55%, transparent);
+  }
+  .cfy-btn-danger:disabled {
+    opacity: 0.5;
+  }
+
+  /* Status chip / badge: pill, 11px. Color via token utilities at the call
+     site (e.g. `bg-ok-bg text-ok`). */
+  .cfy-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3125rem;
+    padding: 0.0625rem 0.4375rem;
+    border-radius: 9999px;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    line-height: 1.5;
+    white-space: nowrap;
+  }
+
+  /* Loading skeleton row. */
+  .cfy-skeleton {
+    height: 0.875rem;
+    border-radius: 0.25rem;
+    background: color-mix(in srgb, var(--cfy-muted) 16%, transparent);
+    animation: cfy-shimmer 1.6s ease-in-out infinite;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Agent answer HTML rendered in the comments sidebar (FR-4.5, bead 94m.6).
    The fragment is authored by our own trusted follow-up agent and assigned via
    innerHTML (see CommentsSidebar's AnswerHtml docstring for the PRD §9
    threat-model rationale). These scoped rules give the fragment reasonable
-   typography without pulling in the Tailwind typography plugin. */
+   typography without pulling in the Tailwind typography plugin. Colors ride
+   the shell tokens, so both themes are covered without dark overrides.
+--------------------------------------------------------------------------- */
 .cfy-answer {
   font-size: 0.8125rem;
   line-height: 1.5;
@@ -80,44 +438,31 @@ body {
   font-size: 0.9rem;
 }
 .cfy-answer code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--cfy-font-mono);
   font-size: 0.85em;
   padding: 0.1em 0.3em;
   border-radius: 0.25rem;
-  background: rgba(0, 0, 0, 0.06);
+  background: color-mix(in srgb, var(--cfy-ink) 7%, transparent);
 }
 .cfy-answer pre {
   margin: 0.5em 0;
   padding: 0.6em 0.75em;
   border-radius: 0.4rem;
   overflow-x: auto;
-  background: rgba(0, 0, 0, 0.06);
+  background: color-mix(in srgb, var(--cfy-ink) 7%, transparent);
 }
 .cfy-answer pre code {
   padding: 0;
   background: none;
 }
 .cfy-answer a {
-  color: #2563eb;
+  color: var(--cfy-accent);
   text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .cfy-answer blockquote {
   margin: 0.5em 0;
   padding-left: 0.75em;
-  border-left: 2px solid rgba(0, 0, 0, 0.15);
-  opacity: 0.85;
-}
-
-/* Follows the shell's forced/system appearance (data-theme, set by theme.ts),
-   so the sidebar answer HTML stays in sync with light/dark toggling — not the
-   raw OS media query. */
-:root[data-theme="dark"] .cfy-answer code,
-:root[data-theme="dark"] .cfy-answer pre {
-  background: rgba(255, 255, 255, 0.08);
-}
-:root[data-theme="dark"] .cfy-answer a {
-  color: #60a5fa;
-}
-:root[data-theme="dark"] .cfy-answer blockquote {
-  border-left-color: rgba(255, 255, 255, 0.2);
+  border-left: 2px solid var(--cfy-line);
+  color: var(--cfy-muted);
 }

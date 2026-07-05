@@ -71,14 +71,12 @@ export function GenerationProgress({ run }: { run: ActiveRunState | null }) {
   const activity = run?.recentProgress ?? [];
   const elapsed = useElapsedSeconds(run?.runId);
   return (
-    <section class="rounded-lg border border-blue-200 bg-blue-50 p-5 dark:border-blue-500/30 dark:bg-blue-500/10">
+    <section class="rounded-card border border-info/30 bg-info-bg p-5">
       <div class="flex items-center gap-2.5">
-        <Spinner class="h-4 w-4 shrink-0 text-blue-600 dark:text-blue-400" />
-        <p class="flex-1 text-sm font-medium text-blue-800 dark:text-blue-300">
-          Generating artifact…
-        </p>
+        <Spinner class="h-4 w-4 shrink-0 text-info" />
+        <p class="flex-1 text-[13px] font-medium text-info">Generating artifact…</p>
         {run != null && (
-          <span class="shrink-0 tabular-nums text-xs font-medium text-blue-700/80 dark:text-blue-300/70">
+          <span class="shrink-0 text-xs font-medium tabular-nums text-info">
             {formatElapsed(elapsed)}
           </span>
         )}
@@ -87,18 +85,18 @@ export function GenerationProgress({ run }: { run: ActiveRunState | null }) {
             type="button"
             onClick={() => appStore.cancelActiveRun()}
             title="Cancel this run (kills the agent process)"
-            class="rounded-md border border-blue-300 px-2 py-1 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-600/10 dark:border-blue-500/40 dark:text-blue-300"
+            class="cfy-btn shrink-0 border border-info/40 text-info hover:bg-info/10"
           >
             Cancel
           </button>
         )}
       </div>
-      <p class="mt-1 text-xs text-blue-700/70 dark:text-blue-300/60">
+      <p class="mt-1.5 text-xs leading-relaxed text-muted">
         The agent is authoring your artifact. It appears here the moment it is saved.
         Complex explanations can take several minutes.
       </p>
       {activity.length > 0 && (
-        <ul class="mt-3 space-y-0.5 rounded-md bg-white/60 p-2 font-mono text-[11px] leading-relaxed text-blue-800/80 dark:bg-neutral-950/40 dark:text-blue-200/70">
+        <ul class="mt-3 select-text space-y-0.5 rounded-ctl bg-raised/70 p-2 font-mono text-[11px] leading-relaxed text-muted">
           {activity.map((line, i) => (
             <li key={i} class="truncate">
               {line}
@@ -168,14 +166,14 @@ export function GenerationError({ threadId }: { threadId: string }) {
   }
 
   return (
-    <section class="rounded-lg border border-rose-200 bg-rose-50 p-5 dark:border-rose-500/30 dark:bg-rose-500/10">
-      <p class="text-sm font-medium text-rose-700 dark:text-rose-300">{message}</p>
+    <section class="rounded-card border border-danger/30 bg-danger-bg p-5">
+      <p class="text-[13px] font-medium text-danger">{message}</p>
       <div class="mt-3 flex flex-wrap items-center gap-2">
         <button
           type="button"
           onClick={onRetry}
           disabled={retrying}
-          class="inline-flex items-center gap-1.5 rounded-md bg-rose-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+          class="cfy-btn cfy-btn-primary px-3 py-1.5"
         >
           {retrying && <Spinner class="h-3.5 w-3.5" />}
           {retrying ? "Retrying…" : "Retry"}
@@ -185,21 +183,21 @@ export function GenerationError({ threadId }: { threadId: string }) {
             type="button"
             onClick={onShowLog}
             disabled={loadingTail}
-            class="rounded-md border border-rose-300 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition-colors hover:bg-rose-600/10 disabled:opacity-50 dark:border-rose-500/40 dark:text-rose-300"
+            class="cfy-btn border border-danger/40 text-danger hover:bg-danger/10 disabled:opacity-50"
           >
             {loadingTail ? "Loading…" : "Show log"}
           </button>
         )}
       </div>
       {error != null && (
-        <p class="mt-2 break-words text-xs text-rose-600 dark:text-rose-400">{error}</p>
+        <p class="mt-2 break-words text-xs text-danger">{error}</p>
       )}
       {tail != null && (
         <div class="mt-3">
-          <p class="break-all font-mono text-[10px] text-rose-700/70 dark:text-rose-300/60">
+          <p class="select-text break-all font-mono text-[10px] text-muted">
             {tail.log_path}
           </p>
-          <pre class="mt-1 max-h-64 overflow-auto rounded bg-white/60 p-2 font-mono text-[10px] leading-relaxed text-neutral-700 dark:bg-neutral-950/60 dark:text-neutral-300">
+          <pre class="mt-1 max-h-64 select-text overflow-auto rounded-ctl bg-raised/70 p-2 font-mono text-[10px] leading-relaxed text-ink">
             {tail.lines.join("\n")}
           </pre>
         </div>

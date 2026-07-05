@@ -34,7 +34,14 @@ export function NewThreadComposer({ onClose }: { onClose: () => void }) {
   return (
     <form
       onSubmit={onSubmit}
-      class="flex flex-col gap-2 rounded-lg border border-neutral-200 bg-neutral-50 p-2.5 dark:border-neutral-800 dark:bg-neutral-900"
+      onKeyDown={(e) => {
+        // Escape backs out of the composer (unless a submit is in flight).
+        if (e.key === "Escape" && !submitting) {
+          e.stopPropagation();
+          onClose();
+        }
+      }}
+      class="cfy-card flex flex-col gap-2 p-2.5"
     >
       <input
         type="text"
@@ -42,7 +49,7 @@ export function NewThreadComposer({ onClose }: { onClose: () => void }) {
         onInput={(e) => setTitle((e.currentTarget as HTMLInputElement).value)}
         placeholder="Title (optional)"
         disabled={submitting}
-        class="rounded-md border border-neutral-300 bg-white px-2 py-1.5 text-sm text-neutral-800 placeholder:text-neutral-400 focus:border-blue-400 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+        class="cfy-input"
       />
       <textarea
         value={question}
@@ -55,25 +62,21 @@ export function NewThreadComposer({ onClose }: { onClose: () => void }) {
         rows={3}
         autoFocus
         disabled={submitting}
-        class="resize-y rounded-md border border-neutral-300 bg-white px-2 py-1.5 text-sm text-neutral-800 placeholder:text-neutral-400 focus:border-blue-400 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+        class="cfy-input resize-y"
       />
       {error != null && (
-        <p class="break-words text-xs text-rose-600 dark:text-rose-400">{error}</p>
+        <p class="break-words text-xs text-danger">{error}</p>
       )}
       <div class="flex items-center justify-end gap-1.5">
         <button
           type="button"
           onClick={onClose}
           disabled={submitting}
-          class="rounded-md px-2.5 py-1.5 text-xs font-medium text-neutral-500 transition-colors hover:bg-neutral-200 disabled:opacity-50 dark:text-neutral-400 dark:hover:bg-neutral-800"
+          class="cfy-btn cfy-btn-ghost"
         >
           Cancel
         </button>
-        <button
-          type="submit"
-          disabled={!canSubmit}
-          class="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400 dark:disabled:bg-neutral-800 dark:disabled:text-neutral-600"
-        >
+        <button type="submit" disabled={!canSubmit} class="cfy-btn cfy-btn-primary px-3">
           {submitting ? "Starting…" : "Ask"}
         </button>
       </div>

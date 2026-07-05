@@ -94,6 +94,21 @@ export function SettingsView() {
     appStore.closeSettings();
   }
 
+  // Escape closes the overlay (standard macOS sheet behaviour; bead
+  // conceptify-vxc keyboard pass). Depends on `saved`/`appearance` so the
+  // preview-revert in `close()` sees current values.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        close();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saved, appearance]);
+
   function buildSettings(): AgentSettings | null {
     let adapters: AgentSettings["adapters"];
     try {
@@ -176,21 +191,21 @@ export function SettingsView() {
 
   return (
     <div
-      class="absolute inset-0 z-30 flex flex-col bg-neutral-100 text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100"
+      class="absolute inset-0 z-30 flex animate-[cfy-rise_180ms_ease-out] flex-col bg-well text-ink"
       role="dialog"
       aria-modal="true"
       aria-label="Settings"
     >
-      <header class="flex items-center justify-between border-b border-neutral-200 bg-white px-5 py-3 dark:border-neutral-800 dark:bg-neutral-950">
-        <h1 class="text-lg font-semibold">Settings</h1>
+      <header class="flex items-center justify-between border-b border-line bg-paper px-5 py-3">
+        <h1 class="font-serif text-[17px] font-semibold">Settings</h1>
         <div class="flex items-center gap-3">
           {savedFlash && (
-            <span class="text-xs font-medium text-emerald-600 dark:text-emerald-400">Saved</span>
+            <span class="text-xs font-medium text-ok">Saved</span>
           )}
           <button
             type="button"
             onClick={close}
-            class="rounded-md px-3 py-1.5 text-sm font-medium text-neutral-600 transition-colors hover:bg-neutral-200 dark:text-neutral-300 dark:hover:bg-neutral-800"
+            class="cfy-btn cfy-btn-secondary px-3 py-1.5 text-sm"
           >
             Close
           </button>
@@ -200,11 +215,15 @@ export function SettingsView() {
       <div class="min-h-0 flex-1 overflow-y-auto px-5 py-6">
         <div class="mx-auto flex max-w-2xl flex-col gap-8">
           {loadError != null ? (
-            <p class="rounded-md bg-rose-100 px-3 py-2 text-sm text-rose-700 dark:bg-rose-500/15 dark:text-rose-300">
+            <p class="rounded-ctl bg-danger-bg px-3 py-2 text-sm text-danger">
               Failed to load settings: {loadError}
             </p>
           ) : saved == null ? (
-            <p class="text-sm text-neutral-400">Loading…</p>
+            <div class="flex flex-col gap-2.5" aria-hidden="true">
+              <div class="cfy-skeleton w-1/3" />
+              <div class="cfy-skeleton w-2/3" />
+              <div class="cfy-skeleton w-1/2" />
+            </div>
           ) : (
             <>
               {/* Appearance (FR-7.2) */}
@@ -215,17 +234,16 @@ export function SettingsView() {
                       key={opt.value}
                       type="button"
                       onClick={() => onAppearanceChange(opt.value)}
-                      class={`rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${
-                        appearance === opt.value
-                          ? "border-blue-400 bg-blue-600/10 text-blue-700 dark:border-blue-500/50 dark:bg-blue-500/15 dark:text-blue-300"
-                          : "border-neutral-300 bg-white text-neutral-700 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:bg-neutral-800"
+                      aria-pressed={appearance === opt.value}
+                      class={`cfy-btn px-3 py-1.5 text-sm ${
+                        appearance === opt.value ? "cfy-btn-accent" : "cfy-btn-secondary"
                       }`}
                     >
                       {opt.label}
                     </button>
                   ))}
                 </div>
-                <p class="mt-2 text-xs text-neutral-400">
+                <p class="mt-2 text-xs text-muted">
                   The artifact viewer keeps the system light/dark setting even when the app is
                   forced — its sandboxed frame is isolated from the app shell.
                 </p>
@@ -237,7 +255,7 @@ export function SettingsView() {
                   <select
                     value={defaultAdapter}
                     onChange={(e) => setDefaultAdapter((e.currentTarget as HTMLSelectElement).value)}
-                    class="w-full rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-sm text-neutral-800 focus:border-blue-400 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+                    class="cfy-input px-2.5 py-1.5 text-sm"
                   >
                     {!adapterNames.includes(defaultAdapter) && defaultAdapter !== "" && (
                       <option value={defaultAdapter}>{defaultAdapter} (not in templates)</option>
@@ -270,7 +288,7 @@ export function SettingsView() {
                     min={1}
                     value={timeoutMins}
                     onInput={(e) => setTimeoutMins((e.currentTarget as HTMLInputElement).value)}
-                    class="w-28 rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-sm text-neutral-800 focus:border-blue-400 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+                    class="cfy-input w-28 px-2.5 py-1.5 text-sm"
                   />
                 </Field>
 
@@ -294,7 +312,7 @@ export function SettingsView() {
                     onInput={(e) => setAdaptersText((e.currentTarget as HTMLTextAreaElement).value)}
                     rows={12}
                     spellcheck={false}
-                    class="w-full resize-y rounded-md border border-neutral-300 bg-white px-2.5 py-2 font-mono text-xs text-neutral-800 focus:border-blue-400 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+                    class="cfy-input resize-y px-2.5 py-2 font-mono text-xs"
                   />
                 </Field>
               </Section>
@@ -314,17 +332,17 @@ export function SettingsView() {
               </Section>
 
               {error != null && (
-                <p class="whitespace-pre-wrap rounded-md bg-rose-100 px-3 py-2 text-sm text-rose-700 dark:bg-rose-500/15 dark:text-rose-300">
+                <p class="whitespace-pre-wrap rounded-ctl bg-danger-bg px-3 py-2 text-sm text-danger">
                   {error}
                 </p>
               )}
 
-              <div class="flex items-center gap-2 border-t border-neutral-200 pt-5 dark:border-neutral-800">
+              <div class="flex items-center gap-2 border-t border-line pt-5">
                 <button
                   type="button"
                   onClick={onSave}
                   disabled={busy}
-                  class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+                  class="cfy-btn cfy-btn-primary px-4 py-2 text-sm"
                 >
                   {busy ? "Saving…" : "Save"}
                 </button>
@@ -332,7 +350,7 @@ export function SettingsView() {
                   type="button"
                   onClick={onReset}
                   disabled={busy}
-                  class="rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-800"
+                  class="cfy-btn cfy-btn-secondary px-4 py-2 text-sm"
                 >
                   Reset to defaults
                 </button>
@@ -356,8 +374,8 @@ function Section({
 }) {
   return (
     <section>
-      <h2 class="text-sm font-semibold text-neutral-800 dark:text-neutral-100">{title}</h2>
-      <p class="mb-3 text-xs text-neutral-400">{description}</p>
+      <h2 class="font-serif text-[15px] font-semibold text-ink">{title}</h2>
+      <p class="mb-3 mt-0.5 text-xs text-muted">{description}</p>
       <div class="flex flex-col gap-3">{children}</div>
     </section>
   );
@@ -374,9 +392,9 @@ function Field({
 }) {
   return (
     <label class="flex flex-col gap-1">
-      <span class="text-xs font-medium text-neutral-600 dark:text-neutral-300">{label}</span>
+      <span class="text-xs font-medium text-ink">{label}</span>
       {children}
-      {hint != null && <span class="text-[11px] text-neutral-400">{hint}</span>}
+      {hint != null && <span class="text-[11px] text-muted">{hint}</span>}
     </label>
   );
 }
@@ -397,7 +415,7 @@ function TextInput({
       spellcheck={false}
       placeholder={placeholder}
       onInput={(e) => onInput((e.currentTarget as HTMLInputElement).value)}
-      class="w-full rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-sm text-neutral-800 placeholder:text-neutral-400 focus:border-blue-400 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+      class="cfy-input px-2.5 py-1.5 text-sm"
     />
   );
 }

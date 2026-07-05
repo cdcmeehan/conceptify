@@ -37,7 +37,7 @@ function App() {
     state.threads.find((t) => t.id === state.selectedThreadId) ?? null;
 
   return (
-    <div class="relative flex h-full w-full overflow-hidden bg-neutral-100 text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100">
+    <div class="relative flex h-full w-full overflow-hidden bg-well font-sans text-ink">
       <ProjectSidebar
         projects={state.projects}
         selectedProjectId={state.selectedProjectId}

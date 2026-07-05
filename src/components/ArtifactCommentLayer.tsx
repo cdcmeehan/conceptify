@@ -240,14 +240,12 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
       ref={popoverElRef}
       role="dialog"
       aria-label="Add comment"
-      class="fixed z-50 w-72 rounded-lg border border-neutral-200 bg-white p-2.5 shadow-lg dark:border-neutral-700 dark:bg-neutral-900"
+      class="cfy-popover fixed z-50 w-72 p-2.5"
       style={{ left: `${popover.left}px`, top: `${popover.top}px` }}
       // Keep clicks inside from bubbling out to the artifact / list panes.
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <p class="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
-        {label}
-      </p>
+      <p class="cfy-label mb-1.5">{label}</p>
       <textarea
         ref={textareaRef}
         value={popover.body}
@@ -268,16 +266,16 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
             save();
           }
         }}
-        class="w-full resize-none rounded border border-neutral-300 bg-white px-2 py-1 text-sm text-neutral-900 outline-none focus:border-blue-400 disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+        class="cfy-input resize-none"
       />
       {popover.error != null && (
-        <p class="mt-1 text-[11px] text-rose-600 dark:text-rose-400">{popover.error}</p>
+        <p class="mt-1 text-[11px] text-danger">{popover.error}</p>
       )}
       <div class="mt-1.5 flex items-center justify-end gap-1.5">
         <button
           type="button"
           onClick={() => setPopover(null)}
-          class="rounded px-2 py-0.5 text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+          class="cfy-btn cfy-btn-ghost px-2 py-0.5"
         >
           Cancel
         </button>
@@ -285,7 +283,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
           type="button"
           onClick={save}
           disabled={popover.saving || popover.body.trim().length === 0}
-          class="rounded bg-blue-600 px-2.5 py-0.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+          class="cfy-btn cfy-btn-primary px-2.5 py-0.5"
         >
           {popover.saving ? "Adding…" : "Add comment"}
         </button>

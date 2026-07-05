@@ -71,13 +71,13 @@ export function ThreadList({
 
   return (
     <section
-      class="flex h-full w-72 shrink-0 flex-col border-r border-neutral-200 bg-white outline-none dark:border-neutral-800 dark:bg-neutral-950"
+      class="flex h-full w-60 shrink-0 flex-col border-r border-line bg-paper outline-none lg:w-72"
       tabIndex={0}
       onKeyDown={onListKeyDown}
       aria-label="Threads"
     >
       <header class="flex items-center gap-2 px-3 py-2.5">
-        <h2 class="min-w-0 flex-1 truncate text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+        <h2 class="cfy-label min-w-0 flex-1 truncate" title={projectName ?? undefined}>
           {projectName ?? "Threads"}
         </h2>
         {projectSelected && !composerOpen && (
@@ -85,7 +85,7 @@ export function ThreadList({
             type="button"
             onClick={() => setComposerOpen(true)}
             title="Ask a new question in this project"
-            class="inline-flex shrink-0 items-center gap-1 rounded-md bg-blue-600 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700"
+            class="cfy-btn cfy-btn-primary shrink-0 px-2 py-1"
           >
             <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5" aria-hidden="true">
               <path
@@ -108,13 +108,36 @@ export function ThreadList({
 
       <div class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         {!projectSelected ? (
-          <p class="px-2 py-3 text-xs text-neutral-400">Select a project.</p>
+          <div class="px-3 py-10 text-center">
+            <p class="text-xs leading-relaxed text-muted">
+              Select a project to see its threads.
+            </p>
+          </div>
         ) : error != null ? (
-          <p class="px-2 py-3 text-xs text-rose-600 dark:text-rose-400">{error}</p>
+          <p class="px-2 py-3 text-xs text-danger">{error}</p>
         ) : loading && threads.length === 0 ? (
-          <p class="px-2 py-3 text-xs text-neutral-400">Loading…</p>
+          <div class="flex flex-col gap-2.5 px-2 py-3" aria-hidden="true">
+            <div class="cfy-skeleton w-11/12" />
+            <div class="cfy-skeleton w-2/3" />
+            <div class="cfy-skeleton w-4/5" />
+          </div>
         ) : threads.length === 0 ? (
-          <p class="px-2 py-3 text-xs text-neutral-400">No threads in this project yet.</p>
+          // Empty project (bead conceptify-vxc): a sentence + the next action.
+          <div class="px-3 py-10 text-center">
+            <p class="font-serif text-sm font-semibold text-ink">Nothing asked yet</p>
+            <p class="mt-1 text-xs leading-relaxed text-muted">
+              Every question becomes a thread with a visual artifact.
+            </p>
+            {!composerOpen && (
+              <button
+                type="button"
+                onClick={() => setComposerOpen(true)}
+                class="cfy-btn cfy-btn-primary mt-3"
+              >
+                Ask a question
+              </button>
+            )}
+          </div>
         ) : (
           <ul class="flex flex-col gap-0.5">
             {threads.map((thread) => {
@@ -125,19 +148,20 @@ export function ThreadList({
                     role="button"
                     tabIndex={-1}
                     onClick={() => appStore.selectThread(thread.id)}
-                    class={`w-full cursor-pointer rounded-md px-2 py-2 text-left transition-colors ${
-                      selected
-                        ? "bg-blue-600/10 dark:bg-blue-500/20"
-                        : "hover:bg-neutral-100 dark:hover:bg-neutral-900"
+                    class={`w-full rounded-ctl px-2 py-2 text-left transition-colors ${
+                      selected ? "bg-accent-bg" : "hover:bg-hover"
                     }`}
                   >
                     <div class="flex items-start justify-between gap-2">
-                      <span class="line-clamp-2 text-sm font-medium text-neutral-800 dark:text-neutral-100">
+                      <span
+                        class="line-clamp-2 text-[13px] font-medium text-ink"
+                        title={thread.title}
+                      >
                         {thread.title}
                       </span>
                       {thread.open_comment_count > 0 && (
                         <span
-                          class="mt-0.5 shrink-0 rounded-full bg-blue-100 px-1.5 text-xs font-medium tabular-nums text-blue-700 dark:bg-blue-500/20 dark:text-blue-300"
+                          class="cfy-chip mt-0.5 shrink-0 bg-info-bg tabular-nums text-info"
                           title={`${thread.open_comment_count} open comment${thread.open_comment_count === 1 ? "" : "s"}`}
                         >
                           {thread.open_comment_count}
@@ -146,7 +170,7 @@ export function ThreadList({
                     </div>
                     <div class="mt-1.5 flex items-center justify-between gap-2">
                       <StatusChip status={thread.status} stalled={isStalled(thread)} />
-                      <span class="shrink-0 text-xs text-neutral-400">
+                      <span class="shrink-0 text-[11px] text-muted">
                         {relativeTime(thread.updated_at)}
                       </span>
                     </div>
@@ -159,16 +183,16 @@ export function ThreadList({
                     {selected && (
                       <div class="mt-1.5" onClick={(e) => e.stopPropagation()}>
                         {confirmingDeleteId === thread.id ? (
-                          <div class="flex flex-col gap-1">
-                            <span class="text-xs text-neutral-500 dark:text-neutral-400">
+                          <div class="flex flex-col gap-1.5">
+                            <span class="text-xs text-muted">
                               Delete this thread and all its data?
                             </span>
-                            <div class="flex items-center gap-2">
+                            <div class="flex items-center gap-1.5">
                               <button
                                 type="button"
                                 disabled={deleteBusy}
                                 onClick={() => confirmDelete(thread.id)}
-                                class="rounded bg-rose-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-rose-700 disabled:opacity-50"
+                                class="cfy-btn cfy-btn-danger px-2 py-0.5 text-[11px]"
                               >
                                 {deleteBusy ? "Deleting…" : "Delete"}
                               </button>
@@ -176,15 +200,13 @@ export function ThreadList({
                                 type="button"
                                 disabled={deleteBusy}
                                 onClick={() => setConfirmingDeleteId(null)}
-                                class="rounded px-2 py-0.5 text-xs text-neutral-500 hover:text-neutral-800 disabled:opacity-50 dark:hover:text-neutral-200"
+                                class="cfy-btn cfy-btn-ghost px-2 py-0.5 text-[11px]"
                               >
                                 Cancel
                               </button>
                             </div>
                             {deleteError != null && (
-                              <span class="text-[11px] text-rose-600 dark:text-rose-400">
-                                {deleteError}
-                              </span>
+                              <span class="text-[11px] text-danger">{deleteError}</span>
                             )}
                           </div>
                         ) : (
@@ -194,7 +216,7 @@ export function ThreadList({
                               setDeleteError(null);
                               setConfirmingDeleteId(thread.id);
                             }}
-                            class="text-xs text-neutral-500 hover:text-rose-600 dark:text-neutral-400 dark:hover:text-rose-400"
+                            class="rounded text-[11px] text-muted transition-colors hover:text-danger"
                           >
                             Delete
                           </button>

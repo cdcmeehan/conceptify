@@ -48,8 +48,8 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
 
   if (thread == null) {
     return (
-      <main class="flex h-full flex-1 items-center justify-center bg-neutral-100 dark:bg-neutral-900">
-        <p class="text-sm text-neutral-400">Select a thread to view its artifact.</p>
+      <main class="flex h-full flex-1 items-center justify-center bg-well">
+        <p class="text-[13px] text-muted">Select a thread to view its artifact.</p>
       </main>
     );
   }
@@ -83,10 +83,13 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
   }
 
   return (
-    <main class="flex h-full min-w-0 flex-1 flex-col bg-neutral-100 dark:bg-neutral-900">
-      <header class="border-b border-neutral-200 bg-white px-5 py-3 dark:border-neutral-800 dark:bg-neutral-950">
-        <div class="flex items-center gap-3">
-          <h1 class="min-w-0 flex-1 truncate text-lg font-semibold text-neutral-900 dark:text-neutral-50">
+    <main class="flex h-full min-w-0 flex-1 flex-col bg-well">
+      <header class="border-b border-line bg-paper px-5 py-3">
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <h1
+            class="min-w-40 flex-1 truncate font-serif text-[17px] font-semibold text-ink"
+            title={thread.title}
+          >
             {thread.title}
           </h1>
           <StatusChip status={thread.status} />
@@ -99,7 +102,7 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
                 id="artifact-version"
                 value={state.viewerVersion === "latest" ? "latest" : String(state.viewerVersion)}
                 onChange={onVersionChange}
-                class="shrink-0 rounded-md border border-neutral-300 bg-white px-2 py-1 text-xs font-medium text-neutral-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200"
+                class="cfy-input w-auto shrink-0 px-2 py-1 text-xs font-medium"
               >
                 <option value="latest">
                   Latest{latestVersion != null ? ` (v${latestVersion})` : ""}
@@ -114,7 +117,7 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
                 type="button"
                 onClick={onOpenInBrowser}
                 title="Open the artifact file with your default browser"
-                class="shrink-0 rounded-md border border-neutral-300 bg-white px-2.5 py-1 text-xs font-medium text-neutral-700 transition-colors hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:bg-neutral-800"
+                class="cfy-btn cfy-btn-secondary shrink-0"
               >
                 Open in browser
               </button>
@@ -125,15 +128,11 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
             onClick={() => setSidebarOpen((v) => !v)}
             aria-pressed={sidebarOpen}
             title={sidebarOpen ? "Hide comments" : "Show comments"}
-            class={`inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
-              sidebarOpen
-                ? "border-blue-300 bg-blue-600/10 text-blue-700 dark:border-blue-500/40 dark:bg-blue-500/15 dark:text-blue-300"
-                : "border-neutral-300 bg-white text-neutral-700 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:bg-neutral-800"
-            }`}
+            class={`cfy-btn shrink-0 ${sidebarOpen ? "cfy-btn-accent" : "cfy-btn-secondary"}`}
           >
             Comments
             {openCommentCount > 0 && (
-              <span class="rounded-full bg-blue-100 px-1.5 text-[11px] font-medium tabular-nums text-blue-700 dark:bg-blue-500/20 dark:text-blue-300">
+              <span class="cfy-chip bg-info-bg px-1.5 tabular-nums text-info">
                 {openCommentCount}
               </span>
             )}
@@ -142,12 +141,12 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
         {(viewingOldVersion || openError != null) && (
           <div class="mt-2 flex items-center gap-3">
             {viewingOldVersion && (
-              <span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-500/15 dark:text-amber-300">
+              <span class="cfy-chip bg-warn-bg text-warn">
                 Viewing v{resolvedVersion} of {latestVersion} — read-only
               </span>
             )}
             {openError != null && (
-              <span class="truncate text-xs text-rose-600 dark:text-rose-400">{openError}</span>
+              <span class="truncate text-xs text-danger">{openError}</span>
             )}
           </div>
         )}
@@ -169,7 +168,7 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
                 src={`artifact://localhost/${thread.id}/${resolvedVersion}`}
                 sandbox="allow-scripts"
                 title="Artifact"
-                class="min-h-0 w-full flex-1 border-0 bg-white dark:bg-neutral-950"
+                class="min-h-0 w-full flex-1 border-0 bg-raised"
               />
               {/* Text-selection + element-click commenting (94m.3/94m.4). Keyed
                   by thread so it remounts (fresh popover + bridge subscription)
@@ -191,7 +190,7 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
             // on the next successful fetch.
             <div class="flex min-h-0 flex-1 items-center justify-center">
               {state.artifactVersionsError != null ? (
-                <p class="max-w-md px-6 text-center text-xs text-rose-600 dark:text-rose-400">
+                <p class="max-w-md px-6 text-center text-xs text-danger">
                   {state.artifactVersionsError}
                 </p>
               ) : null}
@@ -238,11 +237,9 @@ function NoArtifactState({
     <div class="min-h-0 flex-1 overflow-y-auto p-5">
       <div class="mx-auto max-w-2xl">
         {thread.initial_question.trim().length > 0 && (
-          <section class="mb-4 rounded-lg border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950">
-            <h2 class="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-400">
-              Question
-            </h2>
-            <p class="whitespace-pre-wrap text-sm text-neutral-700 dark:text-neutral-300">
+          <section class="cfy-card mb-4 p-4">
+            <h2 class="cfy-label mb-1.5">Question</h2>
+            <p class="select-text whitespace-pre-wrap text-[13px] leading-relaxed text-ink">
               {thread.initial_question}
             </p>
           </section>
@@ -253,11 +250,9 @@ function NoArtifactState({
         ) : thread.status === "generating" || thread.status === "updating" ? (
           <GenerationProgress run={run} />
         ) : (
-          <section class="rounded-lg border border-dashed border-neutral-300 bg-white/50 p-8 text-center dark:border-neutral-700 dark:bg-neutral-950/40">
-            <p class="text-sm font-medium text-neutral-500 dark:text-neutral-400">
-              No artifact yet
-            </p>
-            <p class="mt-1 text-xs text-neutral-400">
+          <section class="rounded-card border border-dashed border-line p-8 text-center">
+            <p class="font-serif text-sm font-semibold text-ink">No artifact yet</p>
+            <p class="mt-1 text-xs text-muted">
               This thread has no saved artifact versions.
             </p>
           </section>

@@ -125,16 +125,14 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
 
   return (
     <nav
-      class="flex h-full w-56 shrink-0 flex-col border-r border-neutral-200 bg-neutral-50 outline-none dark:border-neutral-800 dark:bg-neutral-900"
+      class="flex h-full w-48 shrink-0 flex-col border-r border-line bg-well outline-none lg:w-56"
       tabIndex={0}
       onKeyDown={onListKeyDown}
       aria-label="Projects"
     >
       <header class="flex items-center justify-between px-3 py-2.5">
-        <h2 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-          Projects
-        </h2>
-        <label class="flex cursor-pointer items-center gap-1 text-xs text-neutral-500 dark:text-neutral-400">
+        <h2 class="cfy-label">Projects</h2>
+        <label class="flex items-center gap-1.5 text-[11px] text-muted">
           <input
             type="checkbox"
             checked={showArchived}
@@ -147,19 +145,28 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
       {/* FR-1.2 / UC6: create a project — pick an existing folder or make one. */}
       <div class="px-2 pb-2">
         {newProjectOpen ? (
-          <div class="flex flex-col gap-2 rounded-lg border border-neutral-200 bg-white p-2.5 dark:border-neutral-800 dark:bg-neutral-950">
+          <div
+            class="cfy-card flex flex-col gap-2 p-2.5"
+            onKeyDown={(e) => {
+              // Escape backs out of the panel (unless a request is in flight).
+              if (e.key === "Escape" && !newProjectBusy) {
+                e.stopPropagation();
+                closeNewProject();
+              }
+            }}
+          >
             <button
               type="button"
               disabled={newProjectBusy}
               onClick={() => void pickDirectory()}
-              class="rounded-md border border-neutral-300 bg-white px-2 py-1.5 text-xs font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:bg-neutral-800"
+              class="cfy-btn cfy-btn-secondary"
             >
               Choose an existing folder…
             </button>
-            <div class="flex items-center gap-2 text-[10px] uppercase tracking-wide text-neutral-400">
-              <span class="h-px flex-1 bg-neutral-200 dark:bg-neutral-800" />
+            <div class="flex items-center gap-2 text-[10px] uppercase tracking-wide text-muted">
+              <span class="h-px flex-1 bg-line" />
               or make one
-              <span class="h-px flex-1 bg-neutral-200 dark:bg-neutral-800" />
+              <span class="h-px flex-1 bg-line" />
             </div>
             <input
               type="text"
@@ -170,21 +177,18 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
               onInput={(e) => setNewFolderName((e.currentTarget as HTMLInputElement).value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") createFolder();
-                else if (e.key === "Escape") closeNewProject();
               }}
-              class="rounded-md border border-neutral-300 bg-white px-2 py-1.5 text-sm text-neutral-800 placeholder:text-neutral-400 focus:border-blue-400 focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+              class="cfy-input"
             />
             {newProjectError != null && (
-              <p class="break-words text-[11px] text-rose-600 dark:text-rose-400">
-                {newProjectError}
-              </p>
+              <p class="break-words text-[11px] text-danger">{newProjectError}</p>
             )}
             <div class="flex items-center justify-end gap-1.5">
               <button
                 type="button"
                 onClick={closeNewProject}
                 disabled={newProjectBusy}
-                class="rounded-md px-2.5 py-1 text-xs font-medium text-neutral-500 transition-colors hover:bg-neutral-200 disabled:opacity-50 dark:text-neutral-400 dark:hover:bg-neutral-800"
+                class="cfy-btn cfy-btn-ghost"
               >
                 Cancel
               </button>
@@ -192,7 +196,7 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
                 type="button"
                 onClick={createFolder}
                 disabled={newProjectBusy || newFolderName.trim().length === 0}
-                class="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400 dark:disabled:bg-neutral-800 dark:disabled:text-neutral-600"
+                class="cfy-btn cfy-btn-primary"
               >
                 {newProjectBusy ? "Creating…" : "Create folder"}
               </button>
@@ -202,7 +206,7 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
           <button
             type="button"
             onClick={() => setNewProjectOpen(true)}
-            class="flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-neutral-300 px-2 py-1.5 text-xs font-medium text-neutral-500 transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-neutral-700 dark:text-neutral-400 dark:hover:border-blue-500/50 dark:hover:text-blue-300"
+            class="flex w-full items-center justify-center gap-1 rounded-ctl border border-dashed border-line px-2 py-1.5 text-xs font-medium text-muted transition-colors hover:border-accent/50 hover:text-accent-ink"
           >
             <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5" aria-hidden="true">
               <path
@@ -219,13 +223,31 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
 
       <div class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         {error != null ? (
-          <p class="px-2 py-3 text-xs text-rose-600 dark:text-rose-400">{error}</p>
+          <p class="px-2 py-3 text-xs text-danger">{error}</p>
         ) : loading && projects.length === 0 ? (
-          <p class="px-2 py-3 text-xs text-neutral-400">Loading…</p>
+          <div class="flex flex-col gap-2.5 px-2 py-3" aria-hidden="true">
+            <div class="cfy-skeleton w-4/5" />
+            <div class="cfy-skeleton w-3/5" />
+            <div class="cfy-skeleton w-2/3" />
+          </div>
         ) : projects.length === 0 ? (
-          <p class="px-2 py-3 text-xs text-neutral-400">
-            No projects yet. Create one with the CLI or the Claude Code skill.
-          </p>
+          // First-run empty state (bead conceptify-vxc): one quiet sentence +
+          // the action that gets things moving.
+          <div class="px-3 py-10 text-center">
+            <p class="font-serif text-sm font-semibold text-ink">No projects yet</p>
+            <p class="mt-1 text-xs leading-relaxed text-muted">
+              Map a folder — or create one — and start asking questions about it.
+            </p>
+            {!newProjectOpen && (
+              <button
+                type="button"
+                onClick={() => setNewProjectOpen(true)}
+                class="cfy-btn cfy-btn-primary mt-3"
+              >
+                Create a project
+              </button>
+            )}
+          </div>
         ) : (
           <ul class="flex flex-col gap-0.5">
             {projects.map((project) => {
@@ -238,15 +260,13 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
                     role="button"
                     tabIndex={-1}
                     onClick={() => appStore.selectProject(project.id)}
-                    class={`w-full rounded-md px-2 py-1.5 text-left transition-colors ${
-                      selected
-                        ? "bg-blue-600/10 dark:bg-blue-500/20"
-                        : "hover:bg-neutral-200/60 dark:hover:bg-neutral-800/60"
+                    class={`w-full rounded-ctl px-2 py-1.5 text-left transition-colors ${
+                      selected ? "bg-accent-bg" : "hover:bg-hover"
                     } ${project.archived ? "opacity-60" : ""}`}
                   >
                     {isEditing ? (
                       <input
-                        class="w-full rounded border border-blue-400 bg-white px-1.5 py-0.5 text-sm text-neutral-900 outline-none dark:bg-neutral-950 dark:text-neutral-100"
+                        class="cfy-input px-1.5 py-0.5"
                         value={editName}
                         autoFocus
                         onClick={(e) => e.stopPropagation()}
@@ -259,27 +279,30 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
                       />
                     ) : (
                       <div class="flex items-baseline justify-between gap-2">
-                        <span class="truncate text-sm font-medium text-neutral-800 dark:text-neutral-100">
+                        <span
+                          class="truncate text-[13px] font-medium text-ink"
+                          title={project.name}
+                        >
                           {project.name}
                         </span>
-                        <span class="shrink-0 text-xs tabular-nums text-neutral-400">
+                        <span class="shrink-0 text-[11px] tabular-nums text-muted">
                           {project.thread_count}
                         </span>
                       </div>
                     )}
 
                     <div class="mt-0.5 flex items-center gap-2">
-                      <span class="text-xs text-neutral-400">
+                      <span class="text-[11px] text-muted">
                         {relativeTime(project.last_activity)}
                       </span>
                       {project.archived && (
-                        <span class="rounded bg-neutral-200 px-1 text-[10px] font-medium uppercase tracking-wide text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
+                        <span class="cfy-chip bg-hover text-[10px] uppercase tracking-wide text-muted">
                           Archived
                         </span>
                       )}
                       {!project.root_exists && (
                         <span
-                          class="rounded bg-rose-100 px-1 text-[10px] font-medium uppercase tracking-wide text-rose-700 dark:bg-rose-500/20 dark:text-rose-300"
+                          class="cfy-chip bg-danger-bg text-[10px] uppercase tracking-wide text-danger"
                           title={`Mapped directory not found: ${project.root_path}`}
                         >
                           Dir missing
@@ -289,11 +312,11 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
 
                     {/* Re-map affordance for a vanished directory. */}
                     {!project.root_exists && (
-                      <div class="mt-1" onClick={(e) => e.stopPropagation()}>
+                      <div class="mt-1.5" onClick={(e) => e.stopPropagation()}>
                         {isRemapping ? (
                           <div class="flex flex-col gap-1">
                             <input
-                              class="w-full rounded border border-neutral-300 bg-white px-1.5 py-0.5 text-xs text-neutral-900 outline-none focus:border-blue-400 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+                              class="cfy-input px-1.5 py-0.5 text-xs"
                               placeholder="/new/absolute/path"
                               value={remapPath}
                               autoFocus
@@ -304,23 +327,21 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
                               }}
                             />
                             {remapError != null && (
-                              <span class="text-[11px] text-rose-600 dark:text-rose-400">
-                                {remapError}
-                              </span>
+                              <span class="text-[11px] text-danger">{remapError}</span>
                             )}
-                            <div class="flex gap-1">
+                            <div class="flex gap-1.5">
                               <button
                                 type="button"
                                 disabled={remapBusy}
                                 onClick={commitRemap}
-                                class="rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                                class="cfy-btn cfy-btn-primary px-2 py-0.5 text-[11px]"
                               >
                                 Save
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setRemappingId(null)}
-                                class="rounded px-2 py-0.5 text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                                class="cfy-btn cfy-btn-ghost px-2 py-0.5 text-[11px]"
                               >
                                 Cancel
                               </button>
@@ -330,7 +351,7 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
                           <button
                             type="button"
                             onClick={() => startRemap(project)}
-                            class="rounded border border-rose-300 px-2 py-0.5 text-xs font-medium text-rose-700 hover:bg-rose-50 dark:border-rose-500/40 dark:text-rose-300 dark:hover:bg-rose-500/10"
+                            class="cfy-btn cfy-btn-danger px-2 py-0.5 text-[11px]"
                           >
                             Re-map…
                           </button>
@@ -344,14 +365,14 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
                         <button
                           type="button"
                           onClick={() => startRename(project)}
-                          class="text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                          class="rounded text-[11px] text-muted transition-colors hover:text-ink"
                         >
                           Rename
                         </button>
                         <button
                           type="button"
                           onClick={() => void appStore.archiveProject(project.id, !project.archived)}
-                          class="text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                          class="rounded text-[11px] text-muted transition-colors hover:text-ink"
                         >
                           {project.archived ? "Unarchive" : "Archive"}
                         </button>
@@ -366,11 +387,11 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
       </div>
 
       {/* Settings entry (FR-7.x) in the sidebar footer. */}
-      <div class="border-t border-neutral-200 px-2 py-2 dark:border-neutral-800">
+      <div class="border-t border-line px-2 py-2">
         <button
           type="button"
           onClick={() => appStore.openSettings()}
-          class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs font-medium text-neutral-500 transition-colors hover:bg-neutral-200/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800/60 dark:hover:text-neutral-200"
+          class="cfy-btn cfy-btn-ghost w-full justify-start gap-2 px-2 py-1.5"
         >
           <svg viewBox="0 0 20 20" fill="none" class="h-4 w-4" aria-hidden="true">
             <path

@@ -1,40 +1,22 @@
 // Status chip for the four thread states (FR-2.2): generating / ready /
-// updating / error. In-progress states (generating, updating) get a pulsing dot.
+// updating / error. In-progress states (generating, updating) get a pulsing
+// dot. Colors come from the shell's status token families (bead
+// conceptify-vxc): warn = working, ok = done, info = revising, danger = error.
+// The dot rides `currentColor`, so each family needs only one class pair.
 
 import type { ThreadStatus } from "../lib/api";
 
 interface StatusMeta {
   label: string;
   chip: string;
-  dot: string;
   pulse: boolean;
 }
 
 const STATUS_META: Record<ThreadStatus, StatusMeta> = {
-  generating: {
-    label: "Generating",
-    chip: "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
-    dot: "bg-amber-500",
-    pulse: true,
-  },
-  ready: {
-    label: "Ready",
-    chip: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-300",
-    dot: "bg-emerald-500",
-    pulse: false,
-  },
-  updating: {
-    label: "Updating",
-    chip: "bg-sky-100 text-sky-800 dark:bg-sky-500/15 dark:text-sky-300",
-    dot: "bg-sky-500",
-    pulse: true,
-  },
-  error: {
-    label: "Error",
-    chip: "bg-rose-100 text-rose-800 dark:bg-rose-500/15 dark:text-rose-300",
-    dot: "bg-rose-500",
-    pulse: false,
-  },
+  generating: { label: "Generating", chip: "bg-warn-bg text-warn", pulse: true },
+  ready: { label: "Ready", chip: "bg-ok-bg text-ok", pulse: false },
+  updating: { label: "Updating", chip: "bg-info-bg text-info", pulse: true },
+  error: { label: "Error", chip: "bg-danger-bg text-danger", pulse: false },
 };
 
 export function StatusChip({
@@ -51,10 +33,10 @@ export function StatusChip({
   if (stalled) {
     return (
       <span
-        class="inline-flex items-center gap-1.5 rounded-full bg-neutral-200 px-2 py-0.5 text-xs font-medium text-neutral-600 dark:bg-neutral-700 dark:text-neutral-300"
+        class="cfy-chip bg-hover text-muted"
         title="Still generating after 30+ minutes — the run may have stalled. You can delete this thread."
       >
-        <span class="h-1.5 w-1.5 rounded-full bg-neutral-400" />
+        <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-70" />
         Stalled
       </span>
     );
@@ -62,10 +44,10 @@ export function StatusChip({
 
   const meta = STATUS_META[status] ?? STATUS_META.generating;
   return (
-    <span
-      class={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${meta.chip}`}
-    >
-      <span class={`h-1.5 w-1.5 rounded-full ${meta.dot} ${meta.pulse ? "animate-pulse" : ""}`} />
+    <span class={`cfy-chip ${meta.chip}`}>
+      <span
+        class={`h-1.5 w-1.5 shrink-0 rounded-full bg-current ${meta.pulse ? "animate-pulse" : ""}`}
+      />
       {meta.label}
     </span>
   );

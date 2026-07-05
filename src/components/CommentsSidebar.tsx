@@ -18,7 +18,7 @@
 // of the active filter. A "Reply" affordance on a root that has begun an
 // exchange (has an answer or replies) opens an inline composer whose submit
 // creates a reply and re-opens the root server-side (its status chip flips back
-// to `open`). Anchor interactions and the cross-version tag stay root-only —
+// to `open`).  Anchor interactions and the cross-version tag stay root-only —
 // replies carry no anchor and inherit the root's version.
 //
 // Clicking a row scrolls the artifact to its anchor and pulses it, via the
@@ -95,19 +95,13 @@ function anchorExcerpt(
   return { kind: "quote", text: "Anchored comment" };
 }
 
+/** Comment-status chip families (bead conceptify-vxc token vocabulary):
+ *  open = info (awaiting the agent), answered = ok, applied = accent (the
+ *  artifact itself changed — the strongest state gets the accent). */
 const STATUS_META: Record<CommentStatus, { label: string; chip: string }> = {
-  open: {
-    label: "Open",
-    chip: "bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300",
-  },
-  answered: {
-    label: "Answered",
-    chip: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
-  },
-  applied: {
-    label: "Applied",
-    chip: "bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300",
-  },
+  open: { label: "Open", chip: "bg-info-bg text-info" },
+  answered: { label: "Answered", chip: "bg-ok-bg text-ok" },
+  applied: { label: "Applied", chip: "bg-accent-bg text-accent-ink" },
 };
 
 export function CommentsSidebar({
@@ -216,17 +210,18 @@ export function CommentsSidebar({
   }
 
   return (
-    <aside class="flex h-full w-80 shrink-0 flex-col border-l border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
-      <header class="flex items-center gap-2 border-b border-neutral-200 px-3 py-2.5 dark:border-neutral-800">
-        <h2 class="flex-1 text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-          Comments
-        </h2>
+    // At narrow window widths the sidebar may shrink (to min-w-60) and the
+    // artifact column compresses first — comment triage stays fully usable and
+    // the sidebar is never clipped off-screen; collapse it to read the artifact.
+    <aside class="flex h-full w-80 min-w-60 shrink flex-col border-l border-line bg-paper">
+      <header class="flex items-center gap-2 border-b border-line px-3 py-2.5">
+        <h2 class="cfy-label flex-1">Comments</h2>
         <button
           type="button"
           onClick={onClose}
           title="Hide comments"
           aria-label="Hide comments"
-          class="rounded p-0.5 text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-900 dark:hover:text-neutral-200"
+          class="rounded-ctl p-0.5 text-muted transition-colors hover:bg-hover hover:text-ink"
         >
           <svg viewBox="0 0 20 20" fill="none" class="h-4 w-4" aria-hidden="true">
             <path
@@ -240,7 +235,11 @@ export function CommentsSidebar({
         </button>
       </header>
 
-      <div class="flex gap-1 border-b border-neutral-200 px-2 py-1.5 dark:border-neutral-800" role="tablist" aria-label="Filter comments">
+      <div
+        class="flex flex-wrap gap-1 border-b border-line px-2 py-1.5"
+        role="tablist"
+        aria-label="Filter comments"
+      >
         {FILTERS.map((f) => {
           const active = filter === f.key;
           return (
@@ -250,10 +249,8 @@ export function CommentsSidebar({
               role="tab"
               aria-selected={active}
               onClick={() => setFilter(f.key)}
-              class={`flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors ${
-                active
-                  ? "bg-blue-600/10 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300"
-                  : "text-neutral-500 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-900"
+              class={`flex items-center gap-1 rounded-ctl px-2 py-1 text-xs font-medium transition-colors ${
+                active ? "bg-accent-bg text-accent-ink" : "text-muted hover:bg-hover hover:text-ink"
               }`}
             >
               {f.label}
@@ -266,11 +263,11 @@ export function CommentsSidebar({
       {/* FR-4.6/4.7 actions + FR-4.8 run status. Exactly one of: action
           buttons (idle) or the live run block (FR-4.9: the disabled state IS
           the guard's UI half — the engine enforces it server-side too). */}
-      <div class="flex flex-col gap-1.5 border-b border-neutral-200 px-2 py-1.5 dark:border-neutral-800">
+      <div class="flex flex-col gap-1.5 border-b border-line px-2 py-1.5">
         {headerRun != null ? (
           <RunStatusBlock run={headerRun} comments={comments} />
         ) : (
-          <div class="flex gap-1.5">
+          <div class="flex flex-wrap gap-1.5">
             <button
               type="button"
               onClick={onAskFollowUps}
@@ -284,11 +281,11 @@ export function CommentsSidebar({
                       ? "No open comments to answer"
                       : "Answer every open comment in the sidebar (the artifact is not modified)"
               }
-              class="flex-1 rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400 dark:disabled:bg-neutral-800 dark:disabled:text-neutral-600"
+              class="cfy-btn cfy-btn-primary flex-1 py-1.5"
             >
               Ask follow-ups
               {counts.open > 0 && (
-                <span class="ml-1 tabular-nums opacity-80">({counts.open})</span>
+                <span class="tabular-nums opacity-80">({counts.open})</span>
               )}
             </button>
             {counts.answered > 0 && (
@@ -301,16 +298,16 @@ export function CommentsSidebar({
                     ? "A run is already in progress"
                     : "Apply every answered comment to the artifact (saves a new version)"
                 }
-                class="flex-1 rounded-md border border-violet-300 bg-violet-600/10 px-2.5 py-1.5 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-600/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-violet-500/40 dark:bg-violet-500/15 dark:text-violet-300"
+                class="cfy-btn cfy-btn-accent flex-1 py-1.5"
               >
                 Apply all answered
-                <span class="ml-1 tabular-nums opacity-80">({counts.answered})</span>
+                <span class="tabular-nums opacity-80">({counts.answered})</span>
               </button>
             )}
           </div>
         )}
         {actionError != null && (
-          <p class="break-words text-xs text-rose-600 dark:text-rose-400">{actionError}</p>
+          <p class="break-words text-xs text-danger">{actionError}</p>
         )}
         {runFailure != null && activeRun == null && (
           <RunFailurePanel failure={runFailure} />
@@ -319,16 +316,25 @@ export function CommentsSidebar({
 
       <div class="min-h-0 flex-1 overflow-y-auto p-2">
         {error != null ? (
-          <p class="px-2 py-3 text-xs text-rose-600 dark:text-rose-400">{error}</p>
+          <p class="px-2 py-3 text-xs text-danger">{error}</p>
         ) : loading && comments.length === 0 ? (
-          <p class="px-2 py-3 text-xs text-neutral-400">Loading…</p>
+          <div class="flex flex-col gap-2.5 px-2 py-3" aria-hidden="true">
+            <div class="cfy-skeleton w-3/4" />
+            <div class="cfy-skeleton w-11/12" />
+            <div class="cfy-skeleton w-2/3" />
+          </div>
         ) : comments.length === 0 ? (
-          <p class="px-2 py-3 text-xs text-neutral-400">
-            No comments yet. Select text or a diagram element in the artifact, or ask a
-            follow-up below.
-          </p>
+          // No comments yet (bead conceptify-vxc): one quiet sentence; the
+          // composer below is the standing affordance.
+          <div class="px-3 py-10 text-center">
+            <p class="font-serif text-sm font-semibold text-ink">No comments yet</p>
+            <p class="mt-1 text-xs leading-relaxed text-muted">
+              Select text or a diagram element in the artifact, or ask a follow-up
+              below.
+            </p>
+          </div>
         ) : visibleChains.length === 0 ? (
-          <p class="px-2 py-3 text-xs text-neutral-400">No {filter} comments.</p>
+          <p class="px-2 py-3 text-xs text-muted">No {filter} comments.</p>
         ) : (
           <ul class="flex flex-col gap-2">
             {visibleChains.map((chain) => (
@@ -448,42 +454,36 @@ function ChainItem({
 
   return (
     <li
-      class={`overflow-hidden rounded-lg border bg-white dark:bg-neutral-900 ${
-        failedHighlight
-          ? "border-rose-300 dark:border-rose-500/40"
-          : "border-neutral-200 dark:border-neutral-800"
+      class={`cfy-card overflow-hidden ${
+        failedHighlight ? "border-danger/50" : ""
       }`}
     >
       <div
         {...clickProps}
         class={`px-2.5 py-2 outline-none ${
-          scrollable
-            ? "cursor-pointer hover:bg-neutral-50 focus-visible:bg-neutral-50 dark:hover:bg-neutral-800/60 dark:focus-visible:bg-neutral-800/60"
-            : ""
+          scrollable ? "hover:bg-hover focus-visible:bg-hover" : ""
         }`}
       >
         <div class="mb-1 flex items-start justify-between gap-2">
           {excerpt.kind === "direct" ? (
-            <span class="text-[11px] font-medium uppercase tracking-wide text-neutral-400">
+            <span class="text-[11px] font-medium uppercase tracking-wide text-muted">
               Direct question
             </span>
           ) : excerpt.kind === "element" ? (
-            <span class="line-clamp-1 min-w-0 font-mono text-[11px] text-neutral-500 dark:text-neutral-400">
+            <span class="line-clamp-1 min-w-0 font-mono text-[11px] text-muted">
               {excerpt.text}
             </span>
           ) : (
-            <span class="line-clamp-2 min-w-0 text-xs italic text-neutral-500 dark:text-neutral-400">
+            <span class="line-clamp-2 min-w-0 text-xs italic leading-snug text-muted">
               “{excerpt.text}”
             </span>
           )}
-          <span
-            class={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${status.chip}`}
-          >
+          <span class={`cfy-chip shrink-0 text-[10px] ${status.chip}`}>
             {status.label}
           </span>
         </div>
 
-        <p class="whitespace-pre-wrap break-words text-sm text-neutral-800 dark:text-neutral-100">
+        <p class="select-text whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink">
           {root.body}
         </p>
 
@@ -491,7 +491,7 @@ function ChainItem({
           <div class="mt-1.5 flex flex-wrap items-center gap-1">
             {crossVersion && (
               <span
-                class="rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400"
+                class="cfy-chip bg-hover text-[10px] text-muted"
                 title="This comment is anchored to a different artifact version"
               >
                 v{root.artifact_version}
@@ -499,7 +499,7 @@ function ChainItem({
             )}
             {moved && (
               <span
-                class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-500/15 dark:text-amber-300"
+                class="cfy-chip bg-warn-bg text-[10px] text-warn"
                 title="The anchored reference could not be re-located in the current artifact version"
               >
                 Reference moved
@@ -524,7 +524,7 @@ function ChainItem({
           root the compact inline run state replaces it. */}
       {inlineRun != null && <InlineRunState />}
       {showActions && (
-        <div class="flex flex-wrap items-center gap-1.5 border-t border-neutral-100 px-2.5 py-1.5 dark:border-neutral-800">
+        <div class="flex flex-wrap items-center gap-1.5 border-t border-line px-2.5 py-1.5">
           {showApply && (
             <button
               type="button"
@@ -535,7 +535,7 @@ function ChainItem({
                   ? "A run is already in progress"
                   : "Have the agent incorporate this clarification into the artifact (saves a new version)"
               }
-              class="rounded-md border border-violet-300 bg-violet-600/10 px-2 py-1 text-[11px] font-medium text-violet-700 transition-colors hover:bg-violet-600/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-violet-500/40 dark:bg-violet-500/15 dark:text-violet-300"
+              class="cfy-btn cfy-btn-accent px-2 py-1 text-[11px]"
             >
               Apply to artifact
             </button>
@@ -550,7 +550,7 @@ function ChainItem({
                   ? "A run is already in progress"
                   : "Answer just this comment now (the artifact is not modified)"
               }
-              class="rounded-md border border-blue-300 bg-blue-600/10 px-2 py-1 text-[11px] font-medium text-blue-700 transition-colors hover:bg-blue-600/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-500/40 dark:bg-blue-500/15 dark:text-blue-300"
+              class="cfy-btn cfy-btn-secondary px-2 py-1 text-[11px]"
             >
               Ask now
             </button>
@@ -560,7 +560,7 @@ function ChainItem({
               type="button"
               onClick={() => setReplyOpen(true)}
               title="Ask a follow-up in this thread (re-opens the comment for the agent)"
-              class="rounded-md border border-neutral-200 px-2 py-1 text-[11px] font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:border-neutral-700 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+              class="cfy-btn cfy-btn-ghost px-2 py-1 text-[11px]"
             >
               Reply
             </button>
@@ -591,25 +591,23 @@ function ChainItem({
  */
 function InlineRunState() {
   return (
-    <div class="flex items-center gap-2 border-t border-blue-100 bg-blue-50 px-2.5 py-1.5 dark:border-blue-500/20 dark:bg-blue-500/10">
+    <div class="flex items-center gap-2 border-t border-info/20 bg-info-bg px-2.5 py-1.5">
       <svg
         viewBox="0 0 20 20"
         fill="none"
-        class="h-3 w-3 shrink-0 animate-spin text-blue-600 dark:text-blue-400"
+        class="h-3 w-3 shrink-0 animate-spin text-info"
         aria-hidden="true"
       >
         <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="2" class="opacity-25" />
         <path d="M17 10a7 7 0 0 0-7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
       </svg>
-      <span class="flex-1 text-[11px] font-medium text-blue-800 dark:text-blue-300">
-        Answering…
-      </span>
+      <span class="flex-1 text-[11px] font-medium text-info">Answering…</span>
       <button
         type="button"
         onClick={() => appStore.cancelActiveRun()}
         title="Cancel this run (kills the agent process; answers already given are kept)"
         aria-label="Cancel this run"
-        class="rounded p-0.5 text-blue-600 transition-colors hover:bg-blue-600/10 dark:text-blue-400 dark:hover:bg-blue-500/20"
+        class="rounded-ctl p-0.5 text-info transition-colors hover:bg-info/10"
       >
         <svg viewBox="0 0 20 20" fill="currentColor" class="h-3.5 w-3.5" aria-hidden="true">
           <rect x="6" y="6" width="8" height="8" rx="1.5" />
@@ -630,19 +628,17 @@ function ReplyRow({ reply }: { reply: Comment }) {
   const answered = reply.answer_html != null && reply.answer_html.length > 0;
 
   return (
-    <li class="ml-2.5 border-l border-neutral-200 dark:border-neutral-800">
+    <li class="ml-2.5 border-l border-line">
       <div class="px-2.5 py-1.5">
         <div class="mb-0.5 flex items-center justify-between gap-2">
-          <span class="text-[10px] font-medium uppercase tracking-wide text-neutral-400">
+          <span class="text-[10px] font-medium uppercase tracking-wide text-muted">
             Reply
           </span>
-          <span
-            class={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${status.chip}`}
-          >
+          <span class={`cfy-chip shrink-0 text-[10px] ${status.chip}`}>
             {status.label}
           </span>
         </div>
-        <p class="whitespace-pre-wrap break-words text-xs text-neutral-700 dark:text-neutral-200">
+        <p class="select-text whitespace-pre-wrap break-words text-xs leading-relaxed text-ink">
           {reply.body}
         </p>
       </div>
@@ -706,7 +702,7 @@ function ReplyComposer({
   }
 
   return (
-    <div class="border-t border-neutral-100 bg-neutral-50 px-2.5 py-2 dark:border-neutral-800 dark:bg-neutral-900/60">
+    <div class="border-t border-line bg-well/60 px-2.5 py-2">
       <textarea
         ref={textareaRef}
         value={body}
@@ -724,16 +720,16 @@ function ReplyComposer({
             onDone();
           }
         }}
-        class="w-full resize-none rounded border border-neutral-300 bg-white px-2 py-1.5 text-xs text-neutral-900 outline-none focus:border-blue-400 disabled:cursor-not-allowed disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+        class="cfy-input resize-none text-xs"
       />
       {error != null && (
-        <p class="mt-1 text-[11px] text-rose-600 dark:text-rose-400">{error}</p>
+        <p class="mt-1 text-[11px] text-danger">{error}</p>
       )}
       <div class="mt-1.5 flex items-center justify-end gap-1.5">
         <button
           type="button"
           onClick={onDone}
-          class="rounded px-2 py-0.5 text-[11px] text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+          class="cfy-btn cfy-btn-ghost px-2 py-0.5 text-[11px]"
         >
           Cancel
         </button>
@@ -741,7 +737,7 @@ function ReplyComposer({
           type="button"
           onClick={submit}
           disabled={saving || body.trim().length === 0}
-          class="rounded bg-blue-600 px-2.5 py-0.5 text-[11px] font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+          class="cfy-btn cfy-btn-primary px-2.5 py-0.5 text-[11px]"
         >
           {saving ? "Replying…" : "Reply"}
         </button>
@@ -774,34 +770,32 @@ function RunStatusBlock({ run, comments }: { run: ActiveRunState; comments: Comm
   }
 
   return (
-    <div class="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-2 dark:border-blue-500/30 dark:bg-blue-500/10">
+    <div class="rounded-ctl border border-info/30 bg-info-bg px-2.5 py-2">
       <div class="flex items-center gap-2">
         <svg
           viewBox="0 0 20 20"
           fill="none"
-          class="h-3.5 w-3.5 shrink-0 animate-spin text-blue-600 dark:text-blue-400"
+          class="h-3.5 w-3.5 shrink-0 animate-spin text-info"
           aria-hidden="true"
         >
           <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="2" class="opacity-25" />
           <path d="M17 10a7 7 0 0 0-7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
         </svg>
-        <span class="flex-1 text-xs font-medium text-blue-800 dark:text-blue-300">{label}</span>
+        <span class="flex-1 text-xs font-medium text-info">{label}</span>
         {progress != null && (
-          <span class="tabular-nums text-[11px] text-blue-700/80 dark:text-blue-300/80">
-            {progress}
-          </span>
+          <span class="text-[11px] tabular-nums text-info/80">{progress}</span>
         )}
         <button
           type="button"
           onClick={() => appStore.cancelActiveRun()}
           title="Cancel this run (kills the agent process; answers already given are kept)"
-          class="rounded border border-blue-300 px-1.5 py-0.5 text-[11px] font-medium text-blue-700 transition-colors hover:bg-blue-600/10 dark:border-blue-500/40 dark:text-blue-300"
+          class="cfy-btn border border-info/40 px-1.5 py-0.5 text-[11px] text-info hover:bg-info/10"
         >
           Cancel
         </button>
       </div>
       {run.lastProgress != null && (
-        <p class="mt-1 line-clamp-1 break-all font-mono text-[10px] text-blue-700/60 dark:text-blue-300/50">
+        <p class="mt-1 line-clamp-1 break-all font-mono text-[10px] text-muted">
           {run.lastProgress}
         </p>
       )}
@@ -836,15 +830,15 @@ function RunFailurePanel({ failure }: { failure: RunFailureState }) {
   }
 
   return (
-    <div class="rounded-md border border-rose-200 bg-rose-50 px-2.5 py-2 dark:border-rose-500/30 dark:bg-rose-500/10">
+    <div class="rounded-ctl border border-danger/30 bg-danger-bg px-2.5 py-2">
       <div class="flex items-center gap-2">
-        <span class="flex-1 text-xs font-medium text-rose-700 dark:text-rose-300">{message}</span>
+        <span class="flex-1 text-xs font-medium text-danger">{message}</span>
         {tail == null && (
           <button
             type="button"
             onClick={onShowLog}
             disabled={loadingTail}
-            class="rounded border border-rose-300 px-1.5 py-0.5 text-[11px] font-medium text-rose-700 transition-colors hover:bg-rose-600/10 disabled:opacity-50 dark:border-rose-500/40 dark:text-rose-300"
+            class="cfy-btn border border-danger/40 px-1.5 py-0.5 text-[11px] text-danger hover:bg-danger/10 disabled:opacity-50"
           >
             {loadingTail ? "Loading…" : "Show log"}
           </button>
@@ -854,20 +848,27 @@ function RunFailurePanel({ failure }: { failure: RunFailureState }) {
           onClick={() => appStore.clearRunFailure()}
           title="Dismiss"
           aria-label="Dismiss run failure"
-          class="rounded px-1 text-[11px] font-medium text-rose-400 transition-colors hover:text-rose-600 dark:hover:text-rose-300"
+          class="rounded-ctl p-0.5 text-danger/70 transition-colors hover:bg-danger/10 hover:text-danger"
         >
-          ✕
+          <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5" aria-hidden="true">
+            <path
+              d="m5.5 5.5 9 9m0-9-9 9"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+            />
+          </svg>
         </button>
       </div>
       {tailError != null && (
-        <p class="mt-1 text-[11px] text-rose-600 dark:text-rose-400">{tailError}</p>
+        <p class="mt-1 text-[11px] text-danger">{tailError}</p>
       )}
       {tail != null && (
         <div class="mt-1.5">
-          <p class="break-all font-mono text-[10px] text-rose-700/70 dark:text-rose-300/60">
+          <p class="select-text break-all font-mono text-[10px] text-muted">
             {tail.log_path}
           </p>
-          <pre class="mt-1 max-h-48 overflow-auto rounded bg-white/60 p-1.5 font-mono text-[10px] leading-relaxed text-neutral-700 dark:bg-neutral-950/60 dark:text-neutral-300">
+          <pre class="mt-1 max-h-48 select-text overflow-auto rounded-ctl bg-raised/70 p-1.5 font-mono text-[10px] leading-relaxed text-ink">
             {tail.lines.join("\n")}
           </pre>
         </div>
@@ -888,12 +889,12 @@ function RunFailurePanel({ failure }: { failure: RunFailureState }) {
  */
 function AnswerHtml({ html }: { html: string }) {
   return (
-    <div class="border-t border-neutral-100 bg-neutral-50 px-2.5 py-2 dark:border-neutral-800 dark:bg-neutral-900/60">
-      <p class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+    <div class="border-t border-line bg-well/60 px-2.5 py-2">
+      <p class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-ok">
         Answer
       </p>
       <div
-        class="cfy-answer text-neutral-700 dark:text-neutral-300"
+        class="cfy-answer select-text text-ink"
         // See the component docstring for the innerHTML / threat-model rationale.
         dangerouslySetInnerHTML={{ __html: html }}
       />
