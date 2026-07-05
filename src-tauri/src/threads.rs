@@ -71,7 +71,11 @@ pub struct ThreadWithStats {
     pub status: ThreadStatus,
     pub created_at: String,
     pub updated_at: String,
-    /// Comments on this thread still in the `open` state.
+    /// Open **root** comments on this thread (`status = 'open'` and
+    /// `parent_id IS NULL`). Replies are excluded so a root re-opened by a user
+    /// reply — together with its open replies — counts once, keeping the sidebar
+    /// badge and the batch-run "how many questions are open" semantics unchanged
+    /// (epic conceptify-6xi).
     pub open_comment_count: i64,
 }
 
@@ -198,7 +202,10 @@ pub fn list_threads(
             t.status,
             t.created_at,
             t.updated_at,
-            COALESCE(SUM(CASE WHEN c.status = 'open' THEN 1 ELSE 0 END), 0) AS open_comment_count
+            COALESCE(
+                SUM(CASE WHEN c.status = 'open' AND c.parent_id IS NULL THEN 1 ELSE 0 END),
+                0
+            ) AS open_comment_count
         FROM threads t
         LEFT JOIN comments c ON c.thread_id = t.id
         WHERE t.project_id = ?1
@@ -417,7 +424,8 @@ mod tests {
                 status TEXT NOT NULL,
                 answer_html TEXT,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                resolved_at TEXT
+                resolved_at TEXT,
+                parent_id TEXT REFERENCES comments(id) ON DELETE CASCADE
             );
             INSERT INTO projects (id, name, root_path) VALUES ('p1', 'Proj One', '/a');
             INSERT INTO projects (id, name, root_path) VALUES ('p2', 'Proj Two', '/b');
@@ -538,6 +546,36 @@ mod tests {
         assert_eq!(list[0].open_comment_count, 0);
         assert_eq!(list[1].id, second.id);
         assert_eq!(list[1].open_comment_count, 2);
+    }
+
+    #[test]
+    fn open_comment_count_ignores_replies() {
+        let conn = test_conn();
+        let t = create_thread(&conn, "p1", "Replies", "q").unwrap();
+
+        // One open root, plus two OPEN replies under it (parent_id set). The
+        // re-opened-root + open-replies case must count as a single open question.
+        conn.execute(
+            "INSERT INTO comments (id, thread_id, artifact_version, body, status)
+             VALUES ('root', ?1, 1, 'root q', 'open')",
+            [&t.id],
+        )
+        .unwrap();
+        for id in ["r1", "r2"] {
+            conn.execute(
+                "INSERT INTO comments (id, thread_id, artifact_version, body, status, parent_id)
+                 VALUES (?1, ?2, 1, 'reply', 'open', 'root')",
+                rusqlite::params![id, t.id],
+            )
+            .unwrap();
+        }
+
+        let list = list_threads(&conn, "p1").unwrap();
+        let row = list.iter().find(|r| r.id == t.id).unwrap();
+        assert_eq!(
+            row.open_comment_count, 1,
+            "open replies must not inflate the count; only the root counts"
+        );
     }
 
     #[test]

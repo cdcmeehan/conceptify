@@ -14,7 +14,7 @@
 use rusqlite::Connection;
 
 use crate::artifacts::{self, LatestArtifact};
-use crate::comments::{self, Comment, CommentStatus};
+use crate::comments::{self, Comment, CommentStatus, CommentThread};
 use crate::threads::{self, Thread};
 
 /// The owning project's identity and on-disk root (the run's `cwd`).
@@ -34,8 +34,14 @@ pub struct ThreadContext {
     /// The highest artifact version on disk, or `None` when the thread has none
     /// yet (still `generating`).
     pub latest_artifact: Option<LatestArtifact>,
-    /// Open comments only, oldest first — the questions the run must answer.
+    /// Open comments only (roots AND replies), oldest first — the flat list the
+    /// internal batch flow (`crate::flows`) answers. Kept for that consumer;
+    /// `get-context`'s HTTP response is built from [`Self::open_comment_threads`].
     pub open_comments: Vec<Comment>,
+    /// Open ROOT comments, each with its ordered reply chain — the exchange
+    /// history nested under `open_comments` in the get-context HTTP response (epic
+    /// conceptify-6xi). A follow-up run builds its prompt from this.
+    pub open_comment_threads: Vec<CommentThread>,
 }
 
 /// Errors from the aggregation. `ThreadNotFound` maps to a 404 in the route
@@ -80,11 +86,13 @@ pub fn thread_context(conn: &Connection, thread_id: &str) -> Result<ThreadContex
 
     let latest_artifact = artifacts::latest_artifact(conn, thread_id)?;
     let open_comments = comments::list_comments(conn, thread_id, Some(CommentStatus::Open))?;
+    let open_comment_threads = comments::open_roots_with_replies(conn, thread_id)?;
 
     Ok(ThreadContext {
         thread,
         project,
         latest_artifact,
         open_comments,
+        open_comment_threads,
     })
 }

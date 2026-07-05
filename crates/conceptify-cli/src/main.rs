@@ -607,6 +607,7 @@ fn comment_output(c: &CommentResponse) -> serde_json::Value {
     json!({
         "id": c.id,
         "threadId": c.thread_id,
+        "parentId": c.parent_id,
         "artifactVersion": c.artifact_version,
         "anchor": c.anchor,
         "body": c.body,
@@ -618,11 +619,27 @@ fn comment_output(c: &CommentResponse) -> serde_json::Value {
     })
 }
 
+/// Shape one open ROOT comment (+ its reply chain) into the CLI's camelCase form.
+/// The root's fields are the same `comment_output` shape; its ordered exchange
+/// history is appended as a `replies` array (each reply also camelCase). This is
+/// what lets a follow-up run read the full conversation (epic conceptify-6xi).
+fn context_comment_output(tc: &conceptify_types::ThreadContextComment) -> serde_json::Value {
+    let mut v = comment_output(&tc.comment);
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "replies".to_owned(),
+            serde_json::Value::Array(tc.replies.iter().map(comment_output).collect()),
+        );
+    }
+    v
+}
+
 /// Shape the context aggregate into the CLI's camelCase output contract (§5.2):
 /// the run-specific context a headless follow-up assembles into its prompt —
-/// question, artifact path, project root, and the open comments to answer.
-/// `artifactVersion`/`artifactPath` are `null` when the thread has no artifact
-/// yet. Anchors inside `openComments` stay verbatim (see `comment_output`).
+/// question, artifact path, project root, and the open ROOT comments to answer,
+/// each with its nested reply chain. `artifactVersion`/`artifactPath` are `null`
+/// when the thread has no artifact yet. Anchors inside `openComments` stay
+/// verbatim (see `comment_output`).
 fn get_context_output(resp: &ThreadContextResponse) -> serde_json::Value {
     json!({
         "threadId": resp.thread.id,
@@ -638,7 +655,7 @@ fn get_context_output(resp: &ThreadContextResponse) -> serde_json::Value {
         "openComments": resp
             .open_comments
             .iter()
-            .map(comment_output)
+            .map(context_comment_output)
             .collect::<Vec<_>>(),
     })
 }
@@ -1215,6 +1232,7 @@ mod tests {
         CommentResponse {
             id: s("c-1"),
             thread_id: s("thr-9"),
+            parent_id: None,
             artifact_version: 1,
             anchor: Some(text_anchor()),
             body: s("why refresh here?"),
@@ -1226,12 +1244,30 @@ mod tests {
         }
     }
 
+    /// A reply CommentResponse (no anchor, `parent_id` set).
+    fn reply_comment(id: &str, parent: &str, created_at: &str) -> CommentResponse {
+        CommentResponse {
+            id: s(id),
+            thread_id: s("thr-9"),
+            parent_id: Some(s(parent)),
+            artifact_version: 1,
+            anchor: None,
+            body: s("follow-up"),
+            status: s("open"),
+            answer_html: None,
+            anchor_state: s("anchored"),
+            created_at: s(created_at),
+            resolved_at: None,
+        }
+    }
+
     #[test]
     fn comment_output_is_camelcase_with_verbatim_snakecase_anchor() {
         let out = comment_output(&open_comment());
         // Top-level keys are camelCase like every other CLI command.
         assert_eq!(out["id"], "c-1");
         assert_eq!(out["threadId"], "thr-9");
+        assert_eq!(out["parentId"], serde_json::Value::Null);
         assert_eq!(out["artifactVersion"], 1);
         assert_eq!(out["anchorState"], "anchored");
         assert_eq!(out["answerHtml"], serde_json::Value::Null);
@@ -1243,8 +1279,17 @@ mod tests {
         assert!(out.get("anchor_state").is_none(), "no snake_case top-level leakage");
     }
 
+    #[test]
+    fn comment_output_exposes_parent_id_for_replies() {
+        let out = comment_output(&reply_comment("r-1", "c-1", "2026-07-04T00:00:01.000Z"));
+        assert_eq!(out["parentId"], "c-1");
+        assert!(out["anchor"].is_null(), "replies carry no anchor");
+    }
+
     fn context_with_artifact() -> ThreadContextResponse {
-        use conceptify_types::{ThreadContextArtifact, ThreadContextProject, ThreadContextThread};
+        use conceptify_types::{
+            ThreadContextArtifact, ThreadContextComment, ThreadContextProject, ThreadContextThread,
+        };
         ThreadContextResponse {
             thread: ThreadContextThread {
                 id: s("thr-9"),
@@ -1262,12 +1307,19 @@ mod tests {
                 version: 2,
                 file_path: s("/Users/chris/Documents/conceptify/artifacts/proj-1/threads/how-does-oauth-work/artifact.v2.html"),
             }),
-            open_comments: vec![open_comment()],
+            // One open root with a two-reply exchange history.
+            open_comments: vec![ThreadContextComment {
+                comment: open_comment(),
+                replies: vec![
+                    reply_comment("r-1", "c-1", "2026-07-04T00:00:01.000Z"),
+                    reply_comment("r-2", "c-1", "2026-07-04T00:00:02.000Z"),
+                ],
+            }],
         }
     }
 
     #[test]
-    fn get_context_output_exposes_prompt_fields_and_verbatim_anchors() {
+    fn get_context_output_exposes_prompt_fields_and_nested_reply_chains() {
         let out = get_context_output(&context_with_artifact());
         assert_eq!(out["threadId"], "thr-9");
         assert_eq!(out["question"], "Explain the OAuth 2.0 authorization code flow.");
@@ -1280,8 +1332,14 @@ mod tests {
         let open = out["openComments"].as_array().unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0]["id"], "c-1");
+        assert!(open[0]["parentId"].is_null(), "root parentId is null");
         // Anchor round-trips verbatim through the context shaper too.
         assert_eq!(open[0]["anchor"]["cfy_id"], "sec-walkthrough");
+        // The ordered reply chain nests under the root.
+        let replies = open[0]["replies"].as_array().unwrap();
+        let ids: Vec<&str> = replies.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["r-1", "r-2"]);
+        assert_eq!(replies[0]["parentId"], "c-1");
     }
 
     #[test]

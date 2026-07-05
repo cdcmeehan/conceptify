@@ -312,21 +312,42 @@ assembles into the follow-up prompt.
     {
       "id": "b3f1…",
       "threadId": "7c9e6679-…",
+      "parentId": null,
       "artifactVersion": 1,
       "anchor": { "v": 1, "type": "text", "cfy_id": "sec-walkthrough", "start": 142, "end": 210, "quote": { "exact": "the token is refreshed here" } },
       "body": "why is the token refreshed here?",
       "status": "open",
-      "answerHtml": null,
+      "answerHtml": "<p>Because the refresh token rotates…</p>",
       "anchorState": "anchored",
       "createdAt": "2026-07-04T12:34:56.789Z",
-      "resolvedAt": null
+      "resolvedAt": null,
+      "replies": [
+        {
+          "id": "d7a2…",
+          "threadId": "7c9e6679-…",
+          "parentId": "b3f1…",
+          "artifactVersion": 1,
+          "anchor": null,
+          "body": "I still don't get why it rotates every request.",
+          "status": "open",
+          "answerHtml": null,
+          "anchorState": "anchored",
+          "createdAt": "2026-07-04T12:40:00.000Z",
+          "resolvedAt": null
+        }
+      ]
     }
   ]
 }
 ```
 
 `artifactVersion` / `artifactPath` are `null` when the thread has no artifact yet.
-`openComments` contains only comments still in the `open` state.
+`openComments` contains only **root** comments still in the `open` state (a root
+re-opened by a user reply is among them). Each carries a `replies` array — its
+ordered reply chain (oldest first), the **exchange history** the follow-up prompt
+builds on (original question + prior `answerHtml` + follow-up replies). `replies`
+is `[]` when a root has no replies; each reply has `parentId` = the root's id and
+a `null` `anchor`.
 
 **Anchor passthrough:** top-level keys are camelCase (like every command), **but
 each comment's `anchor` object is passed through verbatim** — its inner keys stay
@@ -345,8 +366,10 @@ must round-trip byte-for-byte; the CLI never rewrites it.
 
 List a thread's comments with anchors (PRD §5.2; maps to
 `GET /api/v1/comments`). Optionally filter by `--status`. Output is a bare JSON
-**array** — each comment is the same camelCase shape as `get-context`'s
-`openComments`, with the `anchor` passed through verbatim.
+**array** — each comment is the same camelCase shape as one entry of
+`get-context`'s `openComments` (minus the nested `replies`), with the `anchor`
+passed through verbatim. This is a **flat** list: replies appear as their own
+entries, each with `parentId` set to its root (roots have `parentId: null`).
 
 **Output (stdout):**
 
@@ -355,6 +378,7 @@ List a thread's comments with anchors (PRD §5.2; maps to
   {
     "id": "b3f1…",
     "threadId": "7c9e6679-…",
+    "parentId": null,
     "artifactVersion": 1,
     "anchor": { "v": 1, "type": "element", "cfy_id": "fig-auth-flow.token-service", "quote": { "exact": "Token Service" } },
     "body": "why does this node retry?",

@@ -136,10 +136,30 @@ pub struct Comment {
 /// A comment plus its owning `project_id` (resolved via its thread). The route
 /// layer needs `project_id` to scope the `comment-created` / `comment-updated`
 /// Tauri events so the frontend can refetch just the affected view.
+///
+/// `parent_id` is carried alongside (rather than on [`Comment`]) so the response
+/// layer can populate `CommentResponse.parent_id` without the shared [`Comment`]
+/// struct — read verbatim by the flow layer — having to change shape.
+/// `reopened_root`, when `Some`, is the ROOT comment a user reply flipped back to
+/// `open` (epic conceptify-6xi): the create route emits an extra `comment-updated`
+/// for it. It is always `None` for a root comment or an update.
 #[derive(Debug, Clone)]
 pub struct CommentContext {
     pub comment: Comment,
     pub project_id: String,
+    /// The root this comment replies to, or `None` for a root comment.
+    pub parent_id: Option<String>,
+    /// A root re-opened as a side effect of creating this reply, if any.
+    pub reopened_root: Option<Comment>,
+}
+
+/// An open ROOT comment plus its ordered reply chain — the unit the get-context
+/// aggregate nests so a follow-up run inherits the full exchange history (epic
+/// conceptify-6xi). `replies` is oldest-first (`created_at`, then rowid).
+#[derive(Debug, Clone)]
+pub struct CommentThread {
+    pub root: Comment,
+    pub replies: Vec<Comment>,
 }
 
 /// Errors specific to comment operations. Variants map to HTTP status codes in
@@ -169,6 +189,34 @@ pub enum CommentError {
 
     #[error("no fields to update")]
     NoUpdateFields,
+
+    // --- reply rules (epic conceptify-6xi) -------------------------------
+
+    /// A reply carried an anchor. Replies attach to a root comment, not to a
+    /// region of the artifact — they never carry their own anchor.
+    #[error("a reply must not carry an anchor")]
+    ReplyWithAnchor,
+
+    /// The reply's `parent_id` names no comment.
+    #[error("parent comment not found: {0}")]
+    ParentNotFound(String),
+
+    /// The reply's parent lives in a different thread than the one given.
+    #[error("parent comment {parent_id} is not in thread {thread_id}")]
+    ParentDifferentThread {
+        parent_id: String,
+        thread_id: String,
+    },
+
+    /// The reply's parent is itself a reply — chains are linear (reply to the
+    /// root instead).
+    #[error("cannot reply to a reply ({0} is itself a reply); reply to the root comment")]
+    ReplyToReply(String),
+
+    /// A caller tried to move a reply to `applied`. `applied` is root-only (it
+    /// tracks the artifact-apply flow); replies advance `open` → `answered`.
+    #[error("cannot apply a reply ({0}); the `applied` status is root-only")]
+    AppliedOnReply(String),
 
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
@@ -279,6 +327,135 @@ pub fn create_comment(
     Ok(CommentContext {
         comment,
         project_id,
+        parent_id: None,
+        reopened_root: None,
+    })
+}
+
+/// Create a threaded **reply** to a root comment (epic conceptify-6xi).
+///
+/// A reply is a `comments` row whose `parent_id` names the root it answers. This
+/// path is deliberately separate from [`create_comment`] (which keeps its
+/// anchor-carrying signature for the in-artifact comment surface): the route and
+/// command layers dispatch here when a `parent_id` is supplied.
+///
+/// Rules enforced (all as structured [`CommentError`]s → clean 4xx):
+/// - the parent must exist ([`CommentError::ParentNotFound`]),
+/// - be in the same thread ([`CommentError::ParentDifferentThread`]),
+/// - and itself be a root ([`CommentError::ReplyToReply`] — chains are linear).
+///
+/// The reply carries **no anchor** (NULL; `anchor_state` takes its `anchored`
+/// default) and **inherits the parent's `artifact_version`** (the simplest
+/// truthful value — the reply is part of the same conversation, pinned to where
+/// that conversation is anchored). If the root is currently `answered`/`applied`,
+/// creating the reply **re-opens it** (status → `open`, `resolved_at` cleared; the
+/// prior `answer_html` is kept as exchange history) in the SAME transaction, and
+/// the re-opened root is returned as `reopened_root` for the route to emit a
+/// `comment-updated`. Replies start `open`.
+///
+/// Runs under the caller's single connection lock; the reply insert and the
+/// root re-open commit atomically.
+pub fn create_reply(
+    conn: &Connection,
+    thread_id: &str,
+    parent_id: &str,
+    body: &str,
+) -> Result<CommentContext, CommentError> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(CommentError::EmptyBody);
+    }
+
+    // Resolve the owning project (also the thread-existence check → clean 404).
+    let project_id: Option<String> = conn
+        .query_row(
+            "SELECT project_id FROM threads WHERE id = ?1",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let project_id =
+        project_id.ok_or_else(|| CommentError::ThreadNotFound(thread_id.to_owned()))?;
+
+    // Validate the parent: exists, same thread, and is itself a root (linear
+    // chains). Fetch its version (inherited) and status (re-open decision) too.
+    let parent: Option<(String, Option<String>, i64, String)> = conn
+        .query_row(
+            "SELECT thread_id, parent_id, artifact_version, status
+             FROM comments WHERE id = ?1",
+            [parent_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (parent_thread, parent_parent, parent_version, parent_status) =
+        parent.ok_or_else(|| CommentError::ParentNotFound(parent_id.to_owned()))?;
+
+    if parent_thread != thread_id {
+        return Err(CommentError::ParentDifferentThread {
+            parent_id: parent_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+        });
+    }
+    if parent_parent.is_some() {
+        return Err(CommentError::ReplyToReply(parent_id.to_owned()));
+    }
+
+    let reopen = matches!(
+        CommentStatus::from_db_str(&parent_status),
+        CommentStatus::Answered | CommentStatus::Applied
+    );
+
+    let id = uuid::Uuid::new_v4().to_string();
+
+    // Reply row: null anchor, inherited version, status `open`, `parent_id` set.
+    let insert_reply = |c: &Connection| -> Result<(), CommentError> {
+        c.execute(
+            "INSERT INTO comments
+                 (id, thread_id, artifact_version, anchor, body, status, parent_id)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6)",
+            rusqlite::params![
+                id,
+                thread_id,
+                parent_version,
+                body,
+                CommentStatus::Open.as_str(),
+                parent_id,
+            ],
+        )?;
+        Ok(())
+    };
+
+    let reopened_root = if reopen {
+        let tx = conn.unchecked_transaction()?;
+        insert_reply(&tx)?;
+        // Re-open the root: back to `open`, clear `resolved_at` (so the "open ⇒
+        // resolved_at is NULL" invariant holds and the next answer re-stamps it).
+        // Deliberately bypasses the advance-only status machine — a re-open is a
+        // legitimate regression. `answer_html` is preserved as exchange history.
+        tx.execute(
+            "UPDATE comments SET status = 'open', resolved_at = NULL WHERE id = ?1",
+            [parent_id],
+        )?;
+        tx.commit()?;
+        get_comment(conn, parent_id)?
+    } else {
+        insert_reply(conn)?;
+        None
+    };
+
+    let comment = get_comment(conn, &id)?.ok_or_else(|| CommentError::NotFound(id.clone()))?;
+    Ok(CommentContext {
+        comment,
+        project_id,
+        parent_id: Some(parent_id.to_owned()),
+        reopened_root,
     })
 }
 
@@ -291,12 +468,28 @@ pub fn list_comments(
     thread_id: &str,
     status: Option<CommentStatus>,
 ) -> Result<Vec<Comment>, CommentError> {
+    Ok(list_comments_with_parent(conn, thread_id, status)?
+        .into_iter()
+        .map(|(comment, _parent)| comment)
+        .collect())
+}
+
+/// Like [`list_comments`], but pairs each comment with its `parent_id` (the root
+/// it replies to, or `None` for a root). The response layer needs `parent_id` per
+/// item to populate `CommentResponse.parent_id`; the internal flow layer
+/// (`crate::flows`) uses the plain [`list_comments`] over `Comment`, which is why
+/// `parent_id` rides alongside rather than on the shared [`Comment`] struct.
+pub fn list_comments_with_parent(
+    conn: &Connection,
+    thread_id: &str,
+    status: Option<CommentStatus>,
+) -> Result<Vec<(Comment, Option<String>)>, CommentError> {
     // Two prepared statements rather than string-concatenating a WHERE clause,
     // keeping every value bound as a parameter.
     let mut stmt = conn.prepare(
         "
         SELECT id, thread_id, artifact_version, anchor, body, status,
-               answer_html, anchor_state, created_at, resolved_at
+               answer_html, anchor_state, created_at, resolved_at, parent_id
         FROM comments
         WHERE thread_id = ?1
           AND (?2 IS NULL OR status = ?2)
@@ -305,7 +498,10 @@ pub fn list_comments(
     )?;
 
     let status_filter = status.map(|s| s.as_str());
-    let rows = stmt.query_map(rusqlite::params![thread_id, status_filter], row_to_comment)?;
+    // `row_to_comment` reads columns 0..=9; `parent_id` is the appended column 10.
+    let rows = stmt.query_map(rusqlite::params![thread_id, status_filter], |row| {
+        Ok((row_to_comment(row)?, row.get::<_, Option<String>>(10)?))
+    })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
@@ -327,7 +523,20 @@ pub fn update_comment(
 
     let current = get_comment(conn, id)?.ok_or_else(|| CommentError::NotFound(id.to_owned()))?;
 
+    // Whether this comment is a reply (its own `parent_id` is non-NULL). Fetched
+    // separately so the shared `Comment` struct stays shape-stable for the flow
+    // layer; the row is known to exist (we just read `current`).
+    let parent_id: Option<String> =
+        conn.query_row("SELECT parent_id FROM comments WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })?;
+
     if let Some(next) = status {
+        // `applied` is root-only — it tracks the artifact-apply flow. A reply
+        // advances open → answered via this same path, but never to `applied`.
+        if next == CommentStatus::Applied && parent_id.is_some() {
+            return Err(CommentError::AppliedOnReply(id.to_owned()));
+        }
         if !current.status.can_advance_to(next) {
             return Err(CommentError::IllegalTransition {
                 from: current.status.as_str(),
@@ -366,6 +575,8 @@ pub fn update_comment(
     Ok(CommentContext {
         comment,
         project_id,
+        parent_id,
+        reopened_root: None,
     })
 }
 
@@ -374,6 +585,13 @@ pub fn update_comment(
 /// `applied` comments are frozen history and never participate (see
 /// `crate::anchoring`); previously-`moved` comments do (they can heal).
 /// Oldest first for deterministic processing/event order.
+///
+/// **Replies never participate** (`parent_id IS NULL`, epic conceptify-6xi): a
+/// reply carries no anchor and is pinned to its parent's version by inheritance,
+/// so feeding it through re-attachment would only advance its `artifact_version`
+/// (as a null-anchor "direct follow-up" would) and emit a spurious
+/// `comment-updated` — behavior that would be wrong. Excluding them here keeps a
+/// reply's inherited version stable across saves.
 pub fn reattach_candidates(
     conn: &Connection,
     thread_id: &str,
@@ -387,11 +605,60 @@ pub fn reattach_candidates(
         WHERE thread_id = ?1
           AND artifact_version < ?2
           AND status IN ('open', 'answered')
+          AND parent_id IS NULL
         ORDER BY created_at ASC, rowid ASC
         ",
     )?;
     let rows = stmt.query_map(rusqlite::params![thread_id, new_version], row_to_comment)?;
     rows.collect()
+}
+
+/// Open ROOT comments (status `open`, `parent_id IS NULL`), oldest first, each
+/// with its full reply chain — the get-context exchange-history aggregation (epic
+/// conceptify-6xi). A root re-opened by a user reply reappears here so a follow-up
+/// run re-answers it with the whole conversation in hand. Replies are included
+/// regardless of their own status (the chain is history, not a work queue).
+pub fn open_roots_with_replies(
+    conn: &Connection,
+    thread_id: &str,
+) -> Result<Vec<CommentThread>, CommentError> {
+    let roots: Vec<Comment> = {
+        let mut stmt = conn.prepare(
+            "
+            SELECT id, thread_id, artifact_version, anchor, body, status,
+                   answer_html, anchor_state, created_at, resolved_at
+            FROM comments
+            WHERE thread_id = ?1
+              AND status = 'open'
+              AND parent_id IS NULL
+            ORDER BY created_at ASC, rowid ASC
+            ",
+        )?;
+        let rows = stmt.query_map([thread_id], row_to_comment)?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut out = Vec::with_capacity(roots.len());
+    for root in roots {
+        let replies = replies_for(conn, &root.id)?;
+        out.push(CommentThread { root, replies });
+    }
+    Ok(out)
+}
+
+/// The ordered reply chain (oldest first) under one root comment.
+fn replies_for(conn: &Connection, root_id: &str) -> Result<Vec<Comment>, CommentError> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT id, thread_id, artifact_version, anchor, body, status,
+               answer_html, anchor_state, created_at, resolved_at
+        FROM comments
+        WHERE parent_id = ?1
+        ORDER BY created_at ASC, rowid ASC
+        ",
+    )?;
+    let rows = stmt.query_map([root_id], row_to_comment)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 /// Persist one re-attachment verdict (`crate::anchoring`): move the comment to
@@ -514,7 +781,8 @@ mod tests {
                 anchor_state TEXT NOT NULL DEFAULT 'anchored'
                     CHECK (anchor_state IN ('anchored', 'moved')),
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                resolved_at TEXT
+                resolved_at TEXT,
+                parent_id TEXT REFERENCES comments(id) ON DELETE CASCADE
             );
             INSERT INTO projects (id, name) VALUES ('p1', 'Proj One');
             INSERT INTO threads (id, project_id, title) VALUES ('t1', 'p1', 'Thread One');
@@ -842,5 +1110,245 @@ mod tests {
         assert!(!Applied.can_advance_to(Open));
         assert!(!Applied.can_advance_to(Answered));
         assert!(Applied.can_advance_to(Applied));
+    }
+
+    // -- replies (epic conceptify-6xi) ---------------------------------------
+
+    /// Add a second thread `t2` (+ artifact v1) to the fixture DB, for the
+    /// cross-thread-parent test.
+    fn add_second_thread(conn: &Connection) {
+        conn.execute_batch(
+            "
+            INSERT INTO threads (id, project_id, title) VALUES ('t2', 'p1', 'Thread Two');
+            INSERT INTO artifacts (id, thread_id, version) VALUES ('a2', 't2', 1);
+            ",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn reply_persists_with_parent_and_null_anchor() {
+        let conn = test_conn();
+        let root = create_comment(&conn, "t1", 1, Some(&text_anchor()), "root q")
+            .unwrap()
+            .comment;
+
+        let ctx = create_reply(&conn, "t1", &root.id, "I still don't get it").unwrap();
+        assert_eq!(ctx.project_id, "p1");
+        assert_eq!(ctx.parent_id.as_deref(), Some(root.id.as_str()));
+        assert!(ctx.reopened_root.is_none(), "open root is not re-opened");
+
+        let reply = ctx.comment;
+        assert!(reply.anchor.is_none(), "replies carry no anchor");
+        assert_eq!(reply.anchor_state, AnchorState::Anchored);
+        assert_eq!(reply.status, CommentStatus::Open);
+        // Inherits the parent's artifact_version.
+        assert_eq!(reply.artifact_version, root.artifact_version);
+
+        // list_comments_with_parent surfaces the link.
+        let listed = list_comments_with_parent(&conn, "t1", None).unwrap();
+        let (_, parent) = listed
+            .iter()
+            .find(|(c, _)| c.id == reply.id)
+            .expect("reply listed");
+        assert_eq!(parent.as_deref(), Some(root.id.as_str()));
+    }
+
+    #[test]
+    fn reply_to_reply_is_rejected() {
+        let conn = test_conn();
+        let root = create_comment(&conn, "t1", 1, None, "root").unwrap().comment;
+        let reply = create_reply(&conn, "t1", &root.id, "r1").unwrap().comment;
+
+        let err = create_reply(&conn, "t1", &reply.id, "r2").unwrap_err();
+        assert!(matches!(err, CommentError::ReplyToReply(id) if id == reply.id));
+    }
+
+    #[test]
+    fn reply_rejects_unknown_parent() {
+        let conn = test_conn();
+        let err = create_reply(&conn, "t1", "ghost", "hi").unwrap_err();
+        assert!(matches!(err, CommentError::ParentNotFound(_)));
+    }
+
+    #[test]
+    fn reply_rejects_cross_thread_parent() {
+        let conn = test_conn();
+        add_second_thread(&conn);
+        let root = create_comment(&conn, "t1", 1, None, "root in t1")
+            .unwrap()
+            .comment;
+
+        // A reply in t2 that names t1's root is rejected.
+        let err = create_reply(&conn, "t2", &root.id, "wrong thread").unwrap_err();
+        assert!(matches!(
+            err,
+            CommentError::ParentDifferentThread { thread_id, .. } if thread_id == "t2"
+        ));
+    }
+
+    #[test]
+    fn reply_rejects_empty_body() {
+        let conn = test_conn();
+        let root = create_comment(&conn, "t1", 1, None, "root").unwrap().comment;
+        let err = create_reply(&conn, "t1", &root.id, "   ").unwrap_err();
+        assert!(matches!(err, CommentError::EmptyBody));
+    }
+
+    #[test]
+    fn user_reply_reopens_answered_root_and_keeps_answer() {
+        let conn = test_conn();
+        let root = create_comment(&conn, "t1", 1, Some(&text_anchor()), "root q")
+            .unwrap()
+            .comment;
+        update_comment(
+            &conn,
+            &root.id,
+            Some(CommentStatus::Answered),
+            Some("<p>the prior answer</p>"),
+            None,
+        )
+        .unwrap();
+
+        let ctx = create_reply(&conn, "t1", &root.id, "still confused").unwrap();
+        let reopened = ctx.reopened_root.expect("answered root re-opens");
+        assert_eq!(reopened.id, root.id);
+        assert_eq!(reopened.status, CommentStatus::Open);
+        // The prior answer is preserved as exchange history…
+        assert_eq!(
+            reopened.answer_html.as_deref(),
+            Some("<p>the prior answer</p>")
+        );
+        // …but resolved_at clears so the "open ⇒ resolved_at is NULL" invariant holds.
+        assert!(reopened.resolved_at.is_none());
+
+        // The reply itself is open, and the root is back in the open list.
+        assert_eq!(ctx.comment.status, CommentStatus::Open);
+        let open = list_comments(&conn, "t1", Some(CommentStatus::Open)).unwrap();
+        assert!(open.iter().any(|c| c.id == root.id), "root is open again");
+    }
+
+    #[test]
+    fn reply_reopens_applied_root() {
+        let conn = test_conn();
+        let root = create_comment(&conn, "t1", 1, None, "root").unwrap().comment;
+        update_comment(&conn, &root.id, Some(CommentStatus::Applied), None, None).unwrap();
+
+        let ctx = create_reply(&conn, "t1", &root.id, "one more thing").unwrap();
+        let reopened = ctx.reopened_root.expect("applied root re-opens");
+        assert_eq!(reopened.status, CommentStatus::Open);
+    }
+
+    #[test]
+    fn resolve_answers_a_reply_row() {
+        let conn = test_conn();
+        let root = create_comment(&conn, "t1", 1, None, "root").unwrap().comment;
+        let reply = create_reply(&conn, "t1", &root.id, "follow-up").unwrap().comment;
+
+        let ctx = update_comment(
+            &conn,
+            &reply.id,
+            Some(CommentStatus::Answered),
+            Some("<p>reply answer</p>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(ctx.parent_id.as_deref(), Some(root.id.as_str()));
+        assert_eq!(ctx.comment.status, CommentStatus::Answered);
+        assert_eq!(ctx.comment.answer_html.as_deref(), Some("<p>reply answer</p>"));
+        assert!(ctx.comment.resolved_at.is_some());
+    }
+
+    #[test]
+    fn applied_on_reply_is_rejected() {
+        let conn = test_conn();
+        let root = create_comment(&conn, "t1", 1, None, "root").unwrap().comment;
+        let reply = create_reply(&conn, "t1", &root.id, "follow-up").unwrap().comment;
+
+        let err =
+            update_comment(&conn, &reply.id, Some(CommentStatus::Applied), None, None).unwrap_err();
+        assert!(matches!(err, CommentError::AppliedOnReply(id) if id == reply.id));
+
+        // The root can still be applied (root-only status is fine on a root).
+        assert!(
+            update_comment(&conn, &root.id, Some(CommentStatus::Applied), None, None).is_ok(),
+            "applied is legal on a root"
+        );
+    }
+
+    #[test]
+    fn reattach_candidates_excludes_replies() {
+        let conn = test_conn();
+        // Root anchored to v1; a reply under it (inherits v1, null anchor).
+        let root = create_comment(&conn, "t1", 1, Some(&text_anchor()), "root q")
+            .unwrap()
+            .comment;
+        let reply = create_reply(&conn, "t1", &root.id, "follow-up").unwrap().comment;
+
+        // Re-attachment for a hypothetical v2: only the root participates.
+        let candidates = reattach_candidates(&conn, "t1", 2).unwrap();
+        let ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(&root.id.as_str()), "root participates");
+        assert!(
+            !ids.contains(&reply.id.as_str()),
+            "reply is excluded from re-attachment"
+        );
+    }
+
+    #[test]
+    fn open_roots_with_replies_nests_ordered_chains() {
+        let conn = test_conn();
+        // An open root with two replies, plus a second open root with none.
+        let root = create_comment(&conn, "t1", 1, None, "root q").unwrap().comment;
+        let r1 = create_reply(&conn, "t1", &root.id, "reply one")
+            .unwrap()
+            .comment;
+        let r2 = create_reply(&conn, "t1", &root.id, "reply two")
+            .unwrap()
+            .comment;
+        let lone = create_comment(&conn, "t1", 1, None, "lone root")
+            .unwrap()
+            .comment;
+
+        // Deterministic created_at ordering (fresh rows can share a millisecond).
+        for (id, ts) in [
+            (&root.id, "2020-01-01T00:00:00.000Z"),
+            (&r1.id, "2020-01-01T00:00:01.000Z"),
+            (&r2.id, "2020-01-01T00:00:02.000Z"),
+            (&lone.id, "2020-01-01T00:00:03.000Z"),
+        ] {
+            conn.execute(
+                "UPDATE comments SET created_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, ts],
+            )
+            .unwrap();
+        }
+
+        let threads = open_roots_with_replies(&conn, "t1").unwrap();
+        assert_eq!(threads.len(), 2, "two open roots");
+        assert_eq!(threads[0].root.id, root.id);
+        let chain: Vec<&str> = threads[0].replies.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(chain, vec![r1.id.as_str(), r2.id.as_str()], "chain ordered");
+        assert_eq!(threads[1].root.id, lone.id);
+        assert!(threads[1].replies.is_empty(), "lone root has no replies");
+    }
+
+    #[test]
+    fn open_roots_with_replies_excludes_answered_roots() {
+        let conn = test_conn();
+        let answered = create_comment(&conn, "t1", 1, None, "answered root")
+            .unwrap()
+            .comment;
+        update_comment(
+            &conn,
+            &answered.id,
+            Some(CommentStatus::Answered),
+            Some("<p>done</p>"),
+            None,
+        )
+        .unwrap();
+
+        // An answered root (no reply) is not an open question → excluded.
+        assert!(open_roots_with_replies(&conn, "t1").unwrap().is_empty());
     }
 }

@@ -10,7 +10,8 @@ use tauri::Emitter;
 
 use conceptify_types::{
     CreateThreadRequest, CreateThreadResponse, ListThreadsResponse, ThreadContextArtifact,
-    ThreadContextProject, ThreadContextResponse, ThreadContextThread, ThreadListItem,
+    ThreadContextComment, ThreadContextProject, ThreadContextResponse, ThreadContextThread,
+    ThreadListItem,
 };
 
 use crate::context::{self, ContextError};
@@ -160,12 +161,26 @@ async fn get_context<R: tauri::Runtime>(
                     version: a.version,
                     file_path: a.file_path,
                 }),
-                // Reuse the comments route's mapping so the anchor (and every
-                // other field) is served identically to GET /comments.
+                // Open ROOT comments, each with its ordered reply chain nested
+                // (epic conceptify-6xi). Reuse the comments route's mapping so the
+                // root's fields (anchor, etc.) match GET /comments exactly; a
+                // root's parent_id is null, a reply's is its root's id.
                 open_comments: ctx
-                    .open_comments
+                    .open_comment_threads
                     .into_iter()
-                    .map(super::comments_routes::to_response)
+                    .map(|ct| {
+                        let root_id = ct.root.id.clone();
+                        ThreadContextComment {
+                            comment: super::comments_routes::to_response(ct.root, None),
+                            replies: ct
+                                .replies
+                                .into_iter()
+                                .map(|r| {
+                                    super::comments_routes::to_response(r, Some(root_id.clone()))
+                                })
+                                .collect(),
+                        }
+                    })
                     .collect(),
             };
             (StatusCode::OK, Json(response)).into_response()
@@ -300,6 +315,18 @@ mod tests {
         .unwrap();
     }
 
+    /// Insert a reply row (parent_id set, null anchor) with an explicit
+    /// `created_at` so chain ordering is deterministic.
+    fn seed_reply(h: &Harness, id: &str, parent_id: &str, body: &str, created_at: &str) {
+        let conn = h.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO comments (id, thread_id, artifact_version, body, status, parent_id, created_at)
+             VALUES (?1, ?2, 1, ?3, 'open', ?4, ?5)",
+            rusqlite::params![id, h.thread_id, body, parent_id, created_at],
+        )
+        .unwrap();
+    }
+
     fn get(uri: &str, token: Option<&str>) -> Request<Body> {
         let mut builder = Request::builder().method("GET").uri(uri);
         if let Some(t) = token {
@@ -405,6 +432,59 @@ mod tests {
         // The thread + project still resolve.
         assert_eq!(ctx["thread"]["id"], h.thread_id.as_str());
         assert_eq!(ctx["project"]["id"], h.project_id.as_str());
+    }
+
+    #[tokio::test]
+    async fn context_nests_open_root_reply_chains_ordered() {
+        let h = harness("nest");
+        seed_artifact(&h, 1, "/docs/artifact.v1.html", "initial");
+
+        // An open root with two replies (ordered by created_at), an answered root
+        // (excluded — not an open question), and a bare open root (empty chain).
+        seed_comment(&h, "root-a", 1, "why?", "open", None);
+        seed_reply(&h, "reply-2", "root-a", "second", "2020-01-01T00:00:02.000Z");
+        seed_reply(&h, "reply-1", "root-a", "first", "2020-01-01T00:00:01.000Z");
+        seed_comment(&h, "root-done", 1, "answered", "answered", None);
+        // Force root ordering: root-a before root-bare.
+        {
+            let conn = h.db.lock().unwrap();
+            conn.execute(
+                "UPDATE comments SET created_at = '2020-01-01T00:00:00.000Z' WHERE id = 'root-a'",
+                [],
+            )
+            .unwrap();
+        }
+        seed_comment(&h, "root-bare", 1, "lonely", "open", None);
+
+        let res = h
+            .router
+            .clone()
+            .oneshot(get(
+                &format!("/api/v1/threads/{}/context", h.thread_id),
+                Some(TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ctx = body_json(res).await;
+
+        let open = ctx["open_comments"].as_array().unwrap();
+        assert_eq!(open.len(), 2, "only open roots are top-level");
+
+        // First root: flattened fields + its ordered reply chain nested.
+        let root_a = open.iter().find(|c| c["id"] == "root-a").unwrap();
+        assert!(root_a["parent_id"].is_null(), "root parent_id is null");
+        let replies = root_a["replies"].as_array().unwrap();
+        let ids: Vec<&str> = replies.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["reply-1", "reply-2"], "chain ordered by created_at");
+        // Each nested reply carries its parent_id and null anchor.
+        assert_eq!(replies[0]["parent_id"], "root-a");
+        assert!(replies[0]["anchor"].is_null());
+
+        // The bare open root nests an empty chain; the answered root is absent.
+        let bare = open.iter().find(|c| c["id"] == "root-bare").unwrap();
+        assert_eq!(bare["replies"].as_array().unwrap().len(), 0);
+        assert!(open.iter().all(|c| c["id"] != "root-done"));
     }
 
     #[tokio::test]

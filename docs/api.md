@@ -53,8 +53,8 @@ webview updates live instead of polling. The frontend subscribes with
 | `projects-changed` | `POST /api/v1/projects/ensure`, `PATCH /api/v1/projects/:id`, `PUT /api/v1/projects/:id/archive` | `null` (no payload) |
 | `thread-created` | `POST /api/v1/threads` | `{ project_id: string, thread_id: string }` |
 | `artifact-updated` | `POST /api/v1/threads/:thread_id/artifact` | `{ project_id: string, thread_id: string, version: number }` |
-| `comment-created` | `POST /api/v1/comments` | `{ project_id: string, thread_id: string, comment_id: string }` |
-| `comment-updated` | `PATCH /api/v1/comments/:id`; `POST /api/v1/threads/:thread_id/artifact` (one per re-attached comment) | `{ project_id: string, thread_id: string, comment_id: string, status: string }` |
+| `comment-created` | `POST /api/v1/comments` (a comment or a reply) | `{ project_id: string, thread_id: string, comment_id: string }` |
+| `comment-updated` | `PATCH /api/v1/comments/:id`; `POST /api/v1/threads/:thread_id/artifact` (one per re-attached comment); `POST /api/v1/comments` when a reply re-opens its root | `{ project_id: string, thread_id: string, comment_id: string, status: string }` |
 | `navigate` | `POST /api/v1/open` | `{ project_id: string, thread_id: string \| null }` |
 | `run-progress` | agent-run engine (`runs` module, not an HTTP route) | `{ run_id: string, thread_id: string, kind: string, detail: string }` |
 | `run-finished` | agent-run engine (`runs` module, not an HTTP route) | `{ run_id: string, thread_id: string, status: string }` |
@@ -70,7 +70,10 @@ status transitions (the M5 `resolve-comment` flow), landing `answer_html`, and
 the `anchor_state` "reference moved" flip. Besides `PATCH /comments/:id`, the
 save-artifact endpoint emits it once per comment its re-attachment pass
 changed (advanced to the new version, anchor repaired, and/or flagged
-`moved`). It generalizes what PRD §5.1 sketched
+`moved`), and `POST /comments` emits it for a **root re-opened by a user reply**
+(epic conceptify-6xi: the reply's own `comment-created` fires alongside a
+`comment-updated` carrying the root's id and `status: "open"`). It generalizes
+what PRD §5.1 sketched
 as `comment-resolved`: one event covers all comment mutations (consistent with
 `artifact-updated`), and the frontend scopes its refetch by the `project_id` /
 `thread_id` in the payload.
@@ -87,6 +90,13 @@ endpoint — they fire while a background `follow_up_runs` row is in flight.
   line's `subtype` when present, else the raw line truncated to 200 chars.
   Deliberately shallow parsing — richer rendering is a frontend concern.
   stderr lines are not forwarded (they land in the run log only).
+  **One structured exception:** for a `rate_limit_event` (which has no
+  `subtype`), `detail` carries the nested `rate_limit_info` object as compact
+  JSON (`{"status":…,"isUsingOverage":…,"resetsAt":…,…}`) instead of the raw
+  line, so the frontend can parse it and decide whether to surface it. The
+  frontend drops the purely informational `status: "allowed"` heartbeats and
+  shows only genuine limiting; the display filtering/formatting policy lives
+  there (one place), never in the core.
 - `run-finished` — exactly once per run, emitted **after** the DB row reached
   its terminal state. `status` is one of `completed` (exit 0), `failed`
   (nonzero exit / spawn failure / abnormal supervision end), `cancelled`
@@ -592,14 +602,30 @@ Response `200 OK`:
     {
       "id": "b3f1…",
       "thread_id": "7c9e6679-…",
+      "parent_id": null,
       "artifact_version": 1,
       "anchor": { "v": 1, "type": "text", "cfy_id": "sec-walkthrough", "start": 142, "end": 210, "quote": { "exact": "the token is refreshed here" } },
       "body": "why is the token refreshed here?",
       "status": "open",
-      "answer_html": null,
+      "answer_html": "<p>Because the refresh token rotates…</p>",
       "anchor_state": "anchored",
       "created_at": "2026-07-04T12:34:56.789Z",
-      "resolved_at": null
+      "resolved_at": null,
+      "replies": [
+        {
+          "id": "d7a2…",
+          "thread_id": "7c9e6679-…",
+          "parent_id": "b3f1…",
+          "artifact_version": 1,
+          "anchor": null,
+          "body": "I still don't get why it rotates every request.",
+          "status": "open",
+          "answer_html": null,
+          "anchor_state": "anchored",
+          "created_at": "2026-07-04T12:40:00.000Z",
+          "resolved_at": null
+        }
+      ]
     }
   ]
 }
@@ -608,10 +634,16 @@ Response `200 OK`:
 - `latest_artifact` is the highest artifact version on disk (`file_path` is the
   absolute path of that immutable `artifact.vN.html`), or **`null`** when the
   thread has no artifact yet (still `generating`).
-- `open_comments` lists only comments still in the `open` state, oldest first —
-  the questions the run must answer. Each is the full comment shape (identical to
-  `GET /api/v1/comments`), so its `anchor` is carried **verbatim** (the stored
-  snake_case contract — see [The anchor model](#the-anchor-model-fr-44)).
+- `open_comments` lists only **root** comments still in the `open` state, oldest
+  first — the questions the run must answer (a root re-opened by a user reply is
+  among them; see [Threaded replies](#threaded-replies-fr-46-epic-conceptify-6xi)).
+  Each entry is the full comment shape (identical to `GET /api/v1/comments`, so
+  its `anchor` is carried **verbatim** — see
+  [The anchor model](#the-anchor-model-fr-44)) **plus** a `replies` array: the
+  root's ordered reply chain (oldest first, by `created_at` then insertion) — the
+  **exchange history** (original question + its prior `answer_html` + follow-up
+  replies) a run builds its answer on. `replies` is `[]` for a root with no
+  replies; each reply carries `parent_id` = the root's id and a `null` `anchor`.
 
 Response `404 Not Found` (unknown thread id):
 
@@ -808,6 +840,9 @@ resolved them typically rewrote the very text they anchored, so re-flagging
 them "moved" would be noise; they keep their original `artifact_version`
 (and version tag in the sidebar) forever. **Null-anchor comments** (direct
 follow-ups) are version-agnostic and advance to the new version trivially.
+**Replies** (`parent_id` set, epic conceptify-6xi) never participate: they carry
+no anchor and inherit their parent's version, so they are excluded outright (they
+keep their inherited `artifact_version` across saves).
 
 **Per-comment verdict** (the measurement conventions are exactly the bridge's
 — see [Conventions](#conventions); the server measures identically):
@@ -871,11 +906,52 @@ anchor can't be re-located in a newly saved artifact version — the comment is
 flagged, never silently dropped. It is independent of the status machine, and
 it can flip back to `anchored` when a later version restores the content.
 
+### Threaded replies (FR-4.6, epic conceptify-6xi)
+
+A comment can carry a **reply**: a follow-up in the same conversation ("I still
+don't get why X"). A reply is a `comments` row whose `parent_id` names the ROOT
+comment it answers, created by `POST /api/v1/comments` with a `parent_id` (see
+below). The model is deliberately narrow:
+
+- **Linear chains, one level deep.** A reply's parent must be a **root**
+  (`parent_id IS NULL`); replying to a reply is rejected (`400`). Reply to the
+  root instead — a conversation is a flat chain under one root, ordered
+  `created_at` then insertion, not a tree.
+- **No anchor of its own.** A reply attaches to a comment, not to a region of the
+  artifact. Sending an `anchor` alongside `parent_id` is a `400`. `anchor_state`
+  stays `anchored` (a reply can never "move").
+- **Inherits the parent's `artifact_version`.** A reply is pinned to where its
+  conversation is anchored — the caller-supplied `artifact_version` is ignored for
+  replies.
+- **Re-opens its root.** Root `status` tracks the conversation state (`open` =
+  "needs agent attention"). A user reply on an `answered`/`applied` root flips the
+  **root** back to `open` (its `answer_html` is kept as history, `resolved_at`
+  clears) in the same transaction as the reply insert, and emits a
+  `comment-updated` for the root in addition to the reply's `comment-created`. A
+  reply on an already-`open` root just creates. This keeps the batch **Ask
+  follow-ups** flow (FR-4.6) and the sidebar open-comment counts working
+  unchanged — a re-opened root is a normal open question again, and its open
+  replies never inflate the count (only open **roots** are counted).
+- **Its own status.** A reply has its own `status` and advances `open` →
+  `answered` via `PATCH /api/v1/comments/:id` (the agent answers the reply row).
+  `applied` is **root-only** (it tracks the artifact-apply flow) — `applied` on a
+  reply is a `400`.
+
+Replies are **excluded from re-attachment** (they have no anchor and inherit
+their parent's version, so they never participate — see
+[Re-attachment across versions](#re-attachment-across-versions-fr-44)).
+
+Reply chains surface to agents nested under each open root in
+`GET /api/v1/threads/:id/context` (the exchange history), and `parent_id` is
+included on every comment in the list/create/update responses below.
+
 ### `POST /api/v1/comments`
 
-Authenticated. Create a comment (FR-4.1/4.2/4.3). The target thread and the
-`artifact_version` must exist (a comment always anchors to an artifact version
-that already exists). New comments start `open` / `anchored`.
+Authenticated. Create a comment (FR-4.1/4.2/4.3) — or, with `parent_id`, a
+threaded **reply** (epic conceptify-6xi; see
+[Threaded replies](#threaded-replies-fr-46-epic-conceptify-6xi)). The target
+thread and the `artifact_version` must exist (a comment always anchors to an
+artifact version that already exists). New comments start `open` / `anchored`.
 
 Request body (`anchor` is `null`/omitted for a direct follow-up):
 
@@ -895,12 +971,27 @@ Request body (`anchor` is `null`/omitted for a direct follow-up):
 }
 ```
 
-Response `200 OK` (the created comment):
+To post a **reply**, set `parent_id` (the root comment's id) and omit `anchor`.
+The reply inherits the parent's `artifact_version` (any supplied value is
+ignored):
+
+```json
+{
+  "thread_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "parent_id": "b3f1…",
+  "artifact_version": 1,
+  "body": "I still don't get why it rotates every request."
+}
+```
+
+Response `200 OK` (the created comment; `parent_id` is `null` for a root, or the
+parent's id for a reply):
 
 ```json
 {
   "id": "b3f1…",
   "thread_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "parent_id": null,
   "artifact_version": 1,
   "anchor": { "v": 1, "type": "text", "cfy_id": "sec-walkthrough", "start": 142, "end": 210, "quote": { "exact": "the token is refreshed here", "prefix": "why ", "suffix": " each time" } },
   "body": "I don't get why the token is refreshed here.",
@@ -912,24 +1003,35 @@ Response `200 OK` (the created comment):
 }
 ```
 
-Response `400 Bad Request`: empty body, or a malformed anchor (not an object,
-unsupported `v`, unknown/missing `type`, or a missing required field):
+Response `400 Bad Request`: empty body; a malformed anchor (not an object,
+unsupported `v`, unknown/missing `type`, or a missing required field); a reply
+that carries an `anchor`; a reply-to-a-reply; or a `parent_id` in a different
+thread than `thread_id`:
 
 ```json
 { "error": "invalid anchor: unsupported anchor schema version 2 (expected 1)" }
 ```
+```json
+{ "error": "cannot reply to a reply (<id> is itself a reply); reply to the root comment" }
+```
 
-Response `404 Not Found`: unknown `thread_id`, or an `artifact_version` that
-doesn't exist for the thread:
+Response `404 Not Found`: unknown `thread_id`; an `artifact_version` that
+doesn't exist for the thread; or a `parent_id` that names no comment:
 
 ```json
 { "error": "artifact version 9 not found for thread 7c9e6679-…" }
 ```
+```json
+{ "error": "parent comment not found: <id>" }
+```
 
-Side effect: emits `comment-created` (see Events above).
+Side effect: emits `comment-created` for the new comment; when a user reply
+re-opens an `answered`/`applied` root, **also** emits `comment-updated` for that
+root (`status: "open"`). See Events above.
 
-Errors: `401` if bearer token missing/wrong; `400` empty body / bad anchor;
-`404` unknown thread or version; `500` on database error.
+Errors: `401` if bearer token missing/wrong; `400` empty body / bad anchor /
+reply-rule violation; `404` unknown thread, version, or parent; `500` on database
+error.
 
 ---
 
@@ -953,6 +1055,7 @@ Response `200 OK`:
     {
       "id": "b3f1…",
       "thread_id": "7c9e6679-…",
+      "parent_id": null,
       "artifact_version": 1,
       "anchor": { "v": 1, "type": "element", "cfy_id": "fig-auth-flow.token-service", "quote": { "exact": "Token Service" } },
       "body": "why does this node retry?",
@@ -965,6 +1068,12 @@ Response `200 OK`:
   ]
 }
 ```
+
+This is a **flat** list: replies appear as their own rows, each with
+`parent_id` set to its root (roots have `parent_id: null`). The client groups
+them into chains by `parent_id` (get-context does this nesting server-side). The
+list is unfiltered by depth — a `status` filter applies to roots and replies
+alike.
 
 Errors: `401` if bearer token missing/wrong; `400` on an invalid `status`
 filter; `500` on database error.
@@ -988,11 +1097,14 @@ Request body:
 ```
 
 - `status` — target status; must be a legal advance (see the status machine).
+  This is the path an agent uses to answer a **reply** (`open → answered` on the
+  reply row); `applied` is root-only (`applied` on a reply is a `400`).
 - `answer_html` — the agent's resolution (rendered HTML/markdown fragment).
 - `anchor_state` — `anchored` | `moved` (driven by re-attachment; independent of
   the status machine).
 
-Response `200 OK`: the full updated comment (same shape as the create response).
+Response `200 OK`: the full updated comment (same shape as the create response,
+including `parent_id`).
 
 Response `409 Conflict` (illegal status regression) — structured with the
 offending `from`/`to`:
@@ -1007,8 +1119,12 @@ Response `404 Not Found` (unknown comment id):
 { "error": "comment not found: <id>" }
 ```
 
-Response `400 Bad Request`: no fields supplied, or an invalid `status` /
-`anchor_state` value.
+Response `400 Bad Request`: no fields supplied; an invalid `status` /
+`anchor_state` value; or `applied` targeted at a reply (`applied` is root-only):
+
+```json
+{ "error": "cannot apply a reply (<id>); the `applied` status is root-only" }
+```
 
 Side effect: emits `comment-updated` (see Events above).
 

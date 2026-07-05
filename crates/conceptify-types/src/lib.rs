@@ -296,6 +296,14 @@ pub struct CreateCommentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<serde_json::Value>,
     pub body: String,
+    /// When set, this is a threaded **reply** (epic conceptify-6xi): it attaches
+    /// under the ROOT comment named here, in the same thread. A reply carries no
+    /// `anchor` (rejected if present), inherits its parent's `artifact_version`
+    /// (the supplied `artifact_version` is ignored), and — when its root was
+    /// already answered/applied — re-opens that root. `null`/omitted creates a
+    /// normal root comment. Chains are linear: the parent must itself be a root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 /// A comment as returned by the API (the create response, and each list item).
@@ -303,8 +311,13 @@ pub struct CreateCommentRequest {
 pub struct CommentResponse {
     pub id: String,
     pub thread_id: String,
+    /// The ROOT comment this is a reply to (epic conceptify-6xi), or `null` for a
+    /// root comment. Chains are linear, so a reply's `parent_id` always names a
+    /// root. Replies carry no anchor and inherit their parent's `artifact_version`.
+    pub parent_id: Option<String>,
     pub artifact_version: i64,
-    /// The stored anchor JSON (see `Anchor`), or `null` for a direct follow-up.
+    /// The stored anchor JSON (see `Anchor`), or `null` for a direct follow-up or
+    /// any reply.
     pub anchor: Option<serde_json::Value>,
     pub body: String,
     /// One of `open` | `answered` | `applied`.
@@ -343,9 +356,25 @@ pub struct ThreadContextResponse {
     /// The highest artifact version on disk, or `null` when the thread has no
     /// artifact yet (still `generating`).
     pub latest_artifact: Option<ThreadContextArtifact>,
-    /// Comments still in the `open` state, oldest first — the questions the run
-    /// must answer. Each carries its `anchor` verbatim (see `Anchor`).
-    pub open_comments: Vec<CommentResponse>,
+    /// Open ROOT comments, oldest first — the questions the run must answer. Each
+    /// carries its `anchor` verbatim (see `Anchor`) and its ordered `replies`
+    /// chain nested (the exchange history a follow-up run builds on). See
+    /// `ThreadContextComment`.
+    pub open_comments: Vec<ThreadContextComment>,
+}
+
+/// One open ROOT comment plus its ordered reply chain, as nested under
+/// `open_comments` in the get-context aggregate (epic conceptify-6xi). The root's
+/// own fields are **flattened** in at the top level — so a JSON entry is exactly a
+/// `CommentResponse` with a `replies` array appended — and `replies` is the linear
+/// chain oldest-first (ordered `created_at`, then rowid). This is the exchange
+/// history (original question + its prior answer + follow-up replies) that lets a
+/// follow-up run answer build on what came before.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadContextComment {
+    #[serde(flatten)]
+    pub comment: CommentResponse,
+    pub replies: Vec<CommentResponse>,
 }
 
 /// The thread fields a run needs for prompt assembly.

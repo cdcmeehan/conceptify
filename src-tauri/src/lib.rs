@@ -380,6 +380,86 @@ mod tests {
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     }
 
+    /// Exercises threaded replies (epic conceptify-6xi) against the *real*
+    /// FK-enabled migration output: `db::init_at` runs the full chain including
+    /// migration 10 (`comments.parent_id` + self-ref FK). Proves, on the shipped
+    /// schema, that a reply persists with a null anchor and inherited version,
+    /// that a user reply re-opens an answered root, that the threads-list
+    /// open-count counts the re-opened root once (open replies don't inflate it),
+    /// and that get-context nests the reply chain — the whole stack, not the
+    /// hand-written in-memory schema the unit tests use.
+    #[test]
+    fn replies_against_real_migrations() {
+        let db_path = std::env::temp_dir().join(format!(
+            "conceptify-test-replies-mig-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let db_handle = db::init_at(&db_path).expect("test db should init and migrate");
+        let conn = db_handle.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO projects (id, name, root_path) VALUES ('p1', 'Proj', '/tmp/rmig')",
+            [],
+        )
+        .expect("insert project");
+        let thread_id = threads::create_thread(&conn, "p1", "Replies", "q")
+            .expect("create thread")
+            .id;
+        conn.execute(
+            "INSERT INTO artifacts (id, thread_id, version, file_path, created_by)
+             VALUES ('a1', ?1, 1, '/tmp/x.html', 'initial')",
+            [&thread_id],
+        )
+        .expect("insert artifact");
+
+        // A root, answered.
+        let root = comments::create_comment(&conn, &thread_id, 1, None, "why?")
+            .expect("create root")
+            .comment;
+        comments::update_comment(
+            &conn,
+            &root.id,
+            Some(comments::CommentStatus::Answered),
+            Some("<p>a</p>"),
+            None,
+        )
+        .expect("answer root");
+
+        // A user reply re-opens the root (composite + self-ref FKs live here).
+        let reply_ctx = comments::create_reply(&conn, &thread_id, &root.id, "still confused")
+            .expect("create reply");
+        assert!(reply_ctx.comment.anchor.is_none());
+        assert_eq!(reply_ctx.comment.artifact_version, 1, "inherited version");
+        assert_eq!(
+            reply_ctx.reopened_root.unwrap().status,
+            comments::CommentStatus::Open
+        );
+
+        // Open-count counts the re-opened root once, not the (open) reply.
+        let threads_list = threads::list_threads(&conn, "p1").expect("list threads");
+        assert_eq!(threads_list[0].open_comment_count, 1);
+
+        // get-context nests the reply chain under the open root.
+        let ctx = crate::context::thread_context(&conn, &thread_id).expect("context");
+        assert_eq!(ctx.open_comment_threads.len(), 1);
+        assert_eq!(ctx.open_comment_threads[0].root.id, root.id);
+        assert_eq!(ctx.open_comment_threads[0].replies.len(), 1);
+        assert_eq!(
+            ctx.open_comment_threads[0].replies[0].id,
+            reply_ctx.comment.id
+        );
+
+        drop(conn);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
     /// Exercises `threads::delete_thread`'s cascade against the *real*
     /// FK-enabled migration output (bead conceptify-0kt): `db::init_at` runs the
     /// full chain with `foreign_keys = ON`, so deleting a thread must remove its

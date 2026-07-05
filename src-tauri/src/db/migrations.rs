@@ -34,6 +34,7 @@ pub fn migrations() -> Migrations<'static> {
         // validates that the DROP/RENAME preserved referential integrity
         // before the migration's transaction commits (see the const's doc).
         M::up(FOLLOW_UP_RUNS_ASK_MODE).foreign_key_check(),
+        M::up(COMMENT_PARENT_ID),
     ])
 }
 
@@ -253,15 +254,54 @@ ALTER TABLE follow_up_runs_new RENAME TO follow_up_runs;
 CREATE INDEX idx_follow_up_runs_thread_id ON follow_up_runs(thread_id);
 ";
 
+/// Adds `comments.parent_id` — the self-referential link that turns a comment
+/// into a threaded **reply** (epic `conceptify-6xi`, bead `conceptify-6xi.1`). A
+/// reply is a `comments` row whose `parent_id` names the ROOT comment it answers.
+/// Chains are **linear** (a reply's parent is always a root; reply-to-reply is
+/// rejected in the domain layer), so `parent_id IS NULL` distinguishes roots from
+/// replies everywhere. `ON DELETE CASCADE` means a reply dies with its root — and,
+/// through the pre-existing thread cascade onto `comments`, with its thread.
+///
+/// **Plain `ALTER TABLE ... ADD COLUMN`, not a table rebuild.** SQLite permits
+/// adding a column that carries a `REFERENCES` clause *provided the column's
+/// default is NULL* — a nullable column with no `DEFAULT` clause is exactly that.
+/// (The restriction exists because SQLite cannot retroactively validate a new
+/// foreign key against pre-existing rows, so it requires the backfilled value be
+/// NULL — which for `parent_id` means "root", the correct interpretation of every
+/// comment that predates replies.) This mirrors the `COMMENT_ANCHOR_STATE`
+/// plain-ALTER above; unlike the ask-mode rebuild, no existing column, type,
+/// default, or constraint changes, so the create-copy-drop-rename dance is
+/// unnecessary. The migration runs under `foreign_keys = ON` (inside
+/// `rusqlite_migration`'s per-migration transaction) with no orphan risk: every
+/// backfilled `parent_id` is NULL.
+///
+/// `idx_comments_parent_id` backs the reply-chain reads (`WHERE parent_id = ?` for
+/// get-context exchange history) and the cascade's child lookup.
+///
+/// Appended (never folded into `COMMENTS`) per this file's append-only contract:
+/// `rusqlite_migration` tracks progress positionally by `user_version`, so an
+/// in-place edit would be silently skipped by databases already past `COMMENTS`.
+const COMMENT_PARENT_ID: &str = "
+ALTER TABLE comments ADD COLUMN parent_id TEXT NULL
+    REFERENCES comments(id) ON DELETE CASCADE;
+CREATE INDEX idx_comments_parent_id ON comments(parent_id);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::Connection;
 
     /// `user_version` after the full chain — the count of `M::up` entries in
-    /// [`migrations`]. The `follow_up_runs` ask-mode rebuild is the last one,
-    /// so `LATEST - 1` is the schema state immediately before it.
-    const LATEST: usize = 9;
+    /// [`migrations`].
+    const LATEST: usize = 10;
+
+    /// Position of the `follow_up_runs` ask-mode rebuild (the 9th migration), so
+    /// `ASK_MODE - 1` is the schema state immediately before it. Pinned
+    /// explicitly rather than derived from `LATEST` so appending later migrations
+    /// (e.g. `COMMENT_PARENT_ID` at position 10) never shifts the rebuild's
+    /// before/after boundary out from under the byte-identity test.
+    const ASK_MODE: usize = 9;
 
     /// Open an in-memory DB with the same `foreign_keys = ON` posture
     /// `db::open_and_migrate` uses in production, so the rebuild migration is
@@ -349,7 +389,7 @@ mod tests {
         let m = migrations();
 
         // Migrate to just before the ask-mode rebuild.
-        m.to_version(&mut conn, LATEST - 1).expect("to pre-rebuild");
+        m.to_version(&mut conn, ASK_MODE - 1).expect("to pre-rebuild");
         seed_thread(&conn);
 
         // Two rows with distinct pre-migration modes and hand-set timestamps
@@ -390,7 +430,7 @@ mod tests {
         let before_apply = read_run(&conn, "r-apply");
 
         // Apply the rebuild.
-        m.to_version(&mut conn, LATEST).expect("apply ask-mode rebuild");
+        m.to_version(&mut conn, ASK_MODE).expect("apply ask-mode rebuild");
 
         // Rows survive completely unchanged.
         assert_eq!(read_run(&conn, "r-answer"), before_answer);
@@ -462,5 +502,84 @@ mod tests {
             )
             .ok();
         assert_eq!(idx.as_deref(), Some("idx_follow_up_runs_thread_id"));
+    }
+
+    /// The load-bearing test for migration 10 (`COMMENT_PARENT_ID`): a comment
+    /// written under the pre-`parent_id` schema survives the plain ALTER as a
+    /// **root** (`parent_id IS NULL`), the self-referential FK + `ON DELETE
+    /// CASCADE` are live afterward (an orphan reply is rejected; deleting a root
+    /// cascade-deletes its reply), and the `idx_comments_parent_id` index exists.
+    #[test]
+    fn add_parent_id_preserves_comments_and_enables_reply_cascade() {
+        let mut conn = fresh_conn();
+        let m = migrations();
+
+        // Migrate to just before parent_id (the ask-mode state), then seed a
+        // project + thread + artifact v1 + one root comment under the OLD schema.
+        m.to_version(&mut conn, ASK_MODE).expect("to pre-parent_id");
+        seed_thread(&conn);
+        conn.execute(
+            "INSERT INTO artifacts (id, thread_id, version, file_path, created_by)
+             VALUES ('a1', 't1', 1, '/x.html', 'initial')",
+            [],
+        )
+        .expect("seed artifact v1");
+        conn.execute(
+            "INSERT INTO comments (id, thread_id, artifact_version, body, status)
+             VALUES ('root', 't1', 1, 'q', 'answered')",
+            [],
+        )
+        .expect("seed pre-migration comment");
+
+        // Apply the parent_id migration.
+        m.to_version(&mut conn, LATEST).expect("apply parent_id migration");
+
+        // The pre-existing comment survives and is a root (parent_id NULL).
+        let parent: Option<String> = conn
+            .query_row("SELECT parent_id FROM comments WHERE id = 'root'", [], |r| {
+                r.get(0)
+            })
+            .expect("row should survive");
+        assert!(parent.is_none(), "existing comment becomes a root");
+
+        // A reply referencing the root inserts; the self-ref FK rejects an orphan.
+        conn.execute(
+            "INSERT INTO comments (id, thread_id, artifact_version, body, status, parent_id)
+             VALUES ('reply', 't1', 1, 'follow-up', 'open', 'root')",
+            [],
+        )
+        .expect("reply with a valid parent inserts");
+        assert!(
+            conn.execute(
+                "INSERT INTO comments (id, thread_id, artifact_version, body, status, parent_id)
+                 VALUES ('orphan', 't1', 1, 'x', 'open', 'ghost')",
+                [],
+            )
+            .is_err(),
+            "self-referential FK must reject an unknown parent"
+        );
+
+        // Deleting the root cascades to the reply.
+        conn.execute("DELETE FROM comments WHERE id = 'root'", [])
+            .expect("delete root");
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM comments WHERE id IN ('root', 'reply')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "reply cascade-deletes with its root");
+
+        // The index the cascade / chain reads rely on is present.
+        let idx: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_comments_parent_id'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(idx.as_deref(), Some("idx_comments_parent_id"));
     }
 }

@@ -1194,7 +1194,8 @@ mod tests {
                 anchor_state TEXT NOT NULL DEFAULT 'anchored'
                     CHECK (anchor_state IN ('anchored', 'moved')),
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                resolved_at TEXT
+                resolved_at TEXT,
+                parent_id TEXT REFERENCES comments(id) ON DELETE CASCADE
             );
             INSERT INTO projects (id, name, root_path) VALUES ('p1', 'Proj', '/tmp/p1');
             INSERT INTO threads (id, project_id, title, slug, initial_question, status)

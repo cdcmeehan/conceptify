@@ -30,13 +30,15 @@ pub fn router<R: tauri::Runtime>() -> Router<ApiState<R>> {
         .route("/comments/{id}", axum::routing::patch(update_comment))
 }
 
-/// Map a domain `Comment` to its API shape. `pub(super)` so the thread-context
-/// route (`threads_routes`) can reuse the exact same mapping for the aggregate's
-/// `open_comments`.
-pub(super) fn to_response(c: Comment) -> CommentResponse {
+/// Map a domain `Comment` (+ its `parent_id`) to its API shape. `parent_id` rides
+/// alongside because it is tracked next to `Comment` (in `CommentContext` /
+/// `list_comments_with_parent`) rather than on the shared struct. `pub(super)` so
+/// the thread-context route (`threads_routes`) can reuse the exact same mapping.
+pub(super) fn to_response(c: Comment, parent_id: Option<String>) -> CommentResponse {
     CommentResponse {
         id: c.id,
         thread_id: c.thread_id,
+        parent_id,
         artifact_version: c.artifact_version,
         anchor: c.anchor,
         body: c.body,
@@ -56,24 +58,53 @@ async fn create_comment<R: tauri::Runtime>(
     let artifact_version = req.artifact_version;
     let anchor = req.anchor.clone();
     let body = req.body.clone();
+    let parent_id = req.parent_id.clone();
 
-    let result = db::with_conn_result(&state.db, move |conn| {
-        comments::create_comment(conn, &thread_id, artifact_version, anchor.as_ref(), &body)
+    // A reply attaches to a root, not to a region of the artifact — reject an
+    // anchor supplied alongside a `parent_id` up front (structured 400).
+    if parent_id.is_some() && anchor.is_some() {
+        return create_error_response(CommentError::ReplyWithAnchor);
+    }
+
+    let result = db::with_conn_result(&state.db, move |conn| match parent_id {
+        Some(parent_id) => comments::create_reply(conn, &thread_id, &parent_id, &body),
+        None => comments::create_comment(conn, &thread_id, artifact_version, anchor.as_ref(), &body),
     })
     .await;
 
     match result {
         Ok(ctx) => {
-            let response = to_response(ctx.comment);
+            let comments::CommentContext {
+                comment,
+                project_id,
+                parent_id,
+                reopened_root,
+            } = ctx;
+            let response = to_response(comment, parent_id);
             if let Err(e) = state.app_handle.emit(
                 "comment-created",
                 &json!({
-                    "project_id": ctx.project_id,
+                    "project_id": project_id,
                     "thread_id": response.thread_id,
                     "comment_id": response.id,
                 }),
             ) {
                 eprintln!("[conceptify-server] failed to emit comment-created event: {e}");
+            }
+            // A user reply on an answered/applied root flips it back to `open`;
+            // emit `comment-updated` for the root so the sidebar reflects it.
+            if let Some(root) = reopened_root {
+                if let Err(e) = state.app_handle.emit(
+                    "comment-updated",
+                    &json!({
+                        "project_id": project_id,
+                        "thread_id": root.thread_id,
+                        "comment_id": root.id,
+                        "status": root.status.as_str(),
+                    }),
+                ) {
+                    eprintln!("[conceptify-server] failed to emit comment-updated (re-open): {e}");
+                }
             }
             (StatusCode::OK, Json(response)).into_response()
         }
@@ -114,13 +145,16 @@ async fn list_comments<R: tauri::Runtime>(
 
     let thread_id = query.thread_id;
     let result = db::with_conn_result(&state.db, move |conn| {
-        comments::list_comments(conn, &thread_id, status)
+        comments::list_comments_with_parent(conn, &thread_id, status)
     })
     .await;
 
     match result {
         Ok(list) => {
-            let comments: Vec<CommentResponse> = list.into_iter().map(to_response).collect();
+            let comments: Vec<CommentResponse> = list
+                .into_iter()
+                .map(|(comment, parent_id)| to_response(comment, parent_id))
+                .collect();
             Json(ListCommentsResponse { comments }).into_response()
         }
         Err(e) => {
@@ -171,11 +205,17 @@ async fn update_comment<R: tauri::Runtime>(
 
     match result {
         Ok(ctx) => {
-            let response = to_response(ctx.comment);
+            let comments::CommentContext {
+                comment,
+                project_id,
+                parent_id,
+                ..
+            } = ctx;
+            let response = to_response(comment, parent_id);
             if let Err(e) = state.app_handle.emit(
                 "comment-updated",
                 &json!({
-                    "project_id": ctx.project_id,
+                    "project_id": project_id,
                     "thread_id": response.thread_id,
                     "comment_id": response.id,
                     "status": response.status,
@@ -199,6 +239,23 @@ fn create_error_response(err: CommentError) -> axum::response::Response {
     match err {
         CommentError::EmptyBody => bad_request("comment body must not be empty".into()),
         CommentError::InvalidAnchor(msg) => bad_request(format!("invalid anchor: {msg}")),
+        // Reply-rule violations are all client errors → 400, except an unknown
+        // parent (404, mirroring thread/version not-found).
+        CommentError::ReplyWithAnchor => bad_request("a reply must not carry an anchor".into()),
+        CommentError::ReplyToReply(id) => bad_request(format!(
+            "cannot reply to a reply ({id} is itself a reply); reply to the root comment"
+        )),
+        CommentError::ParentDifferentThread {
+            parent_id,
+            thread_id,
+        } => bad_request(format!(
+            "parent comment {parent_id} is not in thread {thread_id}"
+        )),
+        CommentError::ParentNotFound(id) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("parent comment not found: {id}") })),
+        )
+            .into_response(),
         CommentError::ThreadNotFound(id) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": format!("thread not found: {id}") })),
@@ -243,6 +300,10 @@ fn update_error_response(err: CommentError) -> axum::response::Response {
         CommentError::NoUpdateFields => {
             bad_request("no fields to update (supply status, answer_html, or anchor_state)".into())
         }
+        // `applied` is root-only; a reply advances open → answered.
+        CommentError::AppliedOnReply(id) => bad_request(format!(
+            "cannot apply a reply ({id}); the `applied` status is root-only"
+        )),
         other => {
             eprintln!("[conceptify-server] update_comment error: {other}");
             (
@@ -662,5 +723,228 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -- replies (epic conceptify-6xi) ---------------------------------------
+
+    /// Create a comment over HTTP and return its id. `parent_id`/`anchor` are
+    /// included when `Some`.
+    async fn create(
+        h: &Harness,
+        body: &str,
+        anchor: Option<serde_json::Value>,
+        parent_id: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut payload = json!({ "thread_id": h.thread_id, "artifact_version": 1, "body": body });
+        if let Some(a) = anchor {
+            payload["anchor"] = a;
+        }
+        if let Some(p) = parent_id {
+            payload["parent_id"] = json!(p);
+        }
+        let res = h
+            .router
+            .clone()
+            .oneshot(req("POST", "/api/v1/comments", Some(TOKEN), Some(payload)))
+            .await
+            .unwrap();
+        let status = res.status();
+        (status, body_json(res).await)
+    }
+
+    #[tokio::test]
+    async fn reply_persists_and_lists_with_parent_id() {
+        let h = harness("reply-ok");
+
+        let (status, root) = create(&h, "root question", Some(text_anchor()), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let root_id = root["id"].as_str().unwrap().to_owned();
+        assert!(root["parent_id"].is_null(), "root has no parent");
+
+        let (status, reply) = create(&h, "still confused", None, Some(&root_id)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reply["parent_id"], root_id.as_str());
+        assert!(reply["anchor"].is_null(), "replies carry no anchor");
+        assert_eq!(reply["status"], "open");
+        assert_eq!(reply["artifact_version"], 1, "reply inherits parent's version");
+
+        // The list surfaces parent_id per item.
+        let res = h
+            .router
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/v1/comments?thread_id={}", h.thread_id),
+                Some(TOKEN),
+                None,
+            ))
+            .await
+            .unwrap();
+        let list = body_json(res).await;
+        let items = list["comments"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let root_item = items.iter().find(|c| c["id"] == root_id.as_str()).unwrap();
+        let reply_item = items.iter().find(|c| c["parent_id"] == root_id.as_str());
+        assert!(root_item["parent_id"].is_null());
+        assert!(reply_item.is_some(), "reply lists with its parent_id");
+
+        // Two creates, and NO updated event (the root was open — no re-open).
+        assert_eq!(h.created_events.lock().unwrap().len(), 2);
+        assert_eq!(h.updated_events.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn reply_with_anchor_and_reply_to_reply_are_400() {
+        let h = harness("reply-bad");
+        let (_, root) = create(&h, "root", None, None).await;
+        let root_id = root["id"].as_str().unwrap().to_owned();
+
+        // A reply carrying an anchor → 400.
+        let (status, err) = create(&h, "bad", Some(text_anchor()), Some(&root_id)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(err["error"].as_str().unwrap().contains("anchor"));
+
+        // A reply-to-reply → 400.
+        let (_, reply) = create(&h, "r1", None, Some(&root_id)).await;
+        let reply_id = reply["id"].as_str().unwrap().to_owned();
+        let (status, err) = create(&h, "r2", None, Some(&reply_id)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(err["error"].as_str().unwrap().contains("reply to a reply"));
+
+        // An unknown parent → 404.
+        let (status, _) = create(&h, "orphan", None, Some("ghost")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reply_cross_thread_parent_is_400() {
+        let h = harness("reply-xthread");
+        // A second thread (+ artifact v1) in the same project.
+        let other_thread = {
+            let conn = h.db.lock().unwrap();
+            let tid = crate::threads::create_thread(&conn, &h.project_id, "Other", "q")
+                .unwrap()
+                .id;
+            conn.execute(
+                "INSERT INTO artifacts (id, thread_id, version, file_path, created_by)
+                 VALUES (?1, ?2, 1, '/tmp/y.html', 'initial')",
+                rusqlite::params![format!("art2-{tid}"), tid],
+            )
+            .unwrap();
+            tid
+        };
+        // Root lives in h.thread_id; the reply claims to be in `other_thread`.
+        let (_, root) = create(&h, "root in thread 1", None, None).await;
+        let root_id = root["id"].as_str().unwrap().to_owned();
+
+        let payload = json!({
+            "thread_id": other_thread,
+            "artifact_version": 1,
+            "parent_id": root_id,
+            "body": "wrong thread"
+        });
+        let res = h
+            .router
+            .clone()
+            .oneshot(req("POST", "/api/v1/comments", Some(TOKEN), Some(payload)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(body_json(res).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("not in thread"));
+    }
+
+    #[tokio::test]
+    async fn user_reply_reopens_answered_root_firing_both_events() {
+        let h = harness("reopen");
+        let (_, root) = create(&h, "root question", None, None).await;
+        let root_id = root["id"].as_str().unwrap().to_owned();
+
+        // Answer the root.
+        let res = h
+            .router
+            .clone()
+            .oneshot(req(
+                "PATCH",
+                &format!("/api/v1/comments/{root_id}"),
+                Some(TOKEN),
+                Some(json!({ "status": "answered", "answer_html": "<p>a</p>" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Reply → the root re-opens.
+        let (status, reply) = create(&h, "I still don't get it", None, Some(&root_id)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reply["status"], "open");
+
+        // The re-open PATCH-equivalent event fired (comment-updated for the root,
+        // status open) IN ADDITION to the answer's own comment-updated.
+        let updated = h.updated_events.lock().unwrap().clone();
+        let reopen = updated.iter().find_map(|p| {
+            let v: serde_json::Value = serde_json::from_str(p).unwrap();
+            (v["comment_id"] == root_id.as_str() && v["status"] == "open").then_some(v)
+        });
+        assert!(reopen.is_some(), "a comment-updated re-open event fires: {updated:?}");
+
+        // Two creates (root + reply).
+        assert_eq!(h.created_events.lock().unwrap().len(), 2);
+
+        // The root is open again (batch/open-count semantics intact): its DB status.
+        let status: String = {
+            let conn = h.db.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM comments WHERE id = ?1",
+                [&root_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(status, "open");
+    }
+
+    #[tokio::test]
+    async fn applied_on_reply_is_rejected_400() {
+        let h = harness("applied-reply");
+        let (_, root) = create(&h, "root", None, None).await;
+        let root_id = root["id"].as_str().unwrap().to_owned();
+        let (_, reply) = create(&h, "follow-up", None, Some(&root_id)).await;
+        let reply_id = reply["id"].as_str().unwrap().to_owned();
+
+        // applied is root-only → 400.
+        let res = h
+            .router
+            .clone()
+            .oneshot(req(
+                "PATCH",
+                &format!("/api/v1/comments/{reply_id}"),
+                Some(TOKEN),
+                Some(json!({ "status": "applied" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(body_json(res).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("root-only"));
+
+        // The reply CAN be answered via the same path.
+        let res = h
+            .router
+            .clone()
+            .oneshot(req(
+                "PATCH",
+                &format!("/api/v1/comments/{reply_id}"),
+                Some(TOKEN),
+                Some(json!({ "status": "answered", "answer_html": "<p>ok</p>" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["status"], "answered");
     }
 }

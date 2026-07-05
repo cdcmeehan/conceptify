@@ -387,6 +387,9 @@ pub fn open_artifact_in_browser(
 pub struct CommentDto {
     pub id: String,
     pub thread_id: String,
+    /// The root this comment replies to (epic conceptify-6xi), or `null` for a
+    /// root. Carried separately from `comments::Comment` (see its `From` impl).
+    pub parent_id: Option<String>,
     pub artifact_version: i64,
     pub anchor: Option<serde_json::Value>,
     pub body: String,
@@ -397,11 +400,12 @@ pub struct CommentDto {
     pub resolved_at: Option<String>,
 }
 
-impl From<comments::Comment> for CommentDto {
-    fn from(c: comments::Comment) -> Self {
+impl From<(comments::Comment, Option<String>)> for CommentDto {
+    fn from((c, parent_id): (comments::Comment, Option<String>)) -> Self {
         CommentDto {
             id: c.id,
             thread_id: c.thread_id,
+            parent_id,
             artifact_version: c.artifact_version,
             anchor: c.anchor,
             body: c.body,
@@ -428,6 +432,11 @@ impl From<comments::Comment> for CommentDto {
 /// Unlike the axum route this does **not** emit a `comment-created` event: the
 /// shell that invoked it updates its own store directly (the established command
 /// convention — events are for cross-surface CLI/API mutations).
+///
+/// `parent_id` (epic conceptify-6xi) makes this a threaded reply: it dispatches to
+/// `comments::create_reply` (no anchor, inherits the parent's version, re-opens an
+/// answered/applied root). The frontend reply composer (bead conceptify-6xi.3) is
+/// the caller; this is the plumbing.
 #[tauri::command(rename_all = "snake_case")]
 pub fn create_comment(
     db: State<DbHandle>,
@@ -435,11 +444,15 @@ pub fn create_comment(
     artifact_version: i64,
     anchor: Option<serde_json::Value>,
     body: String,
+    parent_id: Option<String>,
 ) -> Result<CommentDto, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    let ctx = comments::create_comment(&conn, &thread_id, artifact_version, anchor.as_ref(), &body)
-        .map_err(|e| e.to_string())?;
-    Ok(ctx.comment.into())
+    let ctx = match parent_id.as_deref() {
+        Some(pid) => comments::create_reply(&conn, &thread_id, pid, &body),
+        None => comments::create_comment(&conn, &thread_id, artifact_version, anchor.as_ref(), &body),
+    }
+    .map_err(|e| e.to_string())?;
+    Ok((ctx.comment, ctx.parent_id).into())
 }
 
 /// List a thread's comments, oldest first, optionally filtered to one status
@@ -460,7 +473,8 @@ pub fn list_comments(
         ),
     };
     let conn = db.lock().map_err(|e| e.to_string())?;
-    let rows = comments::list_comments(&conn, &thread_id, status).map_err(|e| e.to_string())?;
+    let rows =
+        comments::list_comments_with_parent(&conn, &thread_id, status).map_err(|e| e.to_string())?;
     Ok(rows.into_iter().map(CommentDto::from).collect())
 }
 
@@ -782,6 +796,68 @@ mod tests {
         .expect("list_comments with filter should succeed over IPC");
         let listed: serde_json::Value = response.deserialize().unwrap();
         assert_eq!(listed.as_array().map(Vec::len), Some(0));
+
+        cleanup(&db_path, &root);
+    }
+
+    /// Drives `create_comment` with a `parent_id` through Tauri's real IPC
+    /// dispatch (epic conceptify-6xi): proves the snake_case `parent_id` arg maps,
+    /// that it dispatches to the reply path (null anchor, inherited version), and
+    /// that the returned DTO carries `parent_id`. The plumbing 6xi.3's composer uses.
+    #[test]
+    fn create_reply_command_over_ipc_carries_parent_id() {
+        let (db_handle, root, thread_id, db_path) = artifact_fixture("reply");
+        {
+            let conn = db_handle.lock().unwrap();
+            crate::artifacts::save_artifact(&conn, &root, &thread_id, artifact_html(1).as_bytes())
+                .expect("save artifact v1");
+        }
+
+        let app = tauri::test::mock_builder()
+            .manage(db_handle)
+            .invoke_handler(tauri::generate_handler![create_comment])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("failed to build mock webview");
+
+        let invoke = |body: serde_json::Value| {
+            tauri::test::get_ipc_response(
+                &webview,
+                tauri::webview::InvokeRequest {
+                    cmd: "create_comment".into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: "tauri://localhost".parse().unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(body),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.to_string(),
+                },
+            )
+        };
+
+        // A root comment (no parent).
+        let root_val: serde_json::Value = invoke(serde_json::json!({
+            "thread_id": thread_id, "artifact_version": 1, "body": "root q"
+        }))
+        .expect("create root over IPC")
+        .deserialize()
+        .unwrap();
+        assert!(root_val["parent_id"].is_null());
+        let root_id = root_val["id"].as_str().unwrap().to_owned();
+
+        // A reply (parent_id set; anchor omitted).
+        let reply: serde_json::Value = invoke(serde_json::json!({
+            "thread_id": thread_id, "artifact_version": 1, "body": "reply", "parent_id": root_id
+        }))
+        .expect("create reply over IPC")
+        .deserialize()
+        .unwrap();
+        assert_eq!(reply["parent_id"], serde_json::json!(root_id));
+        assert!(reply["anchor"].is_null(), "reply carries no anchor");
+        assert_eq!(reply["status"], serde_json::json!("open"));
+        assert_eq!(reply["artifact_version"], serde_json::json!(1));
 
         cleanup(&db_path, &root);
     }
