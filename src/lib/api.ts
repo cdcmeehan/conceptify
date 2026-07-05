@@ -113,9 +113,15 @@ export type CommentStatus = "open" | "answered" | "applied";
 export interface Comment {
   id: string;
   thread_id: string;
+  /** The root this comment replies to (epic conceptify-6xi threaded replies), or
+   *  `null` for a root comment. Chains are linear (reply-to-reply is rejected
+   *  server-side), so a non-null `parent_id` always names a root. The sidebar
+   *  groups the flat list by this (see `groupComments` in the store). */
+  parent_id: string | null;
   artifact_version: number;
-  /** FR-4.4 anchor; `null` for a direct follow-up (94m.5). Opaque here — the
-   *  bridge (`src/lib/bridge.ts`) owns the typed anchor shapes. */
+  /** FR-4.4 anchor; `null` for a direct follow-up (94m.5) or any reply (replies
+   *  inherit the root's version and carry no anchor). Opaque here — the bridge
+   *  (`src/lib/bridge.ts`) owns the typed anchor shapes. */
   anchor: Record<string, unknown> | null;
   body: string;
   status: CommentStatus;
@@ -132,18 +138,26 @@ export interface Comment {
  * exist (a comment always anchors to a saved version). Resolves to the created
  * comment (status `open`, `anchored`), whose id/anchor drive the immediate
  * in-artifact highlight.
+ *
+ * Pass `parentId` (a root comment's id) to create a threaded reply instead
+ * (epic conceptify-6xi): the backend dispatches to the reply path, which ignores
+ * `anchor` (replies carry none), inherits the root's `artifact_version`, and
+ * re-opens an answered/applied root. The reply composer (bead conceptify-6xi.3)
+ * is the caller.
  */
 export function createComment(input: {
   threadId: string;
   artifactVersion: number;
   anchor: Record<string, unknown> | null;
   body: string;
+  parentId?: string | null;
 }): Promise<Comment> {
   return invoke<Comment>("create_comment", {
     thread_id: input.threadId,
     artifact_version: input.artifactVersion,
     anchor: input.anchor,
     body: input.body,
+    parent_id: input.parentId ?? null,
   });
 }
 

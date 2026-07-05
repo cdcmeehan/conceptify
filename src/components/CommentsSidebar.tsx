@@ -11,6 +11,16 @@
 // the agent's answer rendered from `answer_html`. Rows are filterable by status
 // (all / open / answered / applied).
 //
+// Threaded replies (epic conceptify-6xi): the flat comment list is grouped into
+// root chains (`groupComments`, in the store) — each root renders with its reply
+// chain nested one level beneath (indented, quieter meta). Filters and counts
+// operate on ROOT status only; a reply always renders with its root regardless
+// of the active filter. A "Reply" affordance on a root that has begun an
+// exchange (has an answer or replies) opens an inline composer whose submit
+// creates a reply and re-opens the root server-side (its status chip flips back
+// to `open`). Anchor interactions and the cross-version tag stay root-only —
+// replies carry no anchor and inherit the root's version.
+//
 // Clicking a row scrolls the artifact to its anchor and pulses it, via the
 // bridge (`scrollToAnchor` with the comment id as `key`, so the pulse lands on
 // the live highlight decoration when there is one). Scroll/highlight is only
@@ -31,13 +41,13 @@
 // ArtifactCommentLayer (94m.3/94m.4), not here — this sidebar only reads the
 // store and issues scroll commands.
 
-import { useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import * as api from "../lib/api";
 import type { Comment, CommentStatus, RunLogTail } from "../lib/api";
 import type { Anchor } from "../lib/bridge";
 import { artifactBridge } from "../lib/bridge";
-import type { ActiveRunState, RunFailureState } from "../store/appStore";
-import { appStore } from "../store/appStore";
+import type { ActiveRunState, CommentChain, RunFailureState } from "../store/appStore";
+import { appStore, groupComments } from "../store/appStore";
 import { CommentComposer } from "./CommentComposer";
 
 type Filter = "all" | CommentStatus;
@@ -117,15 +127,23 @@ export function CommentsSidebar({
   const [actionError, setActionError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
+  // Threaded view (epic conceptify-6xi): group the flat list into root chains.
+  // Filters + counts operate on ROOT status only — a reply always renders with
+  // its root regardless of the active filter, and never counts on its own (a
+  // reply's re-open flips its root back to `open`, so root status already
+  // reflects the conversation state).
+  const chains = groupComments(comments);
+
   const counts: Record<Filter, number> = {
-    all: comments.length,
+    all: chains.length,
     open: 0,
     answered: 0,
     applied: 0,
   };
-  for (const c of comments) counts[c.status] += 1;
+  for (const ch of chains) counts[ch.root.status] += 1;
 
-  const visible = filter === "all" ? comments : comments.filter((c) => c.status === filter);
+  const visibleChains =
+    filter === "all" ? chains : chains.filter((ch) => ch.root.status === filter);
 
   // FR-4.6/4.7 preconditions: an artifact exists and no run is active (FR-4.9).
   const runIdle = activeRun == null && !starting;
@@ -271,17 +289,18 @@ export function CommentsSidebar({
             No comments yet. Select text or a diagram element in the artifact, or ask a
             follow-up below.
           </p>
-        ) : visible.length === 0 ? (
+        ) : visibleChains.length === 0 ? (
           <p class="px-2 py-3 text-xs text-neutral-400">No {filter} comments.</p>
         ) : (
           <ul class="flex flex-col gap-2">
-            {visible.map((c) => (
-              <CommentRow
-                key={c.id}
-                comment={c}
+            {visibleChains.map((chain) => (
+              <ChainItem
+                key={chain.root.id}
+                chain={chain}
+                threadId={threadId}
                 viewerVersion={viewerVersion}
                 onScroll={scrollTo}
-                canApply={canApply && c.status === "answered"}
+                canApply={canApply}
                 onApply={(comment) => onApplyComments([comment.id])}
               />
             ))}
@@ -294,36 +313,66 @@ export function CommentsSidebar({
   );
 }
 
-function CommentRow({
-  comment,
+/**
+ * One conversation chain (epic conceptify-6xi): a root comment with its ordered
+ * reply chain nested one level beneath. The root renders exactly as before
+ * (anchor excerpt, body, answer, status chip, moved/cross-version badges, Apply
+ * affordance); replies render quietly indented under it (smaller meta, body,
+ * per-reply status, answer when answered).
+ *
+ * Anchor interactions (scroll/highlight) and the cross-version tag are
+ * root-only — replies carry no anchor and inherit the root's version, so
+ * there's nothing to scroll to or tag.
+ *
+ * A "Reply" affordance appears once the exchange has started (the root has an
+ * answer or already has replies) — a fresh, unanswered root doesn't need one
+ * (the agent hasn't spoken yet). Replying re-opens an answered/applied root
+ * server-side; the flipped status chip lands live via `addComment`'s refetch.
+ */
+function ChainItem({
+  chain,
+  threadId,
   viewerVersion,
   onScroll,
   canApply,
   onApply,
 }: {
-  comment: Comment;
+  chain: CommentChain;
+  threadId: string;
   viewerVersion: number | null;
   onScroll: (c: Comment) => void;
-  /** Whether the FR-4.7 per-comment "Apply to artifact" action is available
-   *  (answered comment, artifact present, no active run). */
+  /** Whether FR-4.7 "Apply to artifact" is available at all (artifact present,
+   *  no active run). Gated per-root against `answered` status inside. */
   canApply: boolean;
   onApply: (c: Comment) => void;
 }) {
-  const excerpt = anchorExcerpt(comment.anchor);
-  const status = STATUS_META[comment.status] ?? STATUS_META.open;
-  const crossVersion = viewerVersion != null && comment.artifact_version !== viewerVersion;
-  const moved = comment.anchor_state === "moved";
-  const scrollable = comment.anchor != null && !crossVersion && viewerVersion != null;
+  const { root, replies } = chain;
+  const [replyOpen, setReplyOpen] = useState(false);
+
+  const excerpt = anchorExcerpt(root.anchor);
+  const status = STATUS_META[root.status] ?? STATUS_META.open;
+  const crossVersion = viewerVersion != null && root.artifact_version !== viewerVersion;
+  const moved = root.anchor_state === "moved";
+  const scrollable = root.anchor != null && !crossVersion && viewerVersion != null;
+
+  const canApplyRoot = canApply && root.status === "answered";
+  // Reply shows once the exchange has started: the root has an answer, or it
+  // already carries replies. A fresh unanswered root gets no Reply affordance.
+  const hasAnswer = root.answer_html != null && root.answer_html.length > 0;
+  const showReply = hasAnswer || replies.length > 0;
+  // The action slot renders only when it has a visible button. When the reply
+  // composer is open the Reply button is hidden (the composer replaces it).
+  const showActions = canApplyRoot || (showReply && !replyOpen);
 
   const clickProps = scrollable
     ? {
         role: "button" as const,
         tabIndex: 0,
-        onClick: () => onScroll(comment),
+        onClick: () => onScroll(root),
         onKeyDown: (e: KeyboardEvent) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            onScroll(comment);
+            onScroll(root);
           }
         },
         title: "Scroll to this in the artifact",
@@ -362,7 +411,7 @@ function CommentRow({
         </div>
 
         <p class="whitespace-pre-wrap break-words text-sm text-neutral-800 dark:text-neutral-100">
-          {comment.body}
+          {root.body}
         </p>
 
         {(crossVersion || moved) && (
@@ -372,7 +421,7 @@ function CommentRow({
                 class="rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400"
                 title="This comment is anchored to a different artifact version"
               >
-                v{comment.artifact_version}
+                v{root.artifact_version}
               </span>
             )}
             {moved && (
@@ -387,23 +436,182 @@ function CommentRow({
         )}
       </div>
 
-      {comment.answer_html != null && comment.answer_html.length > 0 && (
-        <AnswerHtml html={comment.answer_html} />
+      {hasAnswer && <AnswerHtml html={root.answer_html as string} />}
+
+      {replies.length > 0 && (
+        <ul class="flex flex-col">
+          {replies.map((reply) => (
+            <ReplyRow key={reply.id} reply={reply} />
+          ))}
+        </ul>
       )}
 
-      {canApply && (
-        <div class="border-t border-neutral-100 px-2.5 py-1.5 dark:border-neutral-800">
-          <button
-            type="button"
-            onClick={() => onApply(comment)}
-            title="Have the agent incorporate this clarification into the artifact (saves a new version)"
-            class="rounded-md border border-violet-300 bg-violet-600/10 px-2 py-1 text-[11px] font-medium text-violet-700 transition-colors hover:bg-violet-600/20 dark:border-violet-500/40 dark:bg-violet-500/15 dark:text-violet-300"
-          >
-            Apply to artifact
-          </button>
+      {/* Per-root action slot (epic conceptify-6xi). Apply + Reply live here;
+          bead 6xi.4's per-root "Ask now" button lands in this same row. */}
+      {showActions && (
+        <div class="flex flex-wrap items-center gap-1.5 border-t border-neutral-100 px-2.5 py-1.5 dark:border-neutral-800">
+          {canApplyRoot && (
+            <button
+              type="button"
+              onClick={() => onApply(root)}
+              title="Have the agent incorporate this clarification into the artifact (saves a new version)"
+              class="rounded-md border border-violet-300 bg-violet-600/10 px-2 py-1 text-[11px] font-medium text-violet-700 transition-colors hover:bg-violet-600/20 dark:border-violet-500/40 dark:bg-violet-500/15 dark:text-violet-300"
+            >
+              Apply to artifact
+            </button>
+          )}
+          {showReply && !replyOpen && (
+            <button
+              type="button"
+              onClick={() => setReplyOpen(true)}
+              title="Ask a follow-up in this thread (re-opens the comment for the agent)"
+              class="rounded-md border border-neutral-200 px-2 py-1 text-[11px] font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:border-neutral-700 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+            >
+              Reply
+            </button>
+          )}
         </div>
       )}
+
+      {replyOpen && (
+        <ReplyComposer
+          threadId={threadId}
+          root={root}
+          onDone={() => setReplyOpen(false)}
+        />
+      )}
     </li>
+  );
+}
+
+/**
+ * One reply in a chain (epic conceptify-6xi): quietly indented beneath the root
+ * with a left rule to signal nesting, smaller meta than the root, the reply
+ * body, its own status chip (`open`/`answered` — `applied` is root-only), and
+ * the agent's `answer_html` once answered.
+ */
+function ReplyRow({ reply }: { reply: Comment }) {
+  const status = STATUS_META[reply.status] ?? STATUS_META.open;
+  const answered = reply.answer_html != null && reply.answer_html.length > 0;
+
+  return (
+    <li class="ml-2.5 border-l border-neutral-200 dark:border-neutral-800">
+      <div class="px-2.5 py-1.5">
+        <div class="mb-0.5 flex items-center justify-between gap-2">
+          <span class="text-[10px] font-medium uppercase tracking-wide text-neutral-400">
+            Reply
+          </span>
+          <span
+            class={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${status.chip}`}
+          >
+            {status.label}
+          </span>
+        </div>
+        <p class="whitespace-pre-wrap break-words text-xs text-neutral-700 dark:text-neutral-200">
+          {reply.body}
+        </p>
+      </div>
+      {answered && <AnswerHtml html={reply.answer_html as string} />}
+    </li>
+  );
+}
+
+/**
+ * Inline reply composer (epic conceptify-6xi): a quiet textarea beneath a chain.
+ * Same conventions as {@link CommentComposer} — Cmd/Ctrl+Enter submits, empty
+ * input rejected — plus Escape to cancel (the composer is transient here, unlike
+ * the always-mounted bottom composer). Submitting creates a reply
+ * (`parent_id = root.id`, no anchor, the root's version) and reuses
+ * `appStore.addComment`, whose refetch reconciles both the new reply and the
+ * root's re-open (its status chip flips back to `open`).
+ */
+function ReplyComposer({
+  threadId,
+  root,
+  onDone,
+}: {
+  threadId: string;
+  root: Comment;
+  onDone: () => void;
+}) {
+  const [body, setBody] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, []);
+
+  function submit() {
+    if (saving) return;
+    const trimmed = body.trim();
+    if (trimmed.length === 0) return;
+
+    setSaving(true);
+    setError(null);
+    api
+      .createComment({
+        threadId,
+        artifactVersion: root.artifact_version,
+        anchor: null,
+        body: trimmed,
+        parentId: root.id,
+      })
+      .then((comment) => {
+        // Same path as the popover/bottom composer: append + reconcile. The
+        // refetch also picks up the root's server-side re-open (status → open).
+        appStore.addComment(comment);
+        onDone();
+      })
+      .catch((e) => {
+        setError(String(e));
+        setSaving(false);
+      });
+  }
+
+  return (
+    <div class="border-t border-neutral-100 bg-neutral-50 px-2.5 py-2 dark:border-neutral-800 dark:bg-neutral-900/60">
+      <textarea
+        ref={textareaRef}
+        value={body}
+        rows={2}
+        disabled={saving}
+        placeholder="Reply with a follow-up…"
+        onInput={(e) => setBody((e.target as HTMLTextAreaElement).value)}
+        onKeyDown={(e) => {
+          // Cmd/Ctrl+Enter submits (matches the composer/popover); Escape cancels.
+          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+            e.preventDefault();
+            submit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            onDone();
+          }
+        }}
+        class="w-full resize-none rounded border border-neutral-300 bg-white px-2 py-1.5 text-xs text-neutral-900 outline-none focus:border-blue-400 disabled:cursor-not-allowed disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+      />
+      {error != null && (
+        <p class="mt-1 text-[11px] text-rose-600 dark:text-rose-400">{error}</p>
+      )}
+      <div class="mt-1.5 flex items-center justify-end gap-1.5">
+        <button
+          type="button"
+          onClick={onDone}
+          class="rounded px-2 py-0.5 text-[11px] text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={submit}
+          disabled={saving || body.trim().length === 0}
+          class="rounded bg-blue-600 px-2.5 py-0.5 text-[11px] font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {saving ? "Replying…" : "Reply"}
+        </button>
+      </div>
+    </div>
   );
 }
 

@@ -26,6 +26,68 @@ import type { ArtifactVersion, Comment, Project, RunMode, Thread } from "../lib/
 export type ViewerVersion = number | "latest";
 
 /**
+ * A root comment with its ordered reply chain (epic conceptify-6xi threaded
+ * replies). The comments slice stays flat internally (the single source of
+ * truth for highlights + list); this is the *derived* view the sidebar renders
+ * one item per — see {@link groupComments}.
+ */
+export interface CommentChain {
+  root: Comment;
+  replies: Comment[];
+}
+
+/**
+ * Group a flat comment list (as `list_comments` returns and the store holds)
+ * into root chains for threaded rendering (bead conceptify-6xi.3).
+ *
+ * Roots (`parent_id == null`) keep their incoming order — the API returns
+ * oldest-first, which is the order the sidebar wants. Each root's replies nest
+ * beneath it, ordered by `created_at` then `id` as a stable tiebreak (the API
+ * already returns oldest-first, so this only disambiguates same-timestamp
+ * rows; it is not a re-sort of anything the server ordered differently).
+ *
+ * Chains are linear server-side (reply-to-reply is rejected), so every non-null
+ * `parent_id` names a root that is present in the same list. Defensive: a reply
+ * whose parent is somehow absent is appended as its own single-row chain at the
+ * end rather than dropped, so nothing silently disappears.
+ */
+export function groupComments(comments: Comment[]): CommentChain[] {
+  const chains: CommentChain[] = [];
+  const byRootId = new Map<string, CommentChain>();
+
+  // First pass: roots, preserving the incoming (oldest-first) order.
+  for (const c of comments) {
+    if (c.parent_id == null) {
+      const chain: CommentChain = { root: c, replies: [] };
+      chains.push(chain);
+      byRootId.set(c.id, chain);
+    }
+  }
+
+  // Second pass: attach replies to their root (or collect orphans).
+  const orphans: Comment[] = [];
+  for (const c of comments) {
+    if (c.parent_id == null) continue;
+    const chain = byRootId.get(c.parent_id);
+    if (chain != null) chain.replies.push(c);
+    else orphans.push(c);
+  }
+
+  // Stable order within each chain: created_at, then id.
+  for (const chain of chains) {
+    chain.replies.sort((a, b) => {
+      if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+  }
+
+  // Defensive orphan handling: render flat at the end as their own chains.
+  for (const orphan of orphans) chains.push({ root: orphan, replies: [] });
+
+  return chains;
+}
+
+/**
  * A follow-up run the sidebar is tracking (FR-4.8). `targetIds` is the set of
  * comments the run was started for — per-comment progress is *derived* from
  * the store's comment statuses against this set as `comment-updated` events
