@@ -151,6 +151,12 @@ pub struct CommentContext {
     pub parent_id: Option<String>,
     /// A root re-opened as a side effect of creating this reply, if any.
     pub reopened_root: Option<Comment>,
+    /// A root flipped back to `answered` as a side effect of answering the
+    /// LATEST reply in its chain (epic conceptify-6xi: root status reflects the
+    /// latest exchange state — once the newest message has its answer, the
+    /// conversation no longer needs agent attention). The update route emits an
+    /// extra `comment-updated` for it. Always `None` otherwise.
+    pub answered_root: Option<Comment>,
 }
 
 /// An open ROOT comment plus its ordered reply chain — the unit the get-context
@@ -329,6 +335,7 @@ pub fn create_comment(
         project_id,
         parent_id: None,
         reopened_root: None,
+        answered_root: None,
     })
 }
 
@@ -456,6 +463,7 @@ pub fn create_reply(
         project_id,
         parent_id: Some(parent_id.to_owned()),
         reopened_root,
+        answered_root: None,
     })
 }
 
@@ -555,9 +563,42 @@ pub fn update_comment(
     let new_answer = answer_html.or(current.answer_html.as_deref());
     let new_anchor_state = anchor_state.unwrap_or(current.anchor_state);
 
+    // Root status reflects the latest exchange state (epic conceptify-6xi):
+    // when this update answers a REPLY that is the LATEST message in its chain,
+    // the conversation that re-opened the root is dealt with, so the (open)
+    // root flips back to `answered` in the same transaction. Its `answer_html`
+    // is untouched (exchange history); `resolved_at` re-stamps via the same
+    // first-resolution CASE (the re-open cleared it). An earlier reply being
+    // answered does NOT flip the root — a newer open message still owes an
+    // answer. Without this, a fully-answered chain would read `open` forever:
+    // stale Ask-now affordances, inflated open counts, and the next batch run
+    // re-targeting the root and overwriting its original answer.
+    let flip_root: Option<String> = match (&parent_id, status) {
+        (Some(root_id), Some(CommentStatus::Answered)) => {
+            let latest_reply: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM comments WHERE parent_id = ?1
+                     ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    [root_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let root_status: String = conn.query_row(
+                "SELECT status FROM comments WHERE id = ?1",
+                [root_id],
+                |row| row.get(0),
+            )?;
+            (latest_reply.as_deref() == Some(id) && root_status == "open")
+                .then(|| root_id.clone())
+        }
+        _ => None,
+    };
+
     // `resolved_at` is stamped in SQL (so the DB clock owns the timestamp) the
-    // first time the comment is resolved, and left stable thereafter.
-    conn.execute(
+    // first time the comment is resolved, and left stable thereafter. The
+    // target update and any root flip commit atomically.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "UPDATE comments
          SET status = ?2,
              answer_html = ?3,
@@ -575,6 +616,25 @@ pub fn update_comment(
             new_anchor_state.as_str(),
         ],
     )?;
+    if let Some(root_id) = &flip_root {
+        tx.execute(
+            "UPDATE comments
+             SET status = 'answered',
+                 resolved_at = CASE
+                     WHEN resolved_at IS NULL
+                         THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     ELSE resolved_at
+                 END
+             WHERE id = ?1",
+            [root_id],
+        )?;
+    }
+    tx.commit()?;
+
+    let answered_root = match &flip_root {
+        Some(root_id) => get_comment(conn, root_id)?,
+        None => None,
+    };
 
     let comment = get_comment(conn, id)?.ok_or_else(|| CommentError::NotFound(id.to_owned()))?;
     let project_id = find_project_for_thread(conn, &comment.thread_id)?;
@@ -583,6 +643,7 @@ pub fn update_comment(
         project_id,
         parent_id,
         reopened_root: None,
+        answered_root,
     })
 }
 
@@ -1263,6 +1324,103 @@ mod tests {
         assert_eq!(ctx.comment.status, CommentStatus::Answered);
         assert_eq!(ctx.comment.answer_html.as_deref(), Some("<p>reply answer</p>"));
         assert!(ctx.comment.resolved_at.is_some());
+
+        // Answering the chain's only (hence latest) reply flips the open root
+        // to `answered` too — root status reflects the latest exchange state.
+        let flipped = ctx.answered_root.expect("root flips answered");
+        assert_eq!(flipped.id, root.id);
+        assert_eq!(flipped.status, CommentStatus::Answered);
+        assert!(flipped.answer_html.is_none(), "root answer untouched");
+        assert!(flipped.resolved_at.is_some(), "root resolved_at stamped");
+    }
+
+    /// The full conversational loop (epic conceptify-6xi): answered root →
+    /// user reply re-opens it → answering that (latest) reply flips the root
+    /// back to `answered`, preserving the root's original answer and
+    /// re-stamping its `resolved_at` (cleared by the re-open).
+    #[test]
+    fn answering_latest_reply_flips_reopened_root_back_to_answered() {
+        let conn = test_conn();
+        let root = create_comment(&conn, "t1", 1, None, "root q").unwrap().comment;
+        update_comment(
+            &conn,
+            &root.id,
+            Some(CommentStatus::Answered),
+            Some("<p>first answer</p>"),
+            None,
+        )
+        .unwrap();
+
+        let reply = create_reply(&conn, "t1", &root.id, "still unclear").unwrap();
+        assert_eq!(
+            reply.reopened_root.as_ref().map(|r| r.status),
+            Some(CommentStatus::Open),
+            "reply re-opens the answered root"
+        );
+
+        let ctx = update_comment(
+            &conn,
+            &reply.comment.id,
+            Some(CommentStatus::Answered),
+            Some("<p>reply answer</p>"),
+            None,
+        )
+        .unwrap();
+        let flipped = ctx.answered_root.expect("re-opened root flips back");
+        assert_eq!(flipped.status, CommentStatus::Answered);
+        assert_eq!(
+            flipped.answer_html.as_deref(),
+            Some("<p>first answer</p>"),
+            "root's original answer preserved as exchange history"
+        );
+        assert!(flipped.resolved_at.is_some(), "resolved_at re-stamped");
+    }
+
+    /// Answering an EARLIER reply while a newer one is still open must NOT
+    /// flip the root — the newest message still owes an answer.
+    #[test]
+    fn answering_non_latest_reply_leaves_root_open() {
+        let conn = test_conn();
+        let root = create_comment(&conn, "t1", 1, None, "root q").unwrap().comment;
+        let r1 = create_reply(&conn, "t1", &root.id, "reply one").unwrap().comment;
+        let r2 = create_reply(&conn, "t1", &root.id, "reply two").unwrap().comment;
+        // Deterministic ordering (fresh rows can share a millisecond).
+        for (id, ts) in [
+            (&r1.id, "2020-01-01T00:00:01.000Z"),
+            (&r2.id, "2020-01-01T00:00:02.000Z"),
+        ] {
+            conn.execute(
+                "UPDATE comments SET created_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, ts],
+            )
+            .unwrap();
+        }
+
+        let ctx = update_comment(
+            &conn,
+            &r1.id,
+            Some(CommentStatus::Answered),
+            Some("<p>a1</p>"),
+            None,
+        )
+        .unwrap();
+        assert!(ctx.answered_root.is_none(), "earlier reply does not flip");
+        let root_now = get_comment(&conn, &root.id).unwrap().unwrap();
+        assert_eq!(root_now.status, CommentStatus::Open, "root stays open");
+
+        // Answering the LATEST reply then does flip it.
+        let ctx = update_comment(
+            &conn,
+            &r2.id,
+            Some(CommentStatus::Answered),
+            Some("<p>a2</p>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.answered_root.map(|r| r.status),
+            Some(CommentStatus::Answered)
+        );
     }
 
     #[test]

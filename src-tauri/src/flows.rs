@@ -2071,11 +2071,17 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
 
         // The CLI stub is a no-op, so simulate the resolve the agent's
         // `resolve-comment --id <reply>` performs: the reply advances to
-        // `answered` while the root is untouched (root-only status changes only
-        // come from apply / re-open, never from answering a reply).
+        // `answered`, and — because it is the chain's latest message — the
+        // re-opened root flips back to `answered` in the same transaction
+        // (root status reflects the latest exchange state), its original
+        // answer preserved.
         h.set_comment_status(&reply, CommentStatus::Answered);
         assert_eq!(h.comment_status(&reply), "answered");
-        assert_eq!(h.comment_status(&root), "open", "the resolve left the root untouched");
+        assert_eq!(
+            h.comment_status(&root),
+            "answered",
+            "answering the latest reply flips the re-opened root back to answered"
+        );
 
         // Answer mode never touches thread status and emits no thread-updated.
         assert_eq!(h.thread_status(), "ready");
@@ -2161,12 +2167,19 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         // A second root gets a reply (which re-opens it) that is then answered:
         // the answered REPLY must never be an apply target — `resolve-comment
         // --applied` on a reply now 400s (epic conceptify-6xi heads-up #2).
+        // Answering the chain's latest reply flips root B back to `answered`
+        // (root status = latest exchange state), making the ROOT a valid
+        // apply-all target again — the reply row itself never is.
         let root_b = h.add_comment("root B");
         h.set_comment_status(&root_b, CommentStatus::Answered);
         let reply_b = h.add_reply(&root_b, "reply on B"); // re-opens B → open
-        h.set_comment_status(&reply_b, CommentStatus::Answered);
         assert_eq!(h.comment_status(&root_b), "open", "reply re-opened root B");
+        h.set_comment_status(&reply_b, CommentStatus::Answered);
+        assert_eq!(h.comment_status(&root_b), "answered", "root B flipped back");
         assert_eq!(h.comment_status(&reply_b), "answered");
+
+        // A third root left open is never an apply-all target.
+        let root_c = h.add_comment("root C (open)");
 
         // An explicit reply id is rejected outright (applying a reply is invalid).
         let err = apply_to_artifact(&h.handle, &h.thread_id, vec![reply_b.clone()])
@@ -2174,19 +2187,20 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
             .unwrap_err();
         assert!(matches!(err, FlowError::TargetIsReply(_)), "{err:?}");
 
-        // Default (empty ids) targets ONLY the answered root, never the answered
-        // reply and never the re-opened (now open) root B.
+        // Default (empty ids) targets the answered ROOTS (including the chain
+        // root flipped back by its answered reply), never the answered reply
+        // and never the still-open root C.
         h.install_fake_agent("#!/bin/sh\nexit 0\n");
         let started = apply_to_artifact(&h.handle, &h.thread_id, vec![])
             .await
             .unwrap();
         assert_eq!(
             started.target_comment_ids,
-            vec![root_a.clone()],
-            "only the answered root is applied"
+            vec![root_a.clone(), root_b.clone()],
+            "answered roots (chain root included) are applied"
         );
         assert!(!started.target_comment_ids.contains(&reply_b));
-        assert!(!started.target_comment_ids.contains(&root_b));
+        assert!(!started.target_comment_ids.contains(&root_c));
 
         let run_id = started.run_id.clone();
         assert!(wait_until(|| h.run_row(&run_id).0 == "completed", 15_000).await);

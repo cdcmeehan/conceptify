@@ -72,7 +72,12 @@ save-artifact endpoint emits it once per comment its re-attachment pass
 changed (advanced to the new version, anchor repaired, and/or flagged
 `moved`), and `POST /comments` emits it for a **root re-opened by a user reply**
 (epic conceptify-6xi: the reply's own `comment-created` fires alongside a
-`comment-updated` carrying the root's id and `status: "open"`). It generalizes
+`comment-updated` carrying the root's id and `status: "open"`). Symmetrically,
+a `PATCH` that answers the **latest reply** of a chain also flips its re-opened
+root back to `answered` in the same transaction (root status reflects the
+latest exchange state; the root's own `answer_html` is untouched) and emits a
+second `comment-updated` carrying the root's id and `status: "answered"`.
+Answering an earlier (superseded) reply does not flip the root. It generalizes
 what PRD §5.1 sketched
 as `comment-resolved`: one event covers all comment mutations (consistent with
 `artifact-updated`), and the frontend scopes its refetch by the `project_id` /

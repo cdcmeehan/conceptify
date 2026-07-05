@@ -79,6 +79,7 @@ async fn create_comment<R: tauri::Runtime>(
                 project_id,
                 parent_id,
                 reopened_root,
+                ..
             } = ctx;
             let response = to_response(comment, parent_id);
             if let Err(e) = state.app_handle.emit(
@@ -209,6 +210,7 @@ async fn update_comment<R: tauri::Runtime>(
                 comment,
                 project_id,
                 parent_id,
+                answered_root,
                 ..
             } = ctx;
             let response = to_response(comment, parent_id);
@@ -222,6 +224,24 @@ async fn update_comment<R: tauri::Runtime>(
                 }),
             ) {
                 eprintln!("[conceptify-server] failed to emit comment-updated event: {e}");
+            }
+            // Answering the LATEST reply in a chain flips its (re-opened) root
+            // back to `answered` (epic conceptify-6xi: root status = latest
+            // exchange state); tell the webview about the root too.
+            if let Some(root) = answered_root {
+                if let Err(e) = state.app_handle.emit(
+                    "comment-updated",
+                    &json!({
+                        "project_id": project_id,
+                        "thread_id": root.thread_id,
+                        "comment_id": root.id,
+                        "status": root.status.as_str(),
+                    }),
+                ) {
+                    eprintln!(
+                        "[conceptify-server] failed to emit comment-updated (root answered): {e}"
+                    );
+                }
             }
             (StatusCode::OK, Json(response)).into_response()
         }
@@ -904,6 +924,71 @@ mod tests {
             .unwrap()
         };
         assert_eq!(status, "open");
+    }
+
+    /// Completing the loop (epic conceptify-6xi): answering the LATEST reply
+    /// over PATCH flips its re-opened root back to `answered` and emits a
+    /// second `comment-updated` for the root alongside the reply's own.
+    #[tokio::test]
+    async fn answering_latest_reply_flips_root_and_fires_both_events() {
+        let h = harness("reply-flip");
+        let (_, root) = create(&h, "root question", None, None).await;
+        let root_id = root["id"].as_str().unwrap().to_owned();
+
+        // Answer the root, then reply (re-opens it).
+        let res = h
+            .router
+            .clone()
+            .oneshot(req(
+                "PATCH",
+                &format!("/api/v1/comments/{root_id}"),
+                Some(TOKEN),
+                Some(json!({ "status": "answered", "answer_html": "<p>a1</p>" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let (_, reply) = create(&h, "still unclear", None, Some(&root_id)).await;
+        let reply_id = reply["id"].as_str().unwrap().to_owned();
+        h.updated_events.lock().unwrap().clear();
+
+        // Answer the reply row.
+        let res = h
+            .router
+            .clone()
+            .oneshot(req(
+                "PATCH",
+                &format!("/api/v1/comments/{reply_id}"),
+                Some(TOKEN),
+                Some(json!({ "status": "answered", "answer_html": "<p>a2</p>" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Both events fired: reply answered + root flipped answered.
+        let updated = h.updated_events.lock().unwrap().clone();
+        let has = |cid: &str| {
+            updated.iter().any(|p| {
+                let v: serde_json::Value = serde_json::from_str(p).unwrap();
+                v["comment_id"] == cid && v["status"] == "answered"
+            })
+        };
+        assert!(has(&reply_id), "reply comment-updated fires: {updated:?}");
+        assert!(has(&root_id), "root flip comment-updated fires: {updated:?}");
+
+        // DB: root answered again, original answer preserved.
+        let (status, answer): (String, Option<String>) = {
+            let conn = h.db.lock().unwrap();
+            conn.query_row(
+                "SELECT status, answer_html FROM comments WHERE id = ?1",
+                [&root_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(status, "answered");
+        assert_eq!(answer.as_deref(), Some("<p>a1</p>"));
     }
 
     #[tokio::test]
