@@ -34,7 +34,7 @@
 //!       "command": "claude",
 //!       "args": ["-p", "{prompt}", "--model", "{model}",
 //!                "--permission-mode", "acceptEdits", "--output-format", "stream-json",
-//!                "--strict-mcp-config",
+//!                "--verbose", "--strict-mcp-config",
 //!                "--allowedTools", "Bash", "Edit", "Write",
 //!                "--disallowedTools", /* web + mutating-git + project-root writes,
 //!                                        see default_adapters() */ "..."],
@@ -185,6 +185,11 @@ fn default_adapters() -> BTreeMap<String, Adapter> {
                 "acceptEdits".to_owned(),
                 "--output-format".to_owned(),
                 "stream-json".to_owned(),
+                // The claude CLI requires --verbose whenever --print is
+                // combined with --output-format=stream-json; without it the
+                // process exits 1 immediately and every headless run fails
+                // (found live in the M5 checkpoint, bead conceptify-b12.9).
+                "--verbose".to_owned(),
                 "--strict-mcp-config".to_owned(),
                 "--allowedTools".to_owned(),
                 "Bash".to_owned(),
@@ -737,8 +742,8 @@ mod tests {
         assert_eq!(inv.program, "claude");
         assert_eq!(inv.args[0], "-p");
         assert_eq!(inv.args[1], evil);
-        // The default template has 29 args; nothing was injected/split.
-        assert_eq!(inv.args.len(), 29);
+        // The default template has 30 args; nothing was injected/split.
+        assert_eq!(inv.args.len(), 30);
         // The model/permission structure is intact and untouched by the prompt.
         assert_eq!(inv.args[2], "--model");
         assert_eq!(inv.args[3], "claude-haiku-4-5");
@@ -767,6 +772,7 @@ mod tests {
                 "acceptEdits",
                 "--output-format",
                 "stream-json",
+                "--verbose",
                 "--strict-mcp-config",
                 "--allowedTools",
                 "Bash",
