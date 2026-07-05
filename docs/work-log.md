@@ -75,7 +75,35 @@ default run timeout 900→1800 s; test artifact-dir leak structurally fixed.
 stays open), 217 workspace tests, fresh bundle in /Applications, release CLI
 on PATH, skill installed. No git remote configured — history is local.
 
+## 2026-07-05 — M7 conversational interrogation + fixes + polish
+
+**Compact-ask fix (`conceptify-pri`).** A trivial syntax question ran 8.5 min
+through the full authoring pipeline. Fixed: sizing step in the skill
+(compact/standard/deep, bias-to-compact), proportional self-review (4-frame
+loop only for diagram-bearing artifacts), rate-limit noise filtered from the
+progress feed + elapsed clock, and Read/Glob/Grep added to the headless
+allowedTools (they were denied — pure permission friction, ~35 wasted turns).
+Re-verified live: same-class question now lands in ~3 min with 0 warnings.
+
+**M7 — threaded replies + Ask now (epic `conceptify-6xi`).** Replies backend
+(`parent_id` migration #10, linear chains, user reply re-opens its root,
+nested chains in get-context), exchange-history transcripts in answer prompts
+(answer the latest unanswered message, build don't repeat), roots-only
+targeting for batch/apply, threaded sidebar with reply composer, per-root
+"Ask now" with inline run state + FR-4.9 disable rules, skill etiquette
+update. Live checkpoint passed all scenarios with real agents (Ask now 30s,
+chained contextual answer 40s, mixed batch 82s, apply → v3 with chain frozen
++ re-anchoring, cancel/failure paths); one defect found + fixed live
+(answering the latest reply re-answers the root).
+
+**UI/UX polish pass (`conceptify-vxc`).** Shell adopted the artifact design
+system's tokens (warm paper/charcoal, terracotta accent, re-keyed to
+data-theme), status color families, shared control primitives, serif display
+moments, empty states + skeletons, focus-visible rings, Escape handlers,
+AA-verified contrast in both themes, reduced-motion guards.
+
 ## Next up
 
-M7 epic `conceptify-6xi` — conversational interrogation (threaded replies +
-per-comment "Ask now"). Parked ideas: `docs/future-improvements.md`.
+Parked ideas: `docs/future-improvements.md` (⌘K + FTS search, model picker
+at ask time, version diffing, streaming answers). Phase-2 backlog:
+`conceptify-qmy`.
