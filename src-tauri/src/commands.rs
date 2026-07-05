@@ -1203,3 +1203,33 @@ pub fn get_latest_run(
         status: r.status,
     }))
 }
+
+// ---------------------------------------------------------------------------
+// Ask now: single-comment answer run (epic conceptify-6xi, bead 6xi.2).
+// ---------------------------------------------------------------------------
+
+/// Start an "Ask now" answer run for ONE root comment (epic conceptify-6xi):
+/// the same sidebar-only answer-mode run as [`ask_follow_ups`], but fired for a
+/// single root without gathering the whole batch. The prompt carries that
+/// root's full exchange history (root + prior answer + replies in order) and
+/// directs the agent at the LATEST unanswered message — the reply row when the
+/// root was re-opened by a reply, the root itself for a fresh comment. Returns
+/// the same [`RunStartedDto`] shape as `ask_follow_ups`, with
+/// `target_comment_ids` the single root id (the actual resolve may land on a
+/// reply row). One run per thread (FR-4.9): a start while any run is active
+/// fails with a clear error.
+///
+/// Errors (user-facing strings): no artifact; comment not found on this thread;
+/// the target is a reply (reply to its root instead); the target root is not
+/// open; run already active (FR-4.9); missing agent/CLI.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn ask_single_comment(
+    app: tauri::AppHandle,
+    thread_id: String,
+    root_comment_id: String,
+) -> Result<RunStartedDto, String> {
+    crate::flows::ask_single_comment(&app, &thread_id, &root_comment_id)
+        .await
+        .map(RunStartedDto::from)
+        .map_err(|e| e.to_string())
+}

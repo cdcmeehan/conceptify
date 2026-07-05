@@ -6,11 +6,16 @@
 //! prepares the child environment, starts runs, and owns the thread-status
 //! side effects of the run lifecycle. Two flows:
 //!
-//! - **[`ask_follow_ups`]** (FR-4.6, mode `answer`): gathers ALL open comments
-//!   and spawns one run whose contract is to answer each comment individually
-//!   via `conceptify resolve-comment`. The artifact is never modified.
-//!   Answers land in the sidebar live through the `comment-updated` events
-//!   the PATCH route already emits — no flow-side bookkeeping needed.
+//! - **[`ask_follow_ups`]** (FR-4.6, mode `answer`): gathers every open ROOT
+//!   comment and spawns one run whose contract is to answer each exchange
+//!   individually via `conceptify resolve-comment`. Each root's reply chain
+//!   rides along as exchange history in the prompt; the artifact is never
+//!   modified. Answers land in the sidebar live through the `comment-updated`
+//!   events the PATCH route already emits — no flow-side bookkeeping needed.
+//! - **[`ask_single_comment`]** (epic conceptify-6xi "Ask now", mode `answer`):
+//!   the same answer-mode run for exactly ONE open root, fired without gathering
+//!   the batch. Shares the prompt assembly, guard, child-env, and no-watcher
+//!   policy of `ask_follow_ups`.
 //! - **[`apply_to_artifact`]** (FR-4.7, mode `apply`): targets specific
 //!   comments (or every `answered` one) and spawns a run whose contract is to
 //!   edit a working copy of the artifact, mark each target comment `applied`,
@@ -71,7 +76,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::comments::{Comment, CommentStatus};
+use crate::comments::{Comment, CommentStatus, CommentThread};
 use crate::context::{self, ContextError};
 use crate::db::{self, DbHandle};
 use crate::runs::{self, RunError, RunMode, RunRegistry, RunStatus, StartRun};
@@ -153,6 +158,12 @@ pub enum FlowError {
     #[error("comment not found on this thread: {0}")]
     CommentNotFound(String),
 
+    #[error("comment {0} is a reply; this action targets a root comment (reply to the root instead)")]
+    TargetIsReply(String),
+
+    #[error("comment {0} is not open")]
+    CommentNotOpen(String),
+
     #[error("comment {0} is already applied")]
     AlreadyApplied(String),
 
@@ -185,20 +196,27 @@ pub enum FlowError {
 // Flows
 // ---------------------------------------------------------------------------
 
-/// Everything a flow needs from one DB snapshot.
-struct LoadedFlow {
+/// Everything a flow needs from one DB snapshot. `targets` is the flow-specific
+/// payload: the answer flows carry exchange threads (`Vec<CommentThread>` for the
+/// batch, a single `CommentThread` for Ask now), the apply flow carries the flat
+/// root comments it edits (`Vec<Comment>`).
+struct LoadedFlow<T> {
     project_id: String,
     project_root: String,
     title: String,
     question: String,
     artifact_path: String,
     artifact_version: i64,
-    targets: Vec<Comment>,
+    targets: T,
 }
 
-/// Start an FR-4.6 **answer** run: one headless agent for ALL open comments.
+/// Start an FR-4.6 **answer** run: one headless agent for every open exchange.
 ///
-/// Guards: the thread must have a saved artifact and ≥ 1 open comment; the
+/// Targets are the open ROOT comments only (epic conceptify-6xi): each root's
+/// reply chain rides along as its exchange history in the prompt, not as a
+/// separate target. A root re-opened by a user reply is naturally included.
+///
+/// Guards: the thread must have a saved artifact and ≥ 1 open root; the
 /// engine's FR-4.9 reservation rejects a second run on the same thread
 /// (surfaced as [`RunError::AlreadyRunning`]). Thread status is untouched —
 /// answers are sidebar-only, and failures are the run UI's to surface
@@ -210,32 +228,37 @@ pub async fn ask_follow_ups<R: Runtime>(
     let db = app_handle.state::<DbHandle>().inner().clone();
 
     let tid = thread_id.to_owned();
-    let loaded = db::with_conn_result(&db, move |conn| -> Result<LoadedFlow, FlowError> {
-        let ctx = context::thread_context(conn, &tid)?;
-        let latest = ctx.latest_artifact.ok_or(FlowError::NoArtifact)?;
-        if ctx.open_comments.is_empty() {
-            return Err(FlowError::NoOpenComments);
-        }
-        Ok(LoadedFlow {
-            project_id: ctx.project.id,
-            project_root: ctx.project.root_path,
-            title: ctx.thread.title,
-            question: ctx.thread.initial_question,
-            artifact_path: latest.file_path,
-            artifact_version: latest.version,
-            targets: ctx.open_comments,
+    let loaded =
+        db::with_conn_result(&db, move |conn| -> Result<LoadedFlow<Vec<CommentThread>>, FlowError> {
+            let ctx = context::thread_context(conn, &tid)?;
+            let latest = ctx.latest_artifact.ok_or(FlowError::NoArtifact)?;
+            // Batch targets = open ROOTS only. `open_comment_threads` already
+            // filters to `status='open' AND parent_id IS NULL`; the flat
+            // `open_comments` now also carries open replies, so it must NOT be
+            // used for targeting (epic conceptify-6xi heads-up #1).
+            if ctx.open_comment_threads.is_empty() {
+                return Err(FlowError::NoOpenComments);
+            }
+            Ok(LoadedFlow {
+                project_id: ctx.project.id,
+                project_root: ctx.project.root_path,
+                title: ctx.thread.title,
+                question: ctx.thread.initial_question,
+                artifact_path: latest.file_path,
+                artifact_version: latest.version,
+                targets: ctx.open_comment_threads,
+            })
         })
-    })
-    .await?;
+        .await?;
 
-    let prompt = build_answer_prompt(&PromptContext {
+    let prompt = build_answer_prompt(&AnswerPromptContext {
         thread_id,
         title: &loaded.title,
         question: &loaded.question,
         project_root: &loaded.project_root,
         artifact_path: &loaded.artifact_path,
         artifact_version: loaded.artifact_version,
-        comments: &loaded.targets,
+        exchanges: &loaded.targets,
     });
     let env = child_env().await?;
 
@@ -258,7 +281,107 @@ pub async fn ask_follow_ups<R: Runtime>(
         run_id: started.run_id,
         thread_id: started.thread_id,
         mode: RunMode::Answer,
-        target_comment_ids: loaded.targets.into_iter().map(|c| c.id).collect(),
+        target_comment_ids: loaded.targets.into_iter().map(|t| t.root.id).collect(),
+    })
+}
+
+/// Start an "Ask now" **answer** run (epic conceptify-6xi) for exactly ONE root
+/// comment: the same answer-mode run as [`ask_follow_ups`], but with a single
+/// exchange, fired without gathering the whole batch.
+///
+/// Validation (structured errors, all surfaced as user-facing strings by the
+/// command wrapper): the target must exist on this thread
+/// ([`FlowError::CommentNotFound`]), be a ROOT rather than a reply
+/// ([`FlowError::TargetIsReply`] — reply to the root instead), and be `open`
+/// ([`FlowError::CommentNotOpen`]). A root re-opened by a reply is `open`, so
+/// Ask now on it re-answers with the whole conversation in hand; the prompt's
+/// per-exchange resolve line points the agent at the reply's id when the latest
+/// unanswered message is a reply.
+///
+/// Guards/side effects match the batch flow exactly: the FR-4.9 one-run-per-
+/// thread reservation rejects a concurrent run, thread status is untouched, and
+/// there is no completion watcher (per-comment effects arrive via
+/// `comment-updated`). `target_comment_ids` is the single root id (for the
+/// FR-4.8 run block); the actual resolve may land on a reply row.
+pub async fn ask_single_comment<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    thread_id: &str,
+    root_comment_id: &str,
+) -> Result<FlowStarted, FlowError> {
+    let db = app_handle.state::<DbHandle>().inner().clone();
+
+    let tid = thread_id.to_owned();
+    let target_id = root_comment_id.to_owned();
+    let loaded =
+        db::with_conn_result(&db, move |conn| -> Result<LoadedFlow<CommentThread>, FlowError> {
+            let ctx = context::thread_context(conn, &tid)?;
+            let latest = ctx.latest_artifact.ok_or(FlowError::NoArtifact)?;
+
+            // Validate with precise errors: `list_comments_with_parent` gives
+            // both the target's status and whether it is a reply (its own
+            // `parent_id`), without needing to widen the shared `Comment` shape.
+            let all = crate::comments::list_comments_with_parent(conn, &tid, None)
+                .map_err(|e| FlowError::Context(ContextError::Comments(e)))?;
+            let (comment, parent_id) = all
+                .iter()
+                .find(|(c, _)| c.id == target_id)
+                .ok_or_else(|| FlowError::CommentNotFound(target_id.clone()))?;
+            if parent_id.is_some() {
+                return Err(FlowError::TargetIsReply(target_id.clone()));
+            }
+            if comment.status != CommentStatus::Open {
+                return Err(FlowError::CommentNotOpen(target_id.clone()));
+            }
+
+            // A validated open root is present in `open_comment_threads` (same
+            // `status='open' AND parent_id IS NULL` predicate); take its
+            // exchange (root + ordered replies) for the single-exchange prompt.
+            let exchange = ctx
+                .open_comment_threads
+                .into_iter()
+                .find(|t| t.root.id == target_id)
+                .ok_or_else(|| FlowError::CommentNotFound(target_id.clone()))?;
+
+            Ok(LoadedFlow {
+                project_id: ctx.project.id,
+                project_root: ctx.project.root_path,
+                title: ctx.thread.title,
+                question: ctx.thread.initial_question,
+                artifact_path: latest.file_path,
+                artifact_version: latest.version,
+                targets: exchange,
+            })
+        })
+        .await?;
+
+    let prompt = build_answer_prompt(&AnswerPromptContext {
+        thread_id,
+        title: &loaded.title,
+        question: &loaded.question,
+        project_root: &loaded.project_root,
+        artifact_path: &loaded.artifact_path,
+        artifact_version: loaded.artifact_version,
+        exchanges: std::slice::from_ref(&loaded.targets),
+    });
+    let env = child_env().await?;
+
+    let started = runs::start_run(
+        app_handle,
+        StartRun {
+            thread_id: thread_id.to_owned(),
+            mode: RunMode::Answer,
+            prompt,
+            env,
+        },
+    )
+    .await?;
+    // No completion watcher (same rationale as `ask_follow_ups`).
+
+    Ok(FlowStarted {
+        run_id: started.run_id,
+        thread_id: started.thread_id,
+        mode: RunMode::Answer,
+        target_comment_ids: vec![loaded.targets.root.id],
     })
 }
 
@@ -279,28 +402,35 @@ pub async fn apply_to_artifact<R: Runtime>(
     let db = app_handle.state::<DbHandle>().inner().clone();
 
     let tid = thread_id.to_owned();
-    let loaded = db::with_conn_result(&db, move |conn| -> Result<LoadedFlow, FlowError> {
+    let loaded = db::with_conn_result(&db, move |conn| -> Result<LoadedFlow<Vec<Comment>>, FlowError> {
         let ctx = context::thread_context(conn, &tid)?;
         let latest = ctx.latest_artifact.ok_or(FlowError::NoArtifact)?;
-        let all = crate::comments::list_comments(conn, &tid, None)
+        // `list_comments_with_parent` pairs each comment with its `parent_id` so
+        // apply can target ROOTS only: `resolve-comment --applied` on a reply now
+        // 400s (`applied` is root-only), and an answered reply must never be
+        // picked up here (epic conceptify-6xi heads-up #2).
+        let all = crate::comments::list_comments_with_parent(conn, &tid, None)
             .map_err(|e| FlowError::Context(ContextError::Comments(e)))?;
 
         let targets: Vec<Comment> = if comment_ids.is_empty() {
             all.into_iter()
-                .filter(|c| c.status == CommentStatus::Answered)
+                .filter(|(c, parent)| c.status == CommentStatus::Answered && parent.is_none())
+                .map(|(c, _)| c)
                 .collect()
         } else {
             let mut picked = Vec::with_capacity(comment_ids.len());
             for id in &comment_ids {
-                let comment = all
+                let (comment, parent_id) = all
                     .iter()
-                    .find(|c| &c.id == id)
-                    .cloned()
+                    .find(|(c, _)| &c.id == id)
                     .ok_or_else(|| FlowError::CommentNotFound(id.clone()))?;
+                if parent_id.is_some() {
+                    return Err(FlowError::TargetIsReply(id.clone()));
+                }
                 if comment.status == CommentStatus::Applied {
                     return Err(FlowError::AlreadyApplied(id.clone()));
                 }
-                picked.push(comment);
+                picked.push(comment.clone());
             }
             picked
         };
@@ -837,9 +967,11 @@ fn prepend_path(dir: &str, existing: Option<&str>) -> String {
 // Prompt assembly (pure)
 // ---------------------------------------------------------------------------
 
-/// Inputs to the prompt builders — everything run-specific the headless agent
-/// sees, per PRD §5.5 (thread question, artifact path, open comments with
-/// anchors) plus identity/invariant framing.
+/// Inputs to the **apply** prompt ([`build_apply_prompt`]) — everything
+/// run-specific the headless agent sees, per PRD §5.5 (thread question, artifact
+/// path, the flat root comments to apply with their anchors) plus
+/// identity/invariant framing. The answer prompt uses [`AnswerPromptContext`],
+/// which carries exchange threads rather than a flat comment list.
 pub(crate) struct PromptContext<'a> {
     pub thread_id: &'a str,
     pub title: &'a str,
@@ -848,6 +980,99 @@ pub(crate) struct PromptContext<'a> {
     pub artifact_path: &'a str,
     pub artifact_version: i64,
     pub comments: &'a [Comment],
+}
+
+/// Inputs to the **answer** prompt ([`build_answer_prompt`], epic
+/// conceptify-6xi). Same identity/context framing as [`PromptContext`], but
+/// `exchanges` carries each targeted root with its ordered reply chain so the
+/// prompt renders the full exchange history. Shared by the batch
+/// [`ask_follow_ups`] and single-comment [`ask_single_comment`] flows — the only
+/// difference between them is how many exchanges the slice holds.
+pub(crate) struct AnswerPromptContext<'a> {
+    pub thread_id: &'a str,
+    pub title: &'a str,
+    pub question: &'a str,
+    pub project_root: &'a str,
+    pub artifact_path: &'a str,
+    pub artifact_version: i64,
+    pub exchanges: &'a [CommentThread],
+}
+
+/// The comment id the agent should resolve for one exchange: the LATEST
+/// unanswered (status `open`) message in the chain — the root first, then each
+/// reply in order. In every flow that builds the answer prompt the root is
+/// guaranteed `open` (the batch gathers only open roots; Ask now validates the
+/// target root `open`), so there is always at least one candidate, and a later
+/// open reply supersedes the root. This is what makes "reply → answer the reply
+/// row, fresh root → answer the root row" deterministic.
+fn resolve_target(thread: &CommentThread) -> &str {
+    let mut target = thread.root.id.as_str();
+    for reply in &thread.replies {
+        if reply.status == CommentStatus::Open {
+            target = reply.id.as_str();
+        }
+    }
+    target
+}
+
+/// Render a stored anchor for an exchange transcript: the JSON passed through
+/// verbatim as one compact line (same `snake_case`, key-sorted contract as
+/// [`comments_json`] / get-context — serde_json `Value` maps sort keys, which
+/// the exact-string prompt tests rely on), or a fixed phrase for a null anchor.
+fn compact_anchor(anchor: &Option<serde_json::Value>) -> String {
+    match anchor {
+        Some(a) => serde_json::to_string(a).expect("anchor JSON always serializes"),
+        None => "none (a direct question about the whole artifact)".to_owned(),
+    }
+}
+
+/// Render one exchange (a root comment + its ordered reply chain) as the
+/// transcript block the answer prompt embeds: the root body with its anchor,
+/// any answer already given, then each reply in order (its `[status]` and any
+/// answer), closing with the single message to answer now (see
+/// [`resolve_target`]). Every message carries its own comment id so the agent
+/// resolves against the right row.
+fn exchange_block(index: usize, thread: &CommentThread) -> String {
+    let root = &thread.root;
+    let mut lines = Vec::new();
+    lines.push(format!("### Exchange {index} — root comment {}", root.id));
+    lines.push(format!("- anchor: {}", compact_anchor(&root.anchor)));
+    lines.push(format!(
+        "- reader (root {}) [{}]: {}",
+        root.id,
+        root.status.as_str(),
+        root.body
+    ));
+    if let Some(answer) = &root.answer_html {
+        lines.push(format!("  - answer already given: {answer}"));
+    }
+    for reply in &thread.replies {
+        lines.push(format!(
+            "- reply ({}) [{}]: {}",
+            reply.id,
+            reply.status.as_str(),
+            reply.body
+        ));
+        if let Some(answer) = &reply.answer_html {
+            lines.push(format!("  - answer already given: {answer}"));
+        }
+    }
+    lines.push(format!(
+        "Answer now: resolve comment {} (the latest unanswered message in this exchange).",
+        resolve_target(thread)
+    ));
+    lines.join("\n")
+}
+
+/// The exchanges block embedded in the answer prompt: each targeted root's
+/// transcript ([`exchange_block`]), numbered from 1, separated by a blank line.
+fn exchanges_block(threads: &[CommentThread]) -> String {
+    threads
+        .iter()
+        .enumerate()
+        .map(|(i, thread)| exchange_block(i + 1, thread))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// The comments block embedded in both prompts: a pretty JSON array with the
@@ -872,14 +1097,20 @@ fn comments_json(comments: &[Comment]) -> String {
     serde_json::to_string_pretty(&arr).expect("comment JSON always serializes")
 }
 
-/// The FR-4.6 answer-mode prompt. Contract highlights: one
-/// `resolve-comment` per comment (that is what makes sidebar answers land
-/// incrementally), never `--applied`, never `save-artifact`.
-pub(crate) fn build_answer_prompt(ctx: &PromptContext) -> String {
+/// The FR-4.6 answer-mode prompt (epic conceptify-6xi exchange-history form).
+/// Each targeted root renders as an exchange transcript (root + prior answer +
+/// ordered replies); the agent addresses the LATEST unanswered message and
+/// resolves against that message's id — the reply row when answering a reply,
+/// the root row for a fresh root. Contract highlights: one `resolve-comment` per
+/// exchange (that is what makes sidebar answers land incrementally), build on
+/// prior answers rather than repeat them, never `--applied`, never
+/// `save-artifact`. Shared by [`ask_follow_ups`] (many exchanges) and
+/// [`ask_single_comment`] (one).
+pub(crate) fn build_answer_prompt(ctx: &AnswerPromptContext) -> String {
     format!(
         r#"You are Conceptify's follow-up answerer, running headless inside the project this artifact explains.
 
-A reader left comments (follow-up questions) on an explanation artifact. Answer each comment individually through the `conceptify` CLI (it is on your PATH). The artifact itself must not be modified in this mode.
+A reader left comments (follow-up questions) on an explanation artifact, and may have replied to the answers they got. Answer each exchange below through the `conceptify` CLI (it is on your PATH), responding to the latest unanswered message in the conversation. The artifact itself must not be modified in this mode.
 
 ## Context
 - Project root (your working directory): {project_root}
@@ -887,19 +1118,20 @@ A reader left comments (follow-up questions) on an explanation artifact. Answer 
 - The question the artifact answers: {question}
 - Artifact file (read-only in this mode): {artifact_path} (version {version})
 
-## Comments to answer
-Each object has: `id`; `body` (the reader's question); `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole); `artifactVersion` (the version it was written against); `answerHtml` (any existing answer).
+## Exchanges to answer
+Each exchange below is one conversation under a root comment: the reader's original comment with its `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole), any answer already given, then any follow-up replies in order. Every message is labelled with its own comment id and `[status]`; the last line of each exchange names the single message to answer now.
 
-{comments}
+{exchanges}
 
 ## How to answer — exact contract
 1. Read the artifact file, then whatever project sources you need to ground each answer in the real code.
 2. Create a scratch directory for answer files: ANSWERS=$(mktemp -d)
-3. For EACH comment above, individually:
-   - Write its answer to its own file, e.g. "$ANSWERS/<comment-id>.html" — an HTML fragment or markdown, concise and specific (a short paragraph or two; small code snippets welcome; no <html>/<head>/<body> wrapper).
-   - Then run: conceptify resolve-comment --id <comment-id> --answer-file "$ANSWERS/<comment-id>.html"
-   This marks that comment answered and shows the answer in the app immediately — resolve each comment as soon as its answer is ready, so answers land one by one.
-4. Answer every comment. Never combine several comments into one resolve-comment call, and never skip one.
+3. For EACH exchange above, individually — answer ONLY its latest unanswered message:
+   - Write your answer to its own file, e.g. "$ANSWERS/<message-id>.html" — an HTML fragment or markdown, concise and specific (a short paragraph or two; small code snippets welcome; no <html>/<head>/<body> wrapper).
+   - Then run: conceptify resolve-comment --id <message-id> --answer-file "$ANSWERS/<message-id>.html"
+   where <message-id> is the comment id named on that exchange's "Answer now" line — the reply's id when the latest message is a reply, the root's id for a fresh root comment.
+   This marks that message answered and shows the answer in the app immediately — resolve each exchange as soon as its answer is ready, so answers land one by one.
+4. Answer every exchange. Build on the answers already shown in an exchange — never repeat one that was already given. Never combine several exchanges into one resolve-comment call, and never skip one.
 
 ## Hard rules
 - Do NOT modify or save the artifact: never run `conceptify save-artifact`, and never pass `--applied` to resolve-comment. Answering and applying-to-the-artifact are deliberately separate steps; this run only answers.
@@ -913,7 +1145,7 @@ Each object has: `id`; `body` (the reader's question); `anchor` (where it points
         question = ctx.question,
         artifact_path = ctx.artifact_path,
         version = ctx.artifact_version,
-        comments = comments_json(ctx.comments),
+        exchanges = exchanges_block(ctx.exchanges),
     )
 }
 
@@ -1079,19 +1311,40 @@ mod tests {
         }
     }
 
+    fn fixture_answer_ctx<'a>(exchanges: &'a [CommentThread]) -> AnswerPromptContext<'a> {
+        AnswerPromptContext {
+            thread_id: "thread-1",
+            title: "How does OAuth work?",
+            question: "Explain the OAuth 2.0 authorization code flow.",
+            project_root: "/Users/chris/code/myrepo",
+            artifact_path: "/Users/chris/Documents/conceptify/artifacts/p1/threads/oauth/artifact.v1.html",
+            artifact_version: 1,
+            exchanges,
+        }
+    }
+
+    /// A single-message exchange (root comment, no replies) — the pre-reply
+    /// shape, one per open root.
+    fn exchange(root: Comment) -> CommentThread {
+        CommentThread {
+            root,
+            replies: vec![],
+        }
+    }
+
     // -- prompt assembly (exact strings for a fixture context) ---------------
 
     #[test]
     fn answer_prompt_exact_for_fixture() {
-        let comments = vec![
-            fixture_comment("c-anchored", true, CommentStatus::Open),
-            fixture_comment("c-direct", false, CommentStatus::Open),
+        let exchanges = vec![
+            exchange(fixture_comment("c-anchored", true, CommentStatus::Open)),
+            exchange(fixture_comment("c-direct", false, CommentStatus::Open)),
         ];
-        let prompt = build_answer_prompt(&fixture_prompt_ctx(&comments));
+        let prompt = build_answer_prompt(&fixture_answer_ctx(&exchanges));
 
         let expected = r#"You are Conceptify's follow-up answerer, running headless inside the project this artifact explains.
 
-A reader left comments (follow-up questions) on an explanation artifact. Answer each comment individually through the `conceptify` CLI (it is on your PATH). The artifact itself must not be modified in this mode.
+A reader left comments (follow-up questions) on an explanation artifact, and may have replied to the answers they got. Answer each exchange below through the `conceptify` CLI (it is on your PATH), responding to the latest unanswered message in the conversation. The artifact itself must not be modified in this mode.
 
 ## Context
 - Project root (your working directory): /Users/chris/code/myrepo
@@ -1099,47 +1352,110 @@ A reader left comments (follow-up questions) on an explanation artifact. Answer 
 - The question the artifact answers: Explain the OAuth 2.0 authorization code flow.
 - Artifact file (read-only in this mode): /Users/chris/Documents/conceptify/artifacts/p1/threads/oauth/artifact.v1.html (version 1)
 
-## Comments to answer
-Each object has: `id`; `body` (the reader's question); `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole); `artifactVersion` (the version it was written against); `answerHtml` (any existing answer).
+## Exchanges to answer
+Each exchange below is one conversation under a root comment: the reader's original comment with its `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole), any answer already given, then any follow-up replies in order. Every message is labelled with its own comment id and `[status]`; the last line of each exchange names the single message to answer now.
 
-[
-  {
-    "anchor": {
-      "cfy_id": "sec-flow",
-      "end": 9,
-      "quote": {
-        "exact": "token",
-        "prefix": "the ",
-        "suffix": " is"
-      },
-      "start": 4,
-      "type": "text",
-      "v": 1
-    },
-    "answerHtml": null,
-    "artifactVersion": 1,
-    "body": "why c-anchored?",
-    "id": "c-anchored",
-    "status": "open"
-  },
-  {
-    "anchor": null,
-    "answerHtml": null,
-    "artifactVersion": 1,
-    "body": "why c-direct?",
-    "id": "c-direct",
-    "status": "open"
-  }
-]
+### Exchange 1 — root comment c-anchored
+- anchor: {"cfy_id":"sec-flow","end":9,"quote":{"exact":"token","prefix":"the ","suffix":" is"},"start":4,"type":"text","v":1}
+- reader (root c-anchored) [open]: why c-anchored?
+Answer now: resolve comment c-anchored (the latest unanswered message in this exchange).
+
+### Exchange 2 — root comment c-direct
+- anchor: none (a direct question about the whole artifact)
+- reader (root c-direct) [open]: why c-direct?
+Answer now: resolve comment c-direct (the latest unanswered message in this exchange).
 
 ## How to answer — exact contract
 1. Read the artifact file, then whatever project sources you need to ground each answer in the real code.
 2. Create a scratch directory for answer files: ANSWERS=$(mktemp -d)
-3. For EACH comment above, individually:
-   - Write its answer to its own file, e.g. "$ANSWERS/<comment-id>.html" — an HTML fragment or markdown, concise and specific (a short paragraph or two; small code snippets welcome; no <html>/<head>/<body> wrapper).
-   - Then run: conceptify resolve-comment --id <comment-id> --answer-file "$ANSWERS/<comment-id>.html"
-   This marks that comment answered and shows the answer in the app immediately — resolve each comment as soon as its answer is ready, so answers land one by one.
-4. Answer every comment. Never combine several comments into one resolve-comment call, and never skip one.
+3. For EACH exchange above, individually — answer ONLY its latest unanswered message:
+   - Write your answer to its own file, e.g. "$ANSWERS/<message-id>.html" — an HTML fragment or markdown, concise and specific (a short paragraph or two; small code snippets welcome; no <html>/<head>/<body> wrapper).
+   - Then run: conceptify resolve-comment --id <message-id> --answer-file "$ANSWERS/<message-id>.html"
+   where <message-id> is the comment id named on that exchange's "Answer now" line — the reply's id when the latest message is a reply, the root's id for a fresh root comment.
+   This marks that message answered and shows the answer in the app immediately — resolve each exchange as soon as its answer is ready, so answers land one by one.
+4. Answer every exchange. Build on the answers already shown in an exchange — never repeat one that was already given. Never combine several exchanges into one resolve-comment call, and never skip one.
+
+## Hard rules
+- Do NOT modify or save the artifact: never run `conceptify save-artifact`, and never pass `--applied` to resolve-comment. Answering and applying-to-the-artifact are deliberately separate steps; this run only answers.
+- Use the conceptify CLI only as specified above.
+- Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root — read the project freely, but write only under your scratch directory.
+- If the file ~/.claude/skills/conceptify/references/follow-ups.md exists, read it before answering — it holds the house rules for follow-up answers.
+"#;
+        assert_eq!(prompt, expected);
+    }
+
+    #[test]
+    fn answer_prompt_exact_for_chained_exchange() {
+        // A re-opened root (open, but keeps its prior answer) with one open
+        // reply: the exchange transcript must show the prior answer, the reply
+        // in order, and point the resolve at the REPLY's id (the latest
+        // unanswered message).
+        let root = Comment {
+            id: "c-root".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            artifact_version: 1,
+            anchor: Some(serde_json::json!({
+                "v": 1,
+                "type": "text",
+                "cfy_id": "sec-flow",
+                "start": 4,
+                "end": 9,
+                "quote": { "exact": "token", "prefix": "the ", "suffix": " is" }
+            })),
+            body: "why c-root?".to_owned(),
+            status: CommentStatus::Open,
+            answer_html: Some("<p>prior answer.</p>".to_owned()),
+            anchor_state: AnchorState::Anchored,
+            created_at: "2026-07-04T00:00:00.000Z".to_owned(),
+            resolved_at: None,
+        };
+        let reply = Comment {
+            id: "r-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            artifact_version: 1,
+            anchor: None,
+            body: "still confused about tokens".to_owned(),
+            status: CommentStatus::Open,
+            answer_html: None,
+            anchor_state: AnchorState::Anchored,
+            created_at: "2026-07-04T00:01:00.000Z".to_owned(),
+            resolved_at: None,
+        };
+        let exchanges = vec![CommentThread {
+            root,
+            replies: vec![reply],
+        }];
+        let prompt = build_answer_prompt(&fixture_answer_ctx(&exchanges));
+
+        let expected = r#"You are Conceptify's follow-up answerer, running headless inside the project this artifact explains.
+
+A reader left comments (follow-up questions) on an explanation artifact, and may have replied to the answers they got. Answer each exchange below through the `conceptify` CLI (it is on your PATH), responding to the latest unanswered message in the conversation. The artifact itself must not be modified in this mode.
+
+## Context
+- Project root (your working directory): /Users/chris/code/myrepo
+- Thread: "How does OAuth work?" (thread id: thread-1)
+- The question the artifact answers: Explain the OAuth 2.0 authorization code flow.
+- Artifact file (read-only in this mode): /Users/chris/Documents/conceptify/artifacts/p1/threads/oauth/artifact.v1.html (version 1)
+
+## Exchanges to answer
+Each exchange below is one conversation under a root comment: the reader's original comment with its `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole), any answer already given, then any follow-up replies in order. Every message is labelled with its own comment id and `[status]`; the last line of each exchange names the single message to answer now.
+
+### Exchange 1 — root comment c-root
+- anchor: {"cfy_id":"sec-flow","end":9,"quote":{"exact":"token","prefix":"the ","suffix":" is"},"start":4,"type":"text","v":1}
+- reader (root c-root) [open]: why c-root?
+  - answer already given: <p>prior answer.</p>
+- reply (r-1) [open]: still confused about tokens
+Answer now: resolve comment r-1 (the latest unanswered message in this exchange).
+
+## How to answer — exact contract
+1. Read the artifact file, then whatever project sources you need to ground each answer in the real code.
+2. Create a scratch directory for answer files: ANSWERS=$(mktemp -d)
+3. For EACH exchange above, individually — answer ONLY its latest unanswered message:
+   - Write your answer to its own file, e.g. "$ANSWERS/<message-id>.html" — an HTML fragment or markdown, concise and specific (a short paragraph or two; small code snippets welcome; no <html>/<head>/<body> wrapper).
+   - Then run: conceptify resolve-comment --id <message-id> --answer-file "$ANSWERS/<message-id>.html"
+   where <message-id> is the comment id named on that exchange's "Answer now" line — the reply's id when the latest message is a reply, the root's id for a fresh root comment.
+   This marks that message answered and shows the answer in the app immediately — resolve each exchange as soon as its answer is ready, so answers land one by one.
+4. Answer every exchange. Build on the answers already shown in an exchange — never repeat one that was already given. Never combine several exchanges into one resolve-comment call, and never skip one.
 
 ## Hard rules
 - Do NOT modify or save the artifact: never run `conceptify save-artifact`, and never pass `--applied` to resolve-comment. Answering and applying-to-the-artifact are deliberately separate steps; this run only answers.
@@ -1460,10 +1776,26 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
                 .id
         }
 
+        /// Create a reply under `parent_id` (an answered/applied root is re-opened
+        /// by this, per `create_reply`); returns the reply's id.
+        fn add_reply(&self, parent_id: &str, body: &str) -> String {
+            let conn = self.db.lock().unwrap();
+            crate::comments::create_reply(&conn, &self.thread_id, parent_id, body)
+                .unwrap()
+                .comment
+                .id
+        }
+
         fn set_comment_status(&self, id: &str, status: CommentStatus) {
             let conn = self.db.lock().unwrap();
             crate::comments::update_comment(&conn, id, Some(status), Some("<p>a</p>"), None)
                 .unwrap();
+        }
+
+        fn comment_status(&self, id: &str) -> String {
+            let conn = self.db.lock().unwrap();
+            conn.query_row("SELECT status FROM comments WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap()
         }
 
         fn thread_status(&self) -> String {
@@ -1687,7 +2019,179 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         assert!(wait_until(|| h.run_row(&run_id).0 == "completed", 15_000).await);
     }
 
+    // -- ask_single_comment (Ask now, epic conceptify-6xi) ---------------------
+
+    #[tokio::test]
+    async fn ask_single_comment_answers_reply_row_end_to_end() {
+        let h = harness("ask-single-reply");
+        h.save_artifact(1);
+
+        // Root answered, then a user reply re-opens it (root → open, prior
+        // answer kept; reply → open). Ask now on the root must direct the agent
+        // at the REPLY row (the latest unanswered message).
+        let root = h.add_comment("why the root?");
+        h.set_comment_status(&root, CommentStatus::Answered);
+        let reply = h.add_reply(&root, "still confused about tokens");
+        assert_eq!(h.comment_status(&root), "open", "reply re-opened the root");
+        assert_eq!(h.comment_status(&reply), "open");
+
+        h.install_fake_agent(
+            "#!/bin/sh\n\
+             printf '%s' \"$1\" > \"$(dirname \"$0\")/prompt.txt\"\n\
+             exit 0\n",
+        );
+
+        let started = ask_single_comment(&h.handle, &h.thread_id, &root)
+            .await
+            .unwrap();
+        assert_eq!(started.mode, RunMode::Answer);
+        assert_eq!(started.thread_id, h.thread_id);
+        assert_eq!(
+            started.target_comment_ids,
+            vec![root.clone()],
+            "the DTO target is the single ROOT (the resolve may land on its reply)"
+        );
+
+        let run_id = started.run_id.clone();
+        assert!(wait_until(|| h.run_row(&run_id).0 == "completed", 15_000).await);
+        assert_eq!(h.run_row(&run_id).1, "answer");
+
+        // The prompt carries the exchange history and points the resolve at the
+        // reply (the latest unanswered message), never the root.
+        let prompt = std::fs::read_to_string(h.work_dir.join("prompt.txt")).unwrap();
+        assert!(prompt.contains("### Exchange 1 — root comment"), "{prompt}");
+        assert!(prompt.contains("answer already given: <p>a</p>"), "{prompt}");
+        assert!(prompt.contains("still confused about tokens"), "{prompt}");
+        assert!(
+            prompt.contains(&format!(
+                "Answer now: resolve comment {reply} (the latest unanswered"
+            )),
+            "{prompt}"
+        );
+
+        // The CLI stub is a no-op, so simulate the resolve the agent's
+        // `resolve-comment --id <reply>` performs: the reply advances to
+        // `answered` while the root is untouched (root-only status changes only
+        // come from apply / re-open, never from answering a reply).
+        h.set_comment_status(&reply, CommentStatus::Answered);
+        assert_eq!(h.comment_status(&reply), "answered");
+        assert_eq!(h.comment_status(&root), "open", "the resolve left the root untouched");
+
+        // Answer mode never touches thread status and emits no thread-updated.
+        assert_eq!(h.thread_status(), "ready");
+        assert!(h.thread_updated.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ask_single_comment_validates_target_and_guards_concurrency() {
+        let h = harness("ask-single-guards");
+
+        // No artifact yet → NoArtifact (checked before the target is looked up,
+        // so the id need not exist).
+        let err = ask_single_comment(&h.handle, &h.thread_id, "any-comment")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FlowError::NoArtifact), "{err:?}");
+
+        h.save_artifact(1);
+
+        // Unknown id → CommentNotFound.
+        let err = ask_single_comment(&h.handle, &h.thread_id, "ghost")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FlowError::CommentNotFound(_)), "{err:?}");
+
+        // A reply target → TargetIsReply (Ask now targets a root; reply to it).
+        let root = h.add_comment("root q");
+        let reply = h.add_reply(&root, "reply q"); // root open → no re-open; reply open
+        let err = ask_single_comment(&h.handle, &h.thread_id, &reply)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FlowError::TargetIsReply(_)), "{err:?}");
+
+        // A non-open (answered) root → CommentNotOpen.
+        let answered_root = h.add_comment("answered root");
+        h.set_comment_status(&answered_root, CommentStatus::Answered);
+        let err = ask_single_comment(&h.handle, &h.thread_id, &answered_root)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FlowError::CommentNotOpen(_)), "{err:?}");
+
+        // FR-4.9: with a run active on this thread, a second Ask now — and a
+        // batch — are rejected with the engine's structured AlreadyRunning.
+        h.install_fake_agent("#!/bin/sh\nsleep 30\n");
+        let started = ask_single_comment(&h.handle, &h.thread_id, &root)
+            .await
+            .unwrap();
+        assert_eq!(started.target_comment_ids, vec![root.clone()]);
+
+        let err = ask_single_comment(&h.handle, &h.thread_id, &root)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FlowError::Run(RunError::AlreadyRunning { .. })),
+            "{err:?}"
+        );
+        let err = ask_follow_ups(&h.handle, &h.thread_id).await.unwrap_err();
+        assert!(
+            matches!(err, FlowError::Run(RunError::AlreadyRunning { .. })),
+            "{err:?}"
+        );
+
+        h.registry().cancel(&started.run_id).unwrap();
+        let run_id = started.run_id.clone();
+        assert!(wait_until(|| h.run_row(&run_id).0 == "cancelled", 15_000).await);
+
+        // No answer run ever touched thread status.
+        assert_eq!(h.thread_status(), "ready");
+        assert!(h.thread_updated.lock().unwrap().is_empty());
+    }
+
     // -- apply_to_artifact (FR-4.7) ---------------------------------------------
+
+    #[tokio::test]
+    async fn apply_targets_roots_only_never_answered_replies() {
+        let h = harness("apply-roots-only");
+        h.save_artifact(1);
+
+        // An answered ROOT with no reply stays answered — a valid apply target.
+        let root_a = h.add_comment("root A");
+        h.set_comment_status(&root_a, CommentStatus::Answered);
+
+        // A second root gets a reply (which re-opens it) that is then answered:
+        // the answered REPLY must never be an apply target — `resolve-comment
+        // --applied` on a reply now 400s (epic conceptify-6xi heads-up #2).
+        let root_b = h.add_comment("root B");
+        h.set_comment_status(&root_b, CommentStatus::Answered);
+        let reply_b = h.add_reply(&root_b, "reply on B"); // re-opens B → open
+        h.set_comment_status(&reply_b, CommentStatus::Answered);
+        assert_eq!(h.comment_status(&root_b), "open", "reply re-opened root B");
+        assert_eq!(h.comment_status(&reply_b), "answered");
+
+        // An explicit reply id is rejected outright (applying a reply is invalid).
+        let err = apply_to_artifact(&h.handle, &h.thread_id, vec![reply_b.clone()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FlowError::TargetIsReply(_)), "{err:?}");
+
+        // Default (empty ids) targets ONLY the answered root, never the answered
+        // reply and never the re-opened (now open) root B.
+        h.install_fake_agent("#!/bin/sh\nexit 0\n");
+        let started = apply_to_artifact(&h.handle, &h.thread_id, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            started.target_comment_ids,
+            vec![root_a.clone()],
+            "only the answered root is applied"
+        );
+        assert!(!started.target_comment_ids.contains(&reply_b));
+        assert!(!started.target_comment_ids.contains(&root_b));
+
+        let run_id = started.run_id.clone();
+        assert!(wait_until(|| h.run_row(&run_id).0 == "completed", 15_000).await);
+        assert!(wait_until(|| h.thread_status() == "ready", 15_000).await);
+    }
 
     #[tokio::test]
     async fn apply_defaults_to_answered_sets_updating_then_ready() {

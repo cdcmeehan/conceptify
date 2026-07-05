@@ -463,6 +463,12 @@ pub fn create_reply(
 /// the reading order of the sidebar), optionally filtered to one `status`. An
 /// unknown `thread_id` yields an empty list rather than a 404 (mirrors
 /// `list_threads`); callers list comments for a thread they already hold.
+///
+/// The flat `Comment` shape (no `parent_id`) has no production caller since bead
+/// conceptify-6xi.2 retired the batch flow's flat open-comment list in favour of
+/// exchange threads; retained as a public convenience over
+/// [`list_comments_with_parent`] and still exercised by the tests below.
+#[allow(dead_code)]
 pub fn list_comments(
     conn: &Connection,
     thread_id: &str,

@@ -117,15 +117,29 @@ The follow-up flows live in `src-tauri/src/flows.rs` on top of the run engine
 and are invoked by the app shell as Tauri commands (snake_case args):
 
 - `ask_follow_ups { thread_id }` → `{ run_id, thread_id, mode: "answer",
-  target_comment_ids }` — FR-4.6: ONE headless run answers every **open**
-  comment individually via `conceptify resolve-comment`; the artifact is
-  never modified in this mode. Errors (user-facing strings): no artifact, no
-  open comments, run already active (FR-4.9).
+  target_comment_ids }` — FR-4.6: ONE headless run answers every open **root**
+  comment via `conceptify resolve-comment`; the artifact is never modified in
+  this mode. Targets are open roots only (a root re-opened by a reply is
+  included; its replies ride along as that root's exchange history, not as
+  separate targets — epic conceptify-6xi); `target_comment_ids` is the root
+  ids. Errors (user-facing strings): no artifact, no open comments, run
+  already active (FR-4.9).
+- `ask_single_comment { thread_id, root_comment_id }` → same shape with
+  `mode: "answer"` — epic conceptify-6xi "Ask now": fire a single-root answer
+  run immediately without gathering the batch. The target must be a **root**
+  (not a reply) and **open** (re-opening by a reply counts). `target_comment_ids`
+  is the single root id; the prompt directs the agent at the latest unanswered
+  message in that root's chain, so the actual `resolve-comment` may land on a
+  reply row. Errors (user-facing strings): no artifact; comment not found on
+  this thread; target is a reply (reply to its root instead); target root not
+  open; run already active (FR-4.9).
 - `apply_to_artifact { thread_id, comment_ids }` → same shape with
-  `mode: "apply"` — FR-4.7: `comment_ids` empty targets every **answered**
-  comment; explicit ids may be `open` or `answered` (never `applied`). The
-  run edits a working copy, marks each target `applied`, then publishes ONE
-  new version via `conceptify save-artifact`.
+  `mode: "apply"` — FR-4.7: `comment_ids` empty targets every **answered root**
+  (roots only — `resolve-comment --applied` on a reply is rejected, so answered
+  replies are never apply targets); explicit ids may be `open` or `answered`
+  (never `applied`, never a reply). The run edits a working copy, marks each
+  target `applied`, then publishes ONE new version via `conceptify
+  save-artifact`.
 - `get_active_run { thread_id }` → the live run summary
   (`{ run_id, thread_id, mode, status: "running" }`) or `null` — the UI
   re-attaches to an in-flight run on thread switch. Target ids are not
@@ -150,6 +164,17 @@ The in-app ask flow (FR-5.1/5.2/5.3, bead 959.1/959.2) adds three more:
   most recent run row for a thread (any mode/status). The FR-5.3 error state
   uses it to resolve the failed generation run's id for `get_run_log_tail`;
   unlike `get_active_run` (live runs only) it works after an app restart.
+
+**Exchange-history prompts (epic conceptify-6xi):** the answer prompt (both
+`ask_follow_ups` and `ask_single_comment`) renders each targeted root as an
+exchange transcript — the root body with its anchor, any answer already given,
+then each reply in order with its `[status]` and any answer. The agent is told
+to address the LATEST unanswered message in each chain, build on prior answers
+without repeating them, and `resolve-comment` against that message's id (the
+reply row when answering a reply, the root row for a fresh root). The context
+aggregation supplies this via `open_comment_threads` (open roots + ordered
+reply chains); the flat `open_comments` — which now also carries open replies —
+is no longer used for targeting.
 
 **Apply ordering (FR-4.7 × FR-4.4):** the apply prompt instructs the agent to
 finish all edits, then run `resolve-comment --applied` for **every** target
