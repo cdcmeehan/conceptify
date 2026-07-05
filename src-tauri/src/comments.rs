@@ -369,6 +369,60 @@ pub fn update_comment(
     })
 }
 
+/// The comments that participate in FR-4.4 re-attachment when `new_version`
+/// is saved: anchored to any *earlier* version, status `open` or `answered`.
+/// `applied` comments are frozen history and never participate (see
+/// `crate::anchoring`); previously-`moved` comments do (they can heal).
+/// Oldest first for deterministic processing/event order.
+pub fn reattach_candidates(
+    conn: &Connection,
+    thread_id: &str,
+    new_version: i64,
+) -> Result<Vec<Comment>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT id, thread_id, artifact_version, anchor, body, status,
+               answer_html, anchor_state, created_at, resolved_at
+        FROM comments
+        WHERE thread_id = ?1
+          AND artifact_version < ?2
+          AND status IN ('open', 'answered')
+        ORDER BY created_at ASC, id ASC
+        ",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![thread_id, new_version], row_to_comment)?;
+    rows.collect()
+}
+
+/// Persist one re-attachment verdict (`crate::anchoring`): move the comment to
+/// `artifact_version`, optionally rewrite its anchor JSON (`None` keeps the
+/// stored anchor), and set `anchor_state`. Deliberately bypasses the status
+/// machine — re-attachment never touches `status`/`answer_html`/`resolved_at`.
+pub fn apply_reattachment(
+    conn: &Connection,
+    id: &str,
+    artifact_version: i64,
+    anchor: Option<&serde_json::Value>,
+    anchor_state: AnchorState,
+) -> Result<Comment, rusqlite::Error> {
+    let anchor_text = anchor.map(|a| a.to_string());
+    conn.execute(
+        "UPDATE comments
+         SET artifact_version = ?2,
+             anchor = CASE WHEN ?3 IS NULL THEN anchor ELSE ?3 END,
+             anchor_state = ?4
+         WHERE id = ?1",
+        rusqlite::params![id, artifact_version, anchor_text, anchor_state.as_str()],
+    )?;
+    conn.query_row(
+        "SELECT id, thread_id, artifact_version, anchor, body, status,
+                answer_html, anchor_state, created_at, resolved_at
+         FROM comments WHERE id = ?1",
+        [id],
+        row_to_comment,
+    )
+}
+
 /// Fetch a single comment by id, or `None` if absent.
 fn get_comment(conn: &Connection, id: &str) -> Result<Option<Comment>, CommentError> {
     conn.query_row(

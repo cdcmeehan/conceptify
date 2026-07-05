@@ -1,3 +1,4 @@
+mod anchoring;
 mod artifact_protocol;
 mod artifacts;
 mod commands;
@@ -5,6 +6,7 @@ mod comments;
 mod context;
 mod db;
 mod projects;
+mod runs;
 mod server;
 mod settings;
 mod threads;
@@ -79,13 +81,36 @@ pub fn run() {
             commands::list_comments,
             commands::get_agent_settings,
             commands::set_agent_settings,
+            runs::cancel_run,
         ])
         .setup(|app| {
             // Opened and migrated before anything else touches it: both the
             // axum server (spawned below) and any frontend `db_check`-style
             // command need it in managed state first.
             let db = db::init()?;
+
+            // N4 boot reconciliation (crate::runs): any `running` run row is
+            // leftover from a crashed/killed previous session — mark it
+            // failed BEFORE the (empty) run registry below becomes the
+            // liveness source of truth, so a crashed run can never wedge the
+            // FR-4.9 one-run-per-thread guard or corrupt thread state. A
+            // failure here means the DB itself is broken, so it aborts
+            // startup like db::init would.
+            {
+                let conn = db.lock().unwrap_or_else(|p| p.into_inner());
+                let reconciled = runs::reconcile_stale_runs(&conn)?;
+                if reconciled > 0 {
+                    eprintln!(
+                        "[conceptify-runs] marked {reconciled} stale running run(s) failed at boot"
+                    );
+                }
+            }
+
             app.manage(db);
+            // Live-run registry for the agent-run engine (crate::runs):
+            // FR-4.9 guard + cancel routing, consumed by start_run and the
+            // cancel_run command.
+            app.manage(runs::RunRegistry::default());
 
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(server::start(app_handle));

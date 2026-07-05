@@ -81,8 +81,11 @@ function placePopover(iframe: HTMLIFrameElement, rect: BridgeRect): { left: numb
 
 /** The open-comment highlights for the shown version: every open comment on
  *  THIS artifact version that still carries an anchor (direct follow-ups have
- *  none). Anchors made on other versions aren't decorated here — cross-version
- *  re-attachment is bead conceptify-94m.7. */
+ *  none). The version filter is deliberately exact: server-side re-attachment
+ *  (FR-4.4, bead conceptify-94m.7) advances comments to each new version on
+ *  save, so comments follow the latest automatically; a comment left on an
+ *  older version is either "reference moved" (unresolvable here) or frozen
+ *  `applied` history — neither should be decorated on this version. */
 function computeHighlights(
   comments: api.Comment[],
   artifactVersion: number,

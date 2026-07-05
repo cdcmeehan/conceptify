@@ -614,6 +614,22 @@ mod tests {
                 created_by TEXT NOT NULL CHECK (created_by IN ('initial', 'follow_up')),
                 UNIQUE (thread_id, version)
             );
+            -- Follow-up saves run the FR-4.4 re-attachment pass, which reads
+            -- the comments table even when it's empty.
+            CREATE TABLE comments (
+                id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                artifact_version INTEGER NOT NULL,
+                anchor TEXT,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL
+                    CHECK (status IN ('open', 'answered', 'applied')),
+                answer_html TEXT,
+                anchor_state TEXT NOT NULL DEFAULT 'anchored'
+                    CHECK (anchor_state IN ('anchored', 'moved')),
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                resolved_at TEXT
+            );
             INSERT INTO projects (id, name, root_path) VALUES ('p1', 'Proj', '/tmp/p1');
             INSERT INTO threads (id, project_id, title, slug, initial_question, status)
                 VALUES ('t1', 'p1', 'OAuth flow', 'oauth-flow', 'how?', 'generating');

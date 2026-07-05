@@ -88,6 +88,11 @@ pub struct SavedArtifact {
     /// Absolute path of the immutable versioned file (`artifact.vN.html`).
     pub file_path: PathBuf,
     pub warnings: Vec<Issue>,
+    /// Comments whose rows changed in the FR-4.4 re-attachment pass that runs
+    /// with every follow-up save (advanced to this version, anchor rewritten,
+    /// and/or flagged `moved`). The route layer emits one `comment-updated`
+    /// event per entry. Empty for v1 (nothing to re-attach).
+    pub reattached: Vec<crate::comments::Comment>,
 }
 
 /// Errors from the save pipeline. Variants map to HTTP statuses in
@@ -160,6 +165,16 @@ pub fn version_file_path(root: &Path, project_id: &str, slug: &str, version: i64
 /// the `latest_copy_path_matches_save_output` test).
 pub fn latest_copy_path(root: &Path, project_id: &str, slug: &str) -> PathBuf {
     thread_dir(root, project_id, slug).join("artifact.html")
+}
+
+/// `<root>/<project-id>/threads/<slug>/runs/<run-id>.log` — a headless
+/// agent-run transcript (§5.6), written by the run engine (`crate::runs`).
+/// The `runs/` directory itself is created by `save_artifact` on first save
+/// and (defensively) by the run engine before it writes.
+pub fn run_log_path(root: &Path, project_id: &str, slug: &str, run_id: &str) -> PathBuf {
+    thread_dir(root, project_id, slug)
+        .join("runs")
+        .join(format!("{run_id}.log"))
 }
 
 /// The latest (highest-version) artifact stored for a thread. Returns the
@@ -277,8 +292,9 @@ pub fn save_artifact(
 
     let created_by = if version == 1 { "initial" } else { "follow_up" };
 
-    // Artifact row + thread status transition commit together: readers never
-    // observe a `ready` thread without its artifact row, or vice versa.
+    // Artifact row + thread status transition + comment re-attachment commit
+    // together: readers never observe a `ready` thread without its artifact
+    // row, or the new version without its comments migrated (FR-4.4).
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "INSERT INTO artifacts (id, thread_id, version, file_path, created_by)
@@ -292,6 +308,18 @@ pub fn save_artifact(
         ],
     )?;
     threads::set_thread_status(&tx, thread_id, ThreadStatus::Ready)?;
+
+    // FR-4.4 re-attachment: migrate earlier-version comments onto this new
+    // version (or flag them "reference moved"). Runs after the artifact row
+    // insert so an advanced `artifact_version` satisfies the composite FK.
+    // `bytes` is valid UTF-8 here (validation would have rejected otherwise).
+    let reattached = if version > 1 {
+        let text = std::str::from_utf8(bytes).expect("validated artifact is UTF-8");
+        crate::anchoring::reattach_thread_comments(&tx, text, thread_id, version)?
+    } else {
+        Vec::new()
+    };
+
     tx.commit()?;
 
     Ok(SavedArtifact {
@@ -301,6 +329,7 @@ pub fn save_artifact(
         created_by,
         file_path: version_path,
         warnings: validation.warnings,
+        reattached,
     })
 }
 
@@ -1101,6 +1130,20 @@ mod tests {
                 created_by TEXT NOT NULL CHECK (created_by IN ('initial', 'follow_up')),
                 UNIQUE (thread_id, version)
             );
+            CREATE TABLE comments (
+                id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                artifact_version INTEGER NOT NULL,
+                anchor TEXT,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL
+                    CHECK (status IN ('open', 'answered', 'applied')),
+                answer_html TEXT,
+                anchor_state TEXT NOT NULL DEFAULT 'anchored'
+                    CHECK (anchor_state IN ('anchored', 'moved')),
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                resolved_at TEXT
+            );
             INSERT INTO projects (id, name, root_path) VALUES ('p1', 'Proj', '/tmp/p1');
             INSERT INTO threads (id, project_id, title, slug, initial_question, status)
                 VALUES ('t1', 'p1', 'OAuth flow', 'oauth-flow', 'how?', 'generating');
@@ -1729,6 +1772,223 @@ mod tests {
         let _ = fs::remove_file(&db_path);
         let _ = fs::remove_file(db_path.with_extension("db-wal"));
         let _ = fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    // -- FR-4.4 re-attachment through the save pipeline ----------------------
+
+    /// The v1 content the re-attachment comments below were captured against.
+    fn reattach_v1_body() -> &'static str {
+        concat!(
+            r#"<p data-cfy-id="sec-a">alpha beta gamma</p>"#,
+            r#"<figure data-cfy-id="fig-x"><svg viewBox="0 0 10 10">"#,
+            r#"<g data-cfy-id="fig-x.node"><text>Node Label</text></g></svg></figure>"#,
+            r#"<p data-cfy-id="sec-gone">unique disappearing sentence</p>"#,
+        )
+    }
+
+    /// v2: sec-a's text shifted (offsets go stale), the figure survives
+    /// untouched, and sec-gone is removed entirely.
+    fn reattach_v2_body() -> &'static str {
+        concat!(
+            r#"<p data-cfy-id="sec-a">intro alpha beta gamma</p>"#,
+            r#"<figure data-cfy-id="fig-x"><svg viewBox="0 0 10 10">"#,
+            r#"<g data-cfy-id="fig-x.node"><text>Node Label</text></g></svg></figure>"#,
+        )
+    }
+
+    fn comment_by_id<'a>(
+        all: &'a [crate::comments::Comment],
+        id: &str,
+    ) -> &'a crate::comments::Comment {
+        all.iter().find(|c| c.id == id).expect("comment present")
+    }
+
+    /// End-to-end FR-4.4: save v1 → comment → save v2 with mutations → every
+    /// comment is either migrated onto v2 (with repaired offsets where the
+    /// quote shifted) or flagged "reference moved" — never dropped; `applied`
+    /// comments are frozen history. A later v3 restoring the content heals
+    /// the moved comment.
+    #[test]
+    fn save_reattaches_comments_across_versions() {
+        use crate::comments::{self, AnchorState, CommentStatus};
+        use serde_json::json;
+
+        let conn = test_conn();
+        let root = tmp_root("reattach");
+
+        save_artifact(&conn, &root, "t1", valid_doc(reattach_v1_body()).as_bytes()).unwrap();
+
+        // Captured against v1 (offsets per the bridge's UTF-16 visible-text
+        // convention).
+        let text = comments::create_comment(
+            &conn,
+            "t1",
+            1,
+            Some(&json!({
+                "v": 1, "type": "text", "cfy_id": "sec-a", "start": 6, "end": 10,
+                "quote": { "exact": "beta", "prefix": "alpha ", "suffix": " gamma" }
+            })),
+            "why beta?",
+        )
+        .unwrap()
+        .comment;
+        let element = comments::create_comment(
+            &conn,
+            "t1",
+            1,
+            Some(&json!({
+                "v": 1, "type": "element", "cfy_id": "fig-x.node",
+                "quote": { "exact": "Node Label" }
+            })),
+            "why this node?",
+        )
+        .unwrap()
+        .comment;
+        let direct = comments::create_comment(&conn, "t1", 1, None, "a direct question")
+            .unwrap()
+            .comment;
+        let vanishing = comments::create_comment(
+            &conn,
+            "t1",
+            1,
+            Some(&json!({
+                "v": 1, "type": "text", "cfy_id": "sec-gone", "start": 0, "end": 28,
+                "quote": { "exact": "unique disappearing sentence" }
+            })),
+            "about the doomed sentence",
+        )
+        .unwrap()
+        .comment;
+        let applied = comments::create_comment(
+            &conn,
+            "t1",
+            1,
+            Some(&json!({
+                "v": 1, "type": "text", "cfy_id": "sec-a", "start": 6, "end": 10,
+                "quote": { "exact": "beta" }
+            })),
+            "already applied",
+        )
+        .unwrap()
+        .comment;
+        comments::update_comment(&conn, &applied.id, Some(CommentStatus::Applied), None, None)
+            .unwrap();
+
+        let saved2 =
+            save_artifact(&conn, &root, "t1", valid_doc(reattach_v2_body()).as_bytes()).unwrap();
+        assert_eq!(saved2.version, 2);
+
+        // Exactly the four changed rows are reported (for comment-updated
+        // events); the frozen `applied` comment is not among them.
+        let mut reported: Vec<&str> = saved2.reattached.iter().map(|c| c.id.as_str()).collect();
+        reported.sort_unstable();
+        let mut expected = vec![
+            text.id.as_str(),
+            element.id.as_str(),
+            direct.id.as_str(),
+            vanishing.id.as_str(),
+        ];
+        expected.sort_unstable();
+        assert_eq!(reported, expected);
+
+        let all = comments::list_comments(&conn, "t1", None).unwrap();
+
+        // (b) element text edited but id kept → re-anchored via quote, offsets
+        // repaired to the shifted position, version advanced.
+        let c = comment_by_id(&all, &text.id);
+        assert_eq!(c.artifact_version, 2);
+        assert_eq!(c.anchor_state, AnchorState::Anchored);
+        let a = c.anchor.as_ref().unwrap();
+        assert_eq!(a["cfy_id"], "sec-a");
+        assert_eq!(a["start"], 12);
+        assert_eq!(a["end"], 16);
+        assert_eq!(a["quote"]["exact"], "beta", "quote is never rewritten");
+
+        // (a) unchanged element → anchor holds verbatim, version advanced.
+        let c = comment_by_id(&all, &element.id);
+        assert_eq!(c.artifact_version, 2);
+        assert_eq!(c.anchor_state, AnchorState::Anchored);
+        assert_eq!(c.anchor.as_ref().unwrap()["cfy_id"], "fig-x.node");
+
+        // Null anchor → version-agnostic, follows latest trivially.
+        let c = comment_by_id(&all, &direct.id);
+        assert_eq!(c.artifact_version, 2);
+        assert!(c.anchor.is_none());
+
+        // (c) element removed → "reference moved": version STAYS at the last
+        // version where the anchor resolved, anchor untouched, body/status
+        // intact (still readable and answerable).
+        let c = comment_by_id(&all, &vanishing.id);
+        assert_eq!(c.artifact_version, 1);
+        assert_eq!(c.anchor_state, AnchorState::Moved);
+        assert_eq!(c.anchor.as_ref().unwrap()["cfy_id"], "sec-gone");
+        assert_eq!(c.status, CommentStatus::Open);
+        assert_eq!(c.body, "about the doomed sentence");
+
+        // Applied → frozen history: untouched entirely.
+        let c = comment_by_id(&all, &applied.id);
+        assert_eq!(c.artifact_version, 1);
+        assert_eq!(c.anchor_state, AnchorState::Anchored);
+
+        // v3 restores the vanished section → the moved comment HEALS: it
+        // re-attaches (straight from v1's anchor) and the flag clears.
+        let v3_body = format!(
+            "{}{}",
+            reattach_v2_body(),
+            r#"<p data-cfy-id="sec-gone">unique disappearing sentence</p>"#
+        );
+        let saved3 = save_artifact(&conn, &root, "t1", valid_doc(&v3_body).as_bytes()).unwrap();
+        assert_eq!(saved3.version, 3);
+
+        let all = comments::list_comments(&conn, "t1", None).unwrap();
+        let c = comment_by_id(&all, &vanishing.id);
+        assert_eq!(c.artifact_version, 3);
+        assert_eq!(c.anchor_state, AnchorState::Anchored);
+        // The other live comments advanced with it; applied stayed frozen.
+        assert_eq!(comment_by_id(&all, &text.id).artifact_version, 3);
+        assert_eq!(comment_by_id(&all, &applied.id).artifact_version, 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An unchanged row emits nothing: a comment already flagged `moved` whose
+    /// anchor is still unresolvable is not reported again on the next save.
+    #[test]
+    fn still_moved_comment_is_not_rereported() {
+        use crate::comments;
+        use serde_json::json;
+
+        let conn = test_conn();
+        let root = tmp_root("still-moved");
+
+        save_artifact(&conn, &root, "t1", valid_doc(reattach_v1_body()).as_bytes()).unwrap();
+        let doomed = comments::create_comment(
+            &conn,
+            "t1",
+            1,
+            Some(&json!({
+                "v": 1, "type": "text", "cfy_id": "sec-gone", "start": 0, "end": 28,
+                "quote": { "exact": "unique disappearing sentence" }
+            })),
+            "q",
+        )
+        .unwrap()
+        .comment;
+
+        let saved2 =
+            save_artifact(&conn, &root, "t1", valid_doc(reattach_v2_body()).as_bytes()).unwrap();
+        assert_eq!(saved2.reattached.len(), 1, "flagged moved on v2");
+        assert_eq!(saved2.reattached[0].id, doomed.id);
+
+        let saved3 =
+            save_artifact(&conn, &root, "t1", valid_doc(reattach_v2_body()).as_bytes()).unwrap();
+        assert!(
+            saved3.reattached.is_empty(),
+            "still moved, row unchanged → no event: {:?}",
+            saved3.reattached
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Lockstep guard for the open-in-browser path (FR-2.5): the helper the

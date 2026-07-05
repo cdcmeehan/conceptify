@@ -17,11 +17,15 @@
 // meaningful for anchored comments on the *currently viewed* artifact version:
 //  - null-anchor (direct) comments have nothing to scroll to;
 //  - comments on a DIFFERENT version are shown with a version tag but are not
-//    clickable — cross-version re-attachment is bead conceptify-94m.7.
+//    clickable. Server-side re-attachment (FR-4.4, bead conceptify-94m.7)
+//    advances comments onto each new version on save, so open/answered
+//    comments follow the latest automatically; a row left on an older version
+//    is either "reference moved" (its anchor only resolves there — switch the
+//    viewer to that version to scroll to it) or frozen `applied` history.
 //
-// `anchor_state === "moved"` rows get a "reference moved" badge (FR-4.4). The
-// flag is always "anchored" until 94m.7 lands the re-attachment pass; this row
-// renders it so that bead only has to flip the data.
+// `anchor_state === "moved"` rows get a "reference moved" badge (FR-4.4), set
+// by the save-time re-attachment pass when an anchor can't be re-located in
+// the new version (and cleared if a later version restores the content).
 //
 // The persistent open-comment highlights themselves are owned by
 // ArtifactCommentLayer (94m.3/94m.4), not here — this sidebar only reads the

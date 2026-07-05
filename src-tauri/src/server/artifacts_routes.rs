@@ -78,6 +78,24 @@ async fn save_artifact<R: tauri::Runtime>(
                 eprintln!("[conceptify-server] failed to emit artifact-updated event: {e}");
             }
 
+            // FR-4.4 re-attachment: one `comment-updated` per migrated/flagged
+            // comment (the same event shape PATCH /comments emits), so the
+            // sidebar refetches and shows the advanced version / "reference
+            // moved" badge live.
+            for comment in &saved.reattached {
+                if let Err(e) = state.app_handle.emit(
+                    "comment-updated",
+                    &json!({
+                        "project_id": saved.project_id,
+                        "thread_id": comment.thread_id,
+                        "comment_id": comment.id,
+                        "status": comment.status.as_str(),
+                    }),
+                ) {
+                    eprintln!("[conceptify-server] failed to emit comment-updated event: {e}");
+                }
+            }
+
             let response = SaveArtifactResponse {
                 thread_id: saved.thread_id,
                 project_id: saved.project_id,
@@ -160,6 +178,9 @@ mod tests {
         thread_id: String,
         /// `artifact-updated` payloads captured via `listen_any`.
         events: Arc<Mutex<Vec<String>>>,
+        /// `comment-updated` payloads (emitted per re-attached comment,
+        /// FR-4.4) captured via `listen_any`.
+        comment_events: Arc<Mutex<Vec<String>>>,
         db_path: std::path::PathBuf,
         artifacts_dir: std::path::PathBuf,
         // Keeps the mock app (and its event system) alive for the test body.
@@ -219,6 +240,11 @@ mod tests {
         app_handle.listen_any("artifact-updated", move |event| {
             sink.lock().unwrap().push(event.payload().to_owned());
         });
+        let comment_events: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink = comment_events.clone();
+        app_handle.listen_any("comment-updated", move |event| {
+            sink.lock().unwrap().push(event.payload().to_owned());
+        });
 
         let router = routes::build_router(ApiState {
             app_handle,
@@ -232,6 +258,7 @@ mod tests {
             project_id,
             thread_id,
             events,
+            comment_events,
             db_path,
             artifacts_dir,
             _app: app,
@@ -374,6 +401,81 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(count, 0);
+    }
+
+    /// FR-4.4 over HTTP: a follow-up save re-attaches earlier-version
+    /// comments and emits one `comment-updated` per changed comment (same
+    /// payload shape as PATCH /comments), so the sidebar refreshes live.
+    #[tokio::test]
+    async fn save_artifact_emits_comment_updated_for_reattached_comments() {
+        let h = harness("reattach-events");
+
+        // v1 with an anchorable paragraph.
+        let v1 = valid_html(1).replace(
+            "</body>",
+            r#"<p data-cfy-id="sec-a">alpha beta gamma</p></body>"#,
+        );
+        let res = h
+            .router
+            .clone()
+            .oneshot(post(&h.thread_id, &v1, Some(TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Comment anchored to v1 (created through the domain layer — the
+        // comments routes have their own HTTP tests).
+        let comment_id = {
+            let conn = h.db.lock().unwrap();
+            crate::comments::create_comment(
+                &conn,
+                &h.thread_id,
+                1,
+                Some(&serde_json::json!({
+                    "v": 1, "type": "text", "cfy_id": "sec-a", "start": 6, "end": 10,
+                    "quote": { "exact": "beta" }
+                })),
+                "why beta?",
+            )
+            .unwrap()
+            .comment
+            .id
+        };
+        assert!(h.comment_events.lock().unwrap().is_empty());
+
+        // v2 keeps the anchored content → the comment migrates to v2.
+        let v2 = valid_html(2).replace(
+            "</body>",
+            r#"<p data-cfy-id="sec-a">alpha beta gamma</p></body>"#,
+        );
+        let res = h
+            .router
+            .clone()
+            .oneshot(post(&h.thread_id, &v2, Some(TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let events = h.comment_events.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "events: {events:?}");
+        let payload: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
+        assert_eq!(payload["project_id"], h.project_id.as_str());
+        assert_eq!(payload["thread_id"], h.thread_id.as_str());
+        assert_eq!(payload["comment_id"], comment_id.as_str());
+        assert_eq!(payload["status"], "open");
+
+        // And the row really advanced.
+        let (version, state): (i64, String) = {
+            let conn = h.db.lock().unwrap();
+            conn.query_row(
+                "SELECT artifact_version, anchor_state FROM comments WHERE id = ?1",
+                [&comment_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(version, 2);
+        assert_eq!(state, "anchored");
     }
 
     #[tokio::test]
