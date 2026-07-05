@@ -31,7 +31,9 @@ export type ViewerVersion = number | "latest";
  * the store's comment statuses against this set as `comment-updated` events
  * land (no separate counter to drift). `null` when the run was re-attached
  * via `get_active_run` (targets aren't persisted): render an indeterminate
- * spinner. `lastProgress` is the most recent `run-progress` detail line.
+ * spinner. `lastProgress` is the most recent *displayable* `run-progress` line
+ * (filtered/formatted by {@link formatRunProgressLine} — non-actionable noise
+ * like "allowed" rate-limit heartbeats never lands here).
  */
 export interface ActiveRunState {
   runId: string;
@@ -125,6 +127,59 @@ const clearedViewer = {
   activeRun: null as ActiveRunState | null,
   runFailure: null as RunFailureState | null,
 };
+
+/** The nested payload a `rate_limit_event` forwards in `run-progress.detail`
+ *  (compact JSON, produced by `runs.rs` classify_line). All fields optional —
+ *  we only depend on `status` / `isUsingOverage` / `resetsAt`. */
+interface RateLimitInfo {
+  status?: string;
+  resetsAt?: number; // unix seconds
+  isUsingOverage?: boolean;
+  overageStatus?: string;
+  overageResetsAt?: number; // unix seconds
+}
+
+/**
+ * Turn a raw `run-progress` event into a single display line for the activity
+ * feed, or `null` to drop it entirely. This is the ONE place run-progress
+ * display policy lives (bead conceptify-pri) — it feeds both the in-app
+ * generation panel and the sidebar run block, and the full transcript stays on
+ * disk in the run log regardless.
+ *
+ * The only filtered class today is `rate_limit_event`: the claude CLI emits an
+ * informational heartbeat (`rate_limit_info.status === "allowed"`) that read as
+ * a scary warning in the feed. Those are dropped; genuine limiting (a status
+ * other than "allowed", or overage actually in use) is surfaced plainly with
+ * the reset time.
+ */
+export function formatRunProgressLine(kind: string, detail: string): string | null {
+  if (kind === "rate_limit_event") return formatRateLimit(detail);
+  return detail ? `${kind}: ${detail}` : kind;
+}
+
+function formatRateLimit(detail: string): string | null {
+  let info: RateLimitInfo;
+  try {
+    info = JSON.parse(detail) as RateLimitInfo;
+  } catch {
+    // Not the structured payload (older core, or a truncated line): drop it
+    // rather than surface raw JSON noise — the whole point of this filter.
+    return null;
+  }
+  const limited =
+    (info.status != null && info.status !== "allowed") || info.isUsingOverage === true;
+  if (!limited) return null; // informational heartbeat — never surface
+
+  const resetTs =
+    info.isUsingOverage === true ? (info.overageResetsAt ?? info.resetsAt) : info.resetsAt;
+  if (resetTs != null && Number.isFinite(resetTs)) {
+    const t = new Date(resetTs * 1000);
+    const hh = String(t.getHours()).padStart(2, "0");
+    const mm = String(t.getMinutes()).padStart(2, "0");
+    return `Rate limited — waiting for reset ${hh}:${mm}`;
+  }
+  return "Rate limited — waiting for reset";
+}
 
 class AppStore {
   private state: AppState = initialState;
@@ -420,9 +475,10 @@ class AppStore {
   handleRunProgress(payload: { run_id: string; thread_id: string; kind: string; detail: string }): void {
     const run = this.state.activeRun;
     if (run != null && run.runId === payload.run_id) {
-      const line = payload.detail ? `${payload.kind}: ${payload.detail}` : payload.kind;
+      const line = formatRunProgressLine(payload.kind, payload.detail);
+      if (line == null) return; // non-actionable noise (e.g. an "allowed" rate-limit heartbeat)
       const recentProgress = [...run.recentProgress, line].slice(-MAX_RUN_PROGRESS_LINES);
-      this.set({ activeRun: { ...run, lastProgress: payload.detail, recentProgress } });
+      this.set({ activeRun: { ...run, lastProgress: line, recentProgress } });
       return;
     }
     if (run == null && payload.thread_id === this.state.selectedThreadId) {

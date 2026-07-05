@@ -18,6 +18,34 @@ import type { LatestRun, RunLogTail } from "../lib/api";
 import type { ActiveRunState } from "../store/appStore";
 import { appStore } from "../store/appStore";
 
+/**
+ * Seconds elapsed since `key` (the run id) first appeared, ticking once a
+ * second. Resets when the run changes (e.g. Retry spawns a new run id) so the
+ * clock always reflects the current generation. Best-effort: for a run
+ * re-attached after a thread switch we don't know the true start, so this
+ * counts from when the panel began observing it — still enough to read as
+ * "working", which is the point (FR-5.2, bead conceptify-pri). */
+function useElapsedSeconds(key: string | undefined): number {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (key == null) return;
+    const start = Date.now();
+    setElapsed(0);
+    const id = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [key]);
+  return elapsed;
+}
+
+/** `mm:ss`, zero-padded (e.g. 95s → "01:35"). */
+function formatElapsed(totalSeconds: number): string {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
 /** Spinner shared by the progress panel and the retry button. */
 function Spinner({ class: cls }: { class?: string }) {
   return (
@@ -41,6 +69,7 @@ function Spinner({ class: cls }: { class?: string }) {
  */
 export function GenerationProgress({ run }: { run: ActiveRunState | null }) {
   const activity = run?.recentProgress ?? [];
+  const elapsed = useElapsedSeconds(run?.runId);
   return (
     <section class="rounded-lg border border-blue-200 bg-blue-50 p-5 dark:border-blue-500/30 dark:bg-blue-500/10">
       <div class="flex items-center gap-2.5">
@@ -48,6 +77,11 @@ export function GenerationProgress({ run }: { run: ActiveRunState | null }) {
         <p class="flex-1 text-sm font-medium text-blue-800 dark:text-blue-300">
           Generating artifact…
         </p>
+        {run != null && (
+          <span class="shrink-0 tabular-nums text-xs font-medium text-blue-700/80 dark:text-blue-300/70">
+            {formatElapsed(elapsed)}
+          </span>
+        )}
         {run != null && (
           <button
             type="button"
@@ -61,6 +95,7 @@ export function GenerationProgress({ run }: { run: ActiveRunState | null }) {
       </div>
       <p class="mt-1 text-xs text-blue-700/70 dark:text-blue-300/60">
         The agent is authoring your artifact. It appears here the moment it is saved.
+        Complex explanations can take several minutes.
       </p>
       {activity.length > 0 && (
         <ul class="mt-3 space-y-0.5 rounded-md bg-white/60 p-2 font-mono text-[11px] leading-relaxed text-blue-800/80 dark:bg-neutral-950/40 dark:text-blue-200/70">

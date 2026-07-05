@@ -97,6 +97,30 @@ The bulk of the work. Write the file to a temp path (e.g. under
 `$TMPDIR`), **never into the target repo** — the app copies it into its
 own central storage on save.
 
+**Size the effort first.** Before you research, classify the question so
+the artifact matches its weight — this is the difference between a
+two-minute answer and an eight-minute diagram tour for a one-line
+question. Three tiers:
+
+- **COMPACT** — a single concept, a bit of syntax, a definition, a "what
+  does X mean / do" question. Target **300–800 words**. Diagrams **only**
+  if structure genuinely beats prose — usually **none**, occasionally one
+  small bespoke SVG; Shiki-highlighted code blocks are fine and often
+  carry the answer. No task-list ceremony, no multi-diagram tour, and a
+  **lightweight** pre-save review (see step 5). A compact artifact should
+  be authored, reviewed, and saved in a couple of minutes.
+- **STANDARD** — a subsystem, a flow, a "how does X work". The default
+  treatment described in the rest of this section: ~1,000–2,500 words with
+  2–5 visuals.
+- **DEEP** — an architecture tour or a multi-system walkthrough. The full
+  treatment: more diagrams, longer, several code walkthroughs.
+
+**Bias to COMPACT when in doubt** between compact and standard for a short
+question. Under-building is cheap — the reader can comment to interrogate
+any point deeper, which is the whole point of the product loop;
+over-building a small question into a slow, diagram-heavy artifact is the
+failure this step exists to prevent.
+
 **Research first.** Read the actual code before writing a word. The
 artifact must be true of *this* codebase: real file paths, real type and
 function names, real control flow. Never explain from generic knowledge
@@ -120,9 +144,12 @@ of how such systems usually work.
 
 **Quality dos and don'ts:**
 
-- Aim for genuine understanding, not a README: typically 1,000–2,500
-  words of prose plus 2–5 visuals for a single question. Depth over
-  breadth; cut anything that doesn't serve the question. Never pad.
+- Aim for genuine understanding, not a README. The word/visual budget
+  follows the sizing tier above: a STANDARD question runs ~1,000–2,500
+  words plus 2–5 visuals; a COMPACT one runs 300–800 words with few or no
+  diagrams. Depth over breadth; cut anything that doesn't serve the
+  question. Never pad — and never inflate a compact answer to hit the
+  STANDARD budget.
 - Every figure gets a `<figcaption>` that *interprets* ("Note the token
   never crosses this boundary"), never restates the title.
 - Code excerpts: pick the load-bearing 5–30 lines, trim aggressively
@@ -182,14 +209,26 @@ against shape widths and the `viewBox` against actual content extents.
 
 **Visual review (`references/self-review.md`).** Source review cannot see
 overlapping labels, clipped text, contrast, or narrow-pane overflow —
-only a render can. Render the finished HTML headlessly, screenshot it at
-**two widths (~460px and ~900px) in both light and dark**, **Read the
-PNGs**, and judge them against the visual checklist. Fix, re-render, and
-re-read until every frame is clean. The exact copy-pasteable
-`agent-browser` recipe (with the mechanical horizontal-overflow check) and
-the full checklist live in **`references/self-review.md`** — follow it.
-This is the FR-6.3 safety net for hand-authored SVG, the highest-variance
-tier; never skip it.
+only a render can. **The depth of this pass is proportional to what the
+artifact contains:**
+
+- **Artifacts with hand-authored SVG or generated diagrams** — run the
+  full loop: screenshot at **two widths (~460px and ~900px) in both light
+  and dark**, **Read all four PNGs**, and judge them against the visual
+  checklist. Fix, re-render, and re-read until every frame is clean. This
+  is the FR-6.3 safety net for the highest-variance tier; **never skip or
+  shortcut it.**
+- **Text-and-Shiki-only artifacts** (the usual COMPACT shape) — a single
+  **narrow-width (460px) dark-mode** render plus the mechanical
+  `pixelWidth` overflow check suffices: dark catches hardcoded-color
+  mistakes and narrow catches overflow — the only two real bug classes
+  when there is no bespoke SVG. If the render tooling is unavailable, a
+  careful source-only review is acceptable for these (never for
+  diagram-bearing ones).
+
+The exact copy-pasteable `agent-browser` recipe (with the mechanical
+horizontal-overflow check) and the full checklist live in
+**`references/self-review.md`** — follow it.
 
 ### 6. Save and verify
 

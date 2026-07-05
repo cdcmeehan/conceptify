@@ -976,6 +976,18 @@ fn kill_group(_pid: u32) {
 /// Minimal stream-json classification (deliberately shallow — the bead's
 /// contract): `kind` = the line's JSON `type` (or `"output"` for non-JSON),
 /// `detail` = its `subtype` when present, else the truncated raw line.
+///
+/// One structured special case (bead `conceptify-pri`): a `rate_limit_event`
+/// carries no `subtype`, so the generic path would forward the truncated raw
+/// JSON line — which surfaced as scary, half-cut noise in the progress feed
+/// even though almost every such event is a purely informational
+/// `status: "allowed"` heartbeat. Its actionability lives in the nested
+/// `rate_limit_info` object (`status` / `isUsingOverage` / `resetsAt`), so we
+/// forward *that* sub-object as compact JSON. The decision to show or hide it
+/// (and how to phrase genuine limiting) stays in the frontend — the single
+/// place run-progress display policy lives — which can parse this cleanly
+/// instead of a truncated line. Falls back to the generic path if the field
+/// is absent (unexpected shape).
 fn classify_line(line: &str) -> (String, String) {
     match serde_json::from_str::<serde_json::Value>(line) {
         Ok(value) => {
@@ -984,6 +996,13 @@ fn classify_line(line: &str) -> (String, String) {
                 .and_then(|t| t.as_str())
                 .unwrap_or("output")
                 .to_owned();
+            if kind == "rate_limit_event" {
+                if let Some(info) = value.get("rate_limit_info") {
+                    if let Ok(compact) = serde_json::to_string(info) {
+                        return (kind, truncate_chars(&compact, DETAIL_MAX_CHARS));
+                    }
+                }
+            }
             let detail = value
                 .get("subtype")
                 .and_then(|s| s.as_str())
@@ -1227,6 +1246,26 @@ mod tests {
         let (kind, detail) = classify_line(r#"{"type":"assistant","message":{}}"#);
         assert_eq!(kind, "assistant");
         assert_eq!(detail, r#"{"type":"assistant","message":{}}"#);
+
+        // rate_limit_event: no `subtype`, so `detail` carries the nested
+        // `rate_limit_info` as compact JSON (not the truncated raw line) so the
+        // frontend can decide whether to surface it (bead conceptify-pri).
+        let (kind, detail) = classify_line(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1783222800,"isUsingOverage":false},"uuid":"u","session_id":"s"}"#,
+        );
+        assert_eq!(kind, "rate_limit_event");
+        // serde_json re-serializes `Value` maps with alphabetized keys; the
+        // frontend `JSON.parse`s this, so the order is immaterial there.
+        assert_eq!(
+            detail,
+            r#"{"isUsingOverage":false,"resetsAt":1783222800,"status":"allowed"}"#
+        );
+
+        // Malformed rate_limit_event (no `rate_limit_info`) falls back to the
+        // generic truncated-raw-line path rather than dropping the type.
+        let (kind, detail) = classify_line(r#"{"type":"rate_limit_event","oops":true}"#);
+        assert_eq!(kind, "rate_limit_event");
+        assert_eq!(detail, r#"{"type":"rate_limit_event","oops":true}"#);
 
         let (kind, detail) = classify_line("plain text noise");
         assert_eq!(kind, "output");

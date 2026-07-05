@@ -3,10 +3,33 @@
 The last gate before `save-artifact`. Source review catches structural
 problems; **only a render catches visual ones** — overlapping SVG labels,
 clipped text, low contrast, dark-mode breakage, and narrow-pane overflow.
-This is the safety net for the highest-variance tier, **hand-authored
-SVG**, but run it for every artifact.
 
-Do not skip this. Loop it until every frame is clean.
+## How much to run — proportional to the artifact
+
+Match the pass to what the artifact actually contains:
+
+- **Hand-authored SVG or generated diagrams present → the full four-frame
+  loop is mandatory.** Two widths (~460px and ~900px) × two schemes (light
+  and dark), all four PNGs read and judged, looping until clean. Diagrams
+  are the highest-variance tier — this is their FR-6.3 safety net and you
+  **must not skip or shortcut it.** The recipe and checklist below are
+  written for this case.
+- **Text-and-Shiki-only artifact (no bespoke SVG, no rendered diagrams) →
+  a single narrow-width dark render is enough.** Render once at **460px in
+  dark mode** and run the mechanical `pixelWidth` overflow check. Those two
+  cover the only bug classes a diagram-free artifact can have: **dark**
+  surfaces any hardcoded color that breaks on the charcoal ground, and
+  **narrow** surfaces horizontal overflow. Read that one PNG against the
+  text-relevant checklist items (contrast, overflow, unstyled elements,
+  animation-hidden content). If the render tooling is genuinely
+  unavailable, a careful **source-only** review against the checklist is
+  an acceptable substitute — for text-only artifacts, never for
+  diagram-bearing ones.
+
+When unsure which case you are in, run the full loop — it is never wrong,
+only slower.
+
+Do not skip the applicable pass. Loop it until every frame is clean.
 
 ## The mechanism: headless Chromium via `agent-browser`
 

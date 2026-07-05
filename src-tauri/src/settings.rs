@@ -35,7 +35,7 @@
 //!       "args": ["-p", "{prompt}", "--model", "{model}",
 //!                "--permission-mode", "acceptEdits", "--output-format", "stream-json",
 //!                "--verbose", "--strict-mcp-config",
-//!                "--allowedTools", "Bash", "Edit", "Write",
+//!                "--allowedTools", "Bash", "Edit", "Write", "Read", "Glob", "Grep",
 //!                "--disallowedTools", /* web + mutating-git + project-root writes,
 //!                                        see default_adapters() */ "..."],
 //!       "cwd": "{project_root}"
@@ -128,10 +128,16 @@ const SETTINGS_KEY: &str = "agent_settings";
 /// renders) is denied with "command requires approval" — which would break
 /// every flow. Hence the explicit allows:
 ///
-/// - `--allowedTools Bash Edit Write` — every flow needs arbitrary Bash (the
-///   `conceptify` CLI contract, `mktemp`, diagram renderers) and Write/Edit
-///   *outside* the cwd (answer files and artifact working copies live in
-///   `mktemp -d` scratch dirs). A fine-grained Bash whitelist
+/// - `--allowedTools Bash Edit Write Read Glob Grep` — every flow needs
+///   arbitrary Bash (the `conceptify` CLI contract, `mktemp`, diagram
+///   renderers) and Write/Edit *outside* the cwd (answer files and artifact
+///   working copies live in `mktemp -d` scratch dirs). Read/Glob/Grep are
+///   read-only and strictly weaker than the already-allowed Bash (`cat`,
+///   `find`, `grep`), so denying them added zero containment while costing
+///   real turns: every skill-file/PNG Read was permission-denied, agents
+///   fell back to `cat`-probing, and image review was impossible (found
+///   live on bead conceptify-pri — a compact ask burned ~99% of 8 min on
+///   35 permission-friction turns). A fine-grained Bash whitelist
 ///   (`Bash(conceptify:*)`, …) was rejected: prefix rules break on env
 ///   assignments/pipes/quoting and every headless denial is a wasted flail —
 ///   the "prison that breaks the product" §9 warns about.
@@ -195,6 +201,9 @@ fn default_adapters() -> BTreeMap<String, Adapter> {
                 "Bash".to_owned(),
                 "Edit".to_owned(),
                 "Write".to_owned(),
+                "Read".to_owned(),
+                "Glob".to_owned(),
+                "Grep".to_owned(),
                 "--disallowedTools".to_owned(),
                 "WebFetch".to_owned(),
                 "WebSearch".to_owned(),
@@ -752,8 +761,8 @@ mod tests {
         assert_eq!(inv.program, "claude");
         assert_eq!(inv.args[0], "-p");
         assert_eq!(inv.args[1], evil);
-        // The default template has 30 args; nothing was injected/split.
-        assert_eq!(inv.args.len(), 30);
+        // The default template has 33 args; nothing was injected/split.
+        assert_eq!(inv.args.len(), 33);
         // The model/permission structure is intact and untouched by the prompt.
         assert_eq!(inv.args[2], "--model");
         assert_eq!(inv.args[3], "claude-haiku-4-5");
@@ -788,6 +797,9 @@ mod tests {
                 "Bash",
                 "Edit",
                 "Write",
+                "Read",
+                "Glob",
+                "Grep",
                 "--disallowedTools",
                 "WebFetch",
                 "WebSearch",

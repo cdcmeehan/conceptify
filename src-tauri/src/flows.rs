@@ -1006,10 +1006,11 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
 ## How to author — exact contract
 1. Read ~/.claude/skills/conceptify/SKILL.md in full, then every skill file it tells you to read (the artifact spec, the design system, and the rendering + self-review references). They are the contract for what a valid artifact is, not background.
 2. Follow the skill's authoring flow, but the project and thread are ALREADY created for you: SKIP its "Check the CLI", "Ensure the project", and "Create the thread" steps entirely — never run `conceptify ensure-project` or `conceptify create-thread`. Start at "Author the artifact".
-3. Research the real code under the project root before writing a word — the artifact must be true of THIS codebase (real file paths, real type and function names, real control flow), never generic knowledge of how such systems usually work.
-4. Author the artifact into a temp file (e.g. under $TMPDIR), NEVER inside the project root — the app copies it into its own storage on save. The question above must reappear verbatim in `<meta name="cfy:question">`, and this is a new thread so `<meta name="cfy:version">` is `1`.
-5. Run the skill's pre-save review in full — the source review AND the visual self-review (references/self-review.md) — and fix until every frame is clean.
-6. Publish, exactly once, as the very last CLI call:
+3. Size your effort to the question per the skill's sizing step: a compact question — a single concept, a definition, a bit of syntax — warrants a compact artifact (a few hundred words, diagrams only if they truly earn their place, a lightweight review) and should land in a couple of minutes; reserve the full multi-diagram treatment for subsystem and architecture questions.
+4. Research the real code under the project root before writing a word — the artifact must be true of THIS codebase (real file paths, real type and function names, real control flow), never generic knowledge of how such systems usually work.
+5. Author the artifact into a temp file (e.g. under $TMPDIR), NEVER inside the project root — the app copies it into its own storage on save. The question above must reappear verbatim in `<meta name="cfy:question">`, and this is a new thread so `<meta name="cfy:version">` is `1`.
+6. Run the skill's pre-save review, sized to the artifact (the skill's proportional rule): always the source review, plus the visual self-review — the full four-frame loop for any hand-authored SVG or generated diagram, a single narrow dark-mode render for a text-and-code-only artifact — and fix until it is clean.
+7. Publish, exactly once, as the very last CLI call:
    conceptify save-artifact --thread {thread_id} --file <path-to-your-artifact.html>
 
 ## Hard rules
@@ -1237,10 +1238,11 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
 ## How to author — exact contract
 1. Read ~/.claude/skills/conceptify/SKILL.md in full, then every skill file it tells you to read (the artifact spec, the design system, and the rendering + self-review references). They are the contract for what a valid artifact is, not background.
 2. Follow the skill's authoring flow, but the project and thread are ALREADY created for you: SKIP its "Check the CLI", "Ensure the project", and "Create the thread" steps entirely — never run `conceptify ensure-project` or `conceptify create-thread`. Start at "Author the artifact".
-3. Research the real code under the project root before writing a word — the artifact must be true of THIS codebase (real file paths, real type and function names, real control flow), never generic knowledge of how such systems usually work.
-4. Author the artifact into a temp file (e.g. under $TMPDIR), NEVER inside the project root — the app copies it into its own storage on save. The question above must reappear verbatim in `<meta name="cfy:question">`, and this is a new thread so `<meta name="cfy:version">` is `1`.
-5. Run the skill's pre-save review in full — the source review AND the visual self-review (references/self-review.md) — and fix until every frame is clean.
-6. Publish, exactly once, as the very last CLI call:
+3. Size your effort to the question per the skill's sizing step: a compact question — a single concept, a definition, a bit of syntax — warrants a compact artifact (a few hundred words, diagrams only if they truly earn their place, a lightweight review) and should land in a couple of minutes; reserve the full multi-diagram treatment for subsystem and architecture questions.
+4. Research the real code under the project root before writing a word — the artifact must be true of THIS codebase (real file paths, real type and function names, real control flow), never generic knowledge of how such systems usually work.
+5. Author the artifact into a temp file (e.g. under $TMPDIR), NEVER inside the project root — the app copies it into its own storage on save. The question above must reappear verbatim in `<meta name="cfy:question">`, and this is a new thread so `<meta name="cfy:version">` is `1`.
+6. Run the skill's pre-save review, sized to the artifact (the skill's proportional rule): always the source review, plus the visual self-review — the full four-frame loop for any hand-authored SVG or generated diagram, a single narrow dark-mode render for a text-and-code-only artifact — and fix until it is clean.
+7. Publish, exactly once, as the very last CLI call:
    conceptify save-artifact --thread thread-1 --file <path-to-your-artifact.html>
 
 ## Hard rules
