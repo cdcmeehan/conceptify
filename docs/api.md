@@ -58,7 +58,7 @@ webview updates live instead of polling. The frontend subscribes with
 | `navigate` | `POST /api/v1/open` | `{ project_id: string, thread_id: string \| null }` |
 | `run-progress` | agent-run engine (`runs` module, not an HTTP route) | `{ run_id: string, thread_id: string, kind: string, detail: string }` |
 | `run-finished` | agent-run engine (`runs` module, not an HTTP route) | `{ run_id: string, thread_id: string, status: string }` |
-| `thread-updated` | follow-up flow layer (`flows` module, not an HTTP route): thread status changes owned by the run lifecycle (apply-mode `updating` ↔ `ready`, PRD §4) | `{ project_id: string, thread_id: string, status: string }` |
+| `thread-updated` | flow layer (`flows` module, not an HTTP route): thread status changes owned by the run lifecycle — apply-mode `updating` ↔ `ready`, and in-app-ask generation `generating` → `error` (or `generating` again on Retry), PRD §4 | `{ project_id: string, thread_id: string, status: string }` |
 
 `artifact-updated` is the viewer's live-refresh trigger (PRD N2: save →
 visible refresh < 500ms): the frontend reloads the artifact iframe for
@@ -123,6 +123,23 @@ and are invoked by the app shell as Tauri commands (snake_case args):
   `{ run_id, log_path, lines }` (default last 30 lines) — FR-4.8 failure
   surfacing; `log_path` is always returned even when the file is unreadable.
 
+The in-app ask flow (FR-5.1/5.2/5.3, bead 959.1/959.2) adds three more:
+
+- `ask_from_app { project_id, title?, question }` → `{ run_id, thread_id }` —
+  FR-5.1: creates a thread (status `generating`) and spawns ONE headless
+  `ask` (`mode: "ask"`, `Purpose::InAppAsk`) generation run whose contract is
+  to author an artifact per the installed Conceptify skill and publish it via
+  `conceptify save-artifact` into that thread. `title` is optional (derived
+  from the question's first words when blank). `cwd` = project root. Errors
+  (user-facing strings): empty question, unknown project, missing agent/CLI.
+- `retry_ask { thread_id }` → `{ run_id, thread_id }` — FR-5.3: re-spawns the
+  SAME question into the SAME thread, moving it back to `generating`. A fresh
+  `follow_up_runs` row is created; the failed run's history stays on disk.
+- `get_latest_run { thread_id }` → `{ run_id, mode, status }` or `null` — the
+  most recent run row for a thread (any mode/status). The FR-5.3 error state
+  uses it to resolve the failed generation run's id for `get_run_log_tail`;
+  unlike `get_active_run` (live runs only) it works after an app restart.
+
 **Apply ordering (FR-4.7 × FR-4.4):** the apply prompt instructs the agent to
 finish all edits, then run `resolve-comment --applied` for **every** target
 comment, then `save-artifact` exactly once, last. `applied` comments are
@@ -139,6 +156,18 @@ by the agent's mid-run `save-artifact` is never regressed); each change emits
 `thread-updated`. Answer runs never touch thread status, and **no follow-up
 run ever sets thread status `error`** — that state belongs to generation runs
 (FR-5.3); follow-up failures are surfaced by the run-status UI instead.
+
+**Ask (generation) status (FR-5.2/5.3):** an in-app ask leaves the thread
+`generating` until the agent's mid-run `save-artifact` flips it to `ready`
+(that endpoint owns the `→ ready` transition and emits `artifact-updated`,
+which swaps the viewer in). A completion watcher then does ONE conditional
+`generating → error` transition on any terminal run outcome — this both
+surfaces a crash / timeout / cancel AND treats a run that exited 0 but never
+saved (completed-without-artifact) as an error, while never regressing a
+`ready` the save already set (the conditional no-ops from `ready`). N4: a
+start that fails *after* the thread row exists (missing CLI, gone cwd, spawn
+failure) also flips the thread to `error`, so a generation is never stranded
+in `generating`. Retry re-enters `generating` and re-spawns.
 
 **Child environment:** the flow layer resolves the `conceptify` CLI
 (`CONCEPTIFY_CLI` env override → binary sibling of the app executable →

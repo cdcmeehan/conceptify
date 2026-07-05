@@ -39,7 +39,15 @@ export interface ActiveRunState {
   mode: RunMode;
   targetIds: string[] | null;
   lastProgress: string | null;
+  /** A small rolling log of the most recent parsed `run-progress` lines
+   *  (`kind` + `detail`), newest last. Drives the FR-5.2 in-app generation
+   *  progress panel's activity feed; the sidebar run block only uses
+   *  `lastProgress`. Capped at {@link MAX_RUN_PROGRESS_LINES}. */
+  recentProgress: string[];
 }
+
+/** How many `run-progress` lines the rolling activity feed keeps (FR-5.2). */
+const MAX_RUN_PROGRESS_LINES = 8;
 
 /** A terminal failure (`failed`/`timeout`) of the latest run on the selected
  *  thread (FR-4.8): drives the inline failure panel with the on-demand log
@@ -321,6 +329,7 @@ class AppStore {
         mode: started.mode,
         targetIds: started.target_comment_ids,
         lastProgress: null,
+        recentProgress: [],
       },
       runFailure: null,
     });
@@ -341,6 +350,59 @@ class AppStore {
         mode: started.mode,
         targetIds: started.target_comment_ids,
         lastProgress: null,
+        recentProgress: [],
+      },
+      runFailure: null,
+    });
+  }
+
+  /**
+   * Start an FR-5.1 in-app ask: create a thread + generation run, then navigate
+   * to it (status `generating`, progress panel live). Reads `selectedProjectId`
+   * for the target project. Throws (so the composer surfaces the message inline)
+   * on an empty question / unknown project / missing agent. On success the new
+   * thread is selected and its `ask` run tracked so progress lands immediately.
+   */
+  async askFromApp(title: string | null, question: string): Promise<void> {
+    const projectId = this.state.selectedProjectId;
+    if (projectId == null) throw new Error("select a project first");
+
+    const started = await api.askFromApp(projectId, title, question);
+    // Make the new thread appear, then select it. `selectThread` clears viewer
+    // state (incl. activeRun), so record the ask run AFTER selecting.
+    await this.refetchThreads(projectId);
+    this.selectThread(started.thread_id);
+    if (this.state.selectedThreadId === started.thread_id) {
+      this.set({
+        activeRun: {
+          runId: started.run_id,
+          threadId: started.thread_id,
+          mode: "ask",
+          targetIds: null,
+          lastProgress: null,
+          recentProgress: [],
+        },
+        runFailure: null,
+      });
+    }
+  }
+
+  /**
+   * Retry a failed in-app ask (FR-5.3): re-spawn the same question into the same
+   * thread. The thread returns to `generating` (via the `thread-updated` event);
+   * we record the new `ask` run so the progress panel shows immediately.
+   */
+  async retryAsk(threadId: string): Promise<void> {
+    const started = await api.retryAsk(threadId);
+    if (this.state.selectedThreadId !== threadId) return;
+    this.set({
+      activeRun: {
+        runId: started.run_id,
+        threadId: started.thread_id,
+        mode: "ask",
+        targetIds: null,
+        lastProgress: null,
+        recentProgress: [],
       },
       runFailure: null,
     });
@@ -355,7 +417,9 @@ class AppStore {
   handleRunProgress(payload: { run_id: string; thread_id: string; kind: string; detail: string }): void {
     const run = this.state.activeRun;
     if (run != null && run.runId === payload.run_id) {
-      this.set({ activeRun: { ...run, lastProgress: payload.detail } });
+      const line = payload.detail ? `${payload.kind}: ${payload.detail}` : payload.kind;
+      const recentProgress = [...run.recentProgress, line].slice(-MAX_RUN_PROGRESS_LINES);
+      this.set({ activeRun: { ...run, lastProgress: payload.detail, recentProgress } });
       return;
     }
     if (run == null && payload.thread_id === this.state.selectedThreadId) {
@@ -373,10 +437,24 @@ class AppStore {
     void this.refetchComments(payload.thread_id);
     void this.refetchThreads();
 
-    if (this.state.activeRun?.runId === payload.run_id) {
+    const finishing =
+      this.state.activeRun?.runId === payload.run_id ? this.state.activeRun : null;
+    // An `ask` (generation) run's failure surfaces in the MAIN thread view — via
+    // the thread's `error` status + the generation-error panel (log + Retry) —
+    // not the comments sidebar. Detect it by the tracked run's mode, or (for an
+    // untracked run) by the thread having no artifact yet (answer/apply runs
+    // always operate on an existing artifact).
+    const isGenerationRun =
+      finishing?.mode === "ask" ||
+      (finishing == null &&
+        payload.thread_id === this.state.selectedThreadId &&
+        this.state.artifactVersions.length === 0);
+
+    if (finishing != null) {
       this.set({ activeRun: null });
     }
     if (
+      !isGenerationRun &&
       (payload.status === "failed" || payload.status === "timeout") &&
       payload.thread_id === this.state.selectedThreadId
     ) {
@@ -408,6 +486,7 @@ class AppStore {
             mode: run.mode,
             targetIds: null,
             lastProgress: null,
+            recentProgress: [],
           },
         });
       } else if (this.state.activeRun?.threadId === threadId) {

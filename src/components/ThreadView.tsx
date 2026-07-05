@@ -18,9 +18,11 @@ import { useCallback, useRef, useState } from "preact/hooks";
 import * as api from "../lib/api";
 import type { Thread } from "../lib/api";
 import { artifactBridge } from "../lib/bridge";
+import type { ActiveRunState } from "../store/appStore";
 import { appStore, useAppStore } from "../store/appStore";
 import { ArtifactCommentLayer } from "./ArtifactCommentLayer";
 import { CommentsSidebar } from "./CommentsSidebar";
+import { GenerationError, GenerationProgress } from "./GenerationView";
 import { StatusChip } from "./StatusChip";
 
 export function ThreadView({ thread }: { thread: Thread | null }) {
@@ -195,7 +197,7 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
               ) : null}
             </div>
           ) : (
-            <NoArtifactState thread={thread} />
+            <NoArtifactState thread={thread} activeRun={state.activeRun} />
           )}
         </div>
 
@@ -217,9 +219,21 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
 }
 
 /** Body shown while the thread has no saved artifact versions at all:
- *  generating/updating → progress placeholder (streamed progress is M6);
- *  error → failure state (log viewing is M5); ready → neutral empty state. */
-function NoArtifactState({ thread }: { thread: Thread }) {
+ *  generating/updating → the FR-5.2 live progress panel (streamed agent
+ *  activity + cancel); error → the FR-5.3 failure state (log tail + one-click
+ *  Retry); ready → neutral empty state. `activeRun` drives the progress feed;
+ *  it is only used here for the `ask` generation run (the thread has no artifact
+ *  yet, so it can't be an answer/apply run). */
+function NoArtifactState({
+  thread,
+  activeRun,
+}: {
+  thread: Thread;
+  activeRun: ActiveRunState | null;
+}) {
+  // Only surface progress for a run that actually belongs to this thread.
+  const run = activeRun != null && activeRun.threadId === thread.id ? activeRun : null;
+
   return (
     <div class="min-h-0 flex-1 overflow-y-auto p-5">
       <div class="mx-auto max-w-2xl">
@@ -235,24 +249,9 @@ function NoArtifactState({ thread }: { thread: Thread }) {
         )}
 
         {thread.status === "error" ? (
-          <section class="rounded-lg border border-rose-200 bg-rose-50 p-8 text-center dark:border-rose-500/30 dark:bg-rose-500/10">
-            <p class="text-sm font-medium text-rose-700 dark:text-rose-300">
-              Generation failed
-            </p>
-            <p class="mt-1 text-xs text-rose-600/80 dark:text-rose-400/80">
-              No artifact was produced for this thread. Run logs land here in a
-              later milestone.
-            </p>
-          </section>
+          <GenerationError threadId={thread.id} />
         ) : thread.status === "generating" || thread.status === "updating" ? (
-          <section class="rounded-lg border border-dashed border-neutral-300 bg-white/50 p-8 text-center dark:border-neutral-700 dark:bg-neutral-950/40">
-            <p class="animate-pulse text-sm font-medium text-neutral-500 dark:text-neutral-400">
-              Generating artifact…
-            </p>
-            <p class="mt-1 text-xs text-neutral-400">
-              The artifact appears here the moment it is saved.
-            </p>
-          </section>
+          <GenerationProgress run={run} />
         ) : (
           <section class="rounded-lg border border-dashed border-neutral-300 bg-white/50 p-8 text-center dark:border-neutral-700 dark:bg-neutral-950/40">
             <p class="text-sm font-medium text-neutral-500 dark:text-neutral-400">

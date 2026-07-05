@@ -67,7 +67,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
@@ -108,6 +108,26 @@ pub struct FlowStarted {
     pub target_comment_ids: Vec<String>,
 }
 
+/// What a started in-app ask (bead `conceptify-959.1`, FR-5.1) hands back to the
+/// composer: the new (or, on retry, the same) thread and the generation run now
+/// authoring its artifact.
+#[derive(Debug, Clone)]
+pub struct AskStarted {
+    pub run_id: String,
+    pub thread_id: String,
+}
+
+/// The most recent run row for a thread (any mode/status), for the FR-5.3 error
+/// state on the thread view: it needs the failed generation run's id to load
+/// the log tail and offer Retry, even after an app restart when no live run is
+/// tracked in memory.
+#[derive(Debug, Clone)]
+pub struct LatestRun {
+    pub run_id: String,
+    pub mode: String,
+    pub status: String,
+}
+
 /// A live run's identity for the FR-4.8 UI (`get_active_run` command): the
 /// registry says *which* run is live, the DB row supplies its mode.
 #[derive(Debug, Clone)]
@@ -141,6 +161,15 @@ pub enum FlowError {
          binary, and the login-shell PATH); install it with `just install-cli`"
     )]
     CliNotFound,
+
+    #[error("question must not be empty")]
+    EmptyQuestion,
+
+    #[error("project not found: {0}")]
+    ProjectNotFound(String),
+
+    #[error(transparent)]
+    Thread(#[from] threads::ThreadError),
 
     #[error(transparent)]
     Context(#[from] ContextError),
@@ -413,6 +442,275 @@ fn emit_thread_updated<R: Runtime>(
 }
 
 // ---------------------------------------------------------------------------
+// In-app ask (PRD §7.5, UC5, FR-5.1/5.2/5.3) — beads 959.1 / 959.2
+// ---------------------------------------------------------------------------
+
+/// Start an FR-5.1 **in-app ask**: create a fresh thread in `project_id`
+/// (status `generating`) and spawn a headless generation run
+/// ([`RunMode::Ask`]) whose contract is to author an artifact per the
+/// Conceptify skill and publish it via `conceptify save-artifact` into this
+/// thread.
+///
+/// `title` is the composer's optional title; when blank it is derived from the
+/// question ([`derive_title`]). The run's `cwd` is the project root (via the
+/// adapter's `{project_root}` cwd template — see [`runs::start_run`]).
+///
+/// Status policy (FR-5.2/5.3): the thread stays `generating` until the agent's
+/// mid-run `save-artifact` flips it to `ready` (that endpoint owns the `→ ready`
+/// transition and emits `artifact-updated`, which swaps the viewer in). A
+/// completion watcher then conditionally flips `generating → error` on any
+/// terminal outcome that left no artifact — see [`error_thread_if_generating`].
+/// N4: a start that fails *after* the thread row exists (CLI missing, cwd gone,
+/// spawn failure) flips the new thread to `error` rather than stranding it in
+/// `generating`.
+pub async fn ask_from_app<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    project_id: &str,
+    title: Option<&str>,
+    question: &str,
+) -> Result<AskStarted, FlowError> {
+    let question = question.trim();
+    if question.is_empty() {
+        return Err(FlowError::EmptyQuestion);
+    }
+    let title = derive_title(title, question);
+
+    let db = app_handle.state::<DbHandle>().inner().clone();
+
+    // One lock: verify the project (for a clean 404 + to read its root) and
+    // create the thread (which also validates the project, redundantly but
+    // harmlessly). `create_thread` sets status `generating`.
+    let pid = project_id.to_owned();
+    let title_owned = title.clone();
+    let question_owned = question.to_owned();
+    let (thread_id, slug, project_root) = db::with_conn_result(
+        &db,
+        move |conn| -> Result<(String, String, String), FlowError> {
+            let root: Option<String> = conn
+                .query_row("SELECT root_path FROM projects WHERE id = ?1", [&pid], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            let Some(root) = root else {
+                return Err(FlowError::ProjectNotFound(pid.clone()));
+            };
+            let thread = threads::create_thread(conn, &pid, &title_owned, &question_owned)?;
+            Ok((thread.id, thread.slug, root))
+        },
+    )
+    .await?;
+
+    match try_spawn_ask(
+        app_handle,
+        &db,
+        project_id,
+        &thread_id,
+        &slug,
+        &title,
+        question,
+        &project_root,
+    )
+    .await
+    {
+        Ok(started) => Ok(started),
+        Err(e) => {
+            // Never leave the freshly-created thread stuck `generating` (N4):
+            // flip it to `error` so the thread view shows the failure + Retry.
+            error_thread_if_generating(app_handle, &db, project_id, &thread_id).await;
+            Err(e)
+        }
+    }
+}
+
+/// Retry a failed in-app ask (FR-5.3): re-spawn the SAME question into the SAME
+/// thread and move it back to `generating`. Loads the thread's question/title/
+/// project via [`context::thread_context`] (→ [`ContextError::ThreadNotFound`]
+/// for an unknown id). The thread is set `generating` *before* the run starts
+/// so the watcher's conditional `generating → error` can never race a stale
+/// `error`; a rejected start reverts it to `error`.
+pub async fn retry_ask<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    thread_id: &str,
+) -> Result<AskStarted, FlowError> {
+    let db = app_handle.state::<DbHandle>().inner().clone();
+
+    let tid = thread_id.to_owned();
+    let (project_id, project_root, slug, title, question) = db::with_conn_result(
+        &db,
+        move |conn| -> Result<(String, String, String, String, String), FlowError> {
+            let ctx = context::thread_context(conn, &tid)?;
+            Ok((
+                ctx.project.id,
+                ctx.project.root_path,
+                ctx.thread.slug,
+                ctx.thread.title,
+                ctx.thread.initial_question,
+            ))
+        },
+    )
+    .await?;
+
+    // Show the thread `generating` again immediately (Retry is a fresh
+    // generation into the same thread). Set BEFORE `start_run`: this closes the
+    // window where the run could finish (and its watcher fire) before the thread
+    // left `error`.
+    {
+        let tid = thread_id.to_owned();
+        db::with_conn(&db, move |conn| {
+            threads::set_thread_status(conn, &tid, ThreadStatus::Generating)
+        })
+        .await?;
+        emit_thread_updated(app_handle, &project_id, thread_id, "generating");
+    }
+
+    match try_spawn_ask(
+        app_handle,
+        &db,
+        &project_id,
+        thread_id,
+        &slug,
+        &title,
+        &question,
+        &project_root,
+    )
+    .await
+    {
+        Ok(started) => Ok(started),
+        Err(e) => {
+            error_thread_if_generating(app_handle, &db, &project_id, thread_id).await;
+            Err(e)
+        }
+    }
+}
+
+/// Assemble the ask prompt, prepare the child env, start the generation run,
+/// and attach the FR-5.3 completion watcher. Shared by [`ask_from_app`] and
+/// [`retry_ask`]; on any error the callers flip the thread to `error`.
+#[allow(clippy::too_many_arguments)]
+async fn try_spawn_ask<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    db: &DbHandle,
+    project_id: &str,
+    thread_id: &str,
+    slug: &str,
+    title: &str,
+    question: &str,
+    project_root: &str,
+) -> Result<AskStarted, FlowError> {
+    let prompt = build_ask_prompt(&AskPromptContext {
+        thread_id,
+        slug,
+        title,
+        question,
+        project_root,
+    });
+    let env = child_env().await?;
+
+    let started = runs::start_run(
+        app_handle,
+        StartRun {
+            thread_id: thread_id.to_owned(),
+            mode: RunMode::Ask,
+            prompt,
+            env,
+        },
+    )
+    .await?;
+
+    // Completion watcher (FR-5.3, N4). On ANY terminal outcome, conditionally
+    // flip `generating → error`. This single conditional both (a) surfaces a
+    // crash / timeout / cancel and (b) catches a run that exited 0 but never
+    // saved (completed-without-artifact → error), while NEVER regressing a
+    // `ready` the agent's mid-run `save-artifact` already set — that transition
+    // no-ops from `ready`. Same race-free pattern as the apply watcher's revert.
+    {
+        let app_handle = app_handle.clone();
+        let db = db.clone();
+        let project_id = project_id.to_owned();
+        let thread_id = thread_id.to_owned();
+        let finished = started.finished;
+        tauri::async_runtime::spawn(async move {
+            // A dropped sender (engine supervision died — N4 says it can't)
+            // still falls through to the same conditional flip.
+            if let Ok(fin) = finished.await {
+                if matches!(
+                    fin.status,
+                    RunStatus::Failed | RunStatus::TimedOut | RunStatus::Cancelled
+                ) {
+                    eprintln!(
+                        "[conceptify-flows] ask run {} on thread {} ended {} (exit {:?}); log: {}",
+                        fin.run_id,
+                        fin.thread_id,
+                        fin.status.as_str(),
+                        fin.exit_code,
+                        fin.log_path.display()
+                    );
+                }
+            }
+            error_thread_if_generating(&app_handle, &db, &project_id, &thread_id).await;
+        });
+    }
+
+    Ok(AskStarted {
+        run_id: started.run_id,
+        thread_id: thread_id.to_owned(),
+    })
+}
+
+/// Conditionally flip `generating → error` after a generation run ended without
+/// leaving an artifact (FR-5.3). Emits `thread-updated {status: "error"}` only
+/// when a row actually changed — a `ready` set by a mid-run `save-artifact` is
+/// left untouched (the conditional UPDATE no-ops from `ready`), so a run that
+/// saved and then failed/cancelled never regresses the thread to `error`.
+async fn error_thread_if_generating<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    db: &DbHandle,
+    project_id: &str,
+    thread_id: &str,
+) {
+    let tid = thread_id.to_owned();
+    let changed = db::with_conn(db, move |conn| {
+        threads::transition_thread_status(conn, &tid, ThreadStatus::Generating, ThreadStatus::Error)
+    })
+    .await;
+    match changed {
+        Ok(true) => emit_thread_updated(app_handle, project_id, thread_id, "error"),
+        Ok(false) => {} // already `ready` (agent saved) — leave it alone
+        Err(e) => eprintln!("[conceptify-flows] failed to error thread {thread_id}: {e}"),
+    }
+}
+
+/// Derive a thread title from the question when the composer left the title
+/// field blank: the first [`MAX_TITLE_WORDS`] words, capped at
+/// [`MAX_TITLE_CHARS`]. `create_thread` slugifies and per-project-dedupes it, so
+/// this only needs to be a readable label, never unique. A trimmed non-empty
+/// question always yields ≥ 1 word, so the derived title is never empty.
+fn derive_title(title: Option<&str>, question: &str) -> String {
+    const MAX_TITLE_WORDS: usize = 8;
+    const MAX_TITLE_CHARS: usize = 80;
+
+    if let Some(explicit) = title.map(str::trim).filter(|s| !s.is_empty()) {
+        return explicit.to_owned();
+    }
+
+    let derived: String = question
+        .split_whitespace()
+        .take(MAX_TITLE_WORDS)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if derived.chars().count() > MAX_TITLE_CHARS {
+        derived
+            .chars()
+            .take(MAX_TITLE_CHARS)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    } else {
+        derived
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Active-run lookup + log tail (FR-4.8 support)
 // ---------------------------------------------------------------------------
 
@@ -437,6 +735,30 @@ pub fn active_run_summary(
         thread_id: thread_id.to_owned(),
         mode,
     }))
+}
+
+/// The most recent run row for a thread (most recent `started_at`), or `None`
+/// if the thread has never run. Backs the `get_latest_run` command: the FR-5.3
+/// error state on the thread view resolves the failed generation run's id from
+/// here to load its log tail — this works even after an app restart, when the
+/// in-memory registry (used by [`active_run_summary`]) is empty.
+pub fn latest_run_for_thread(
+    conn: &Connection,
+    thread_id: &str,
+) -> Result<Option<LatestRun>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT id, mode, status FROM follow_up_runs
+         WHERE thread_id = ?1 ORDER BY started_at DESC, id DESC LIMIT 1",
+        [thread_id],
+        |r| {
+            Ok(LatestRun {
+                run_id: r.get(0)?,
+                mode: r.get(1)?,
+                status: r.get(2)?,
+            })
+        },
+    )
+    .optional()
 }
 
 /// Last `max` lines of a run log (FR-4.8 failure surfacing). Reads the whole
@@ -651,6 +973,58 @@ Why this order: `--applied` freezes each comment at the artifact version it was 
     )
 }
 
+/// Inputs to the in-app ask prompt (bead `conceptify-959.1`): the freshly-created
+/// thread's identity, the reader's question, and the project root the agent
+/// researches and runs from. Unlike the follow-up prompts there are no comments
+/// or prior artifact — this is a first-generation run.
+pub(crate) struct AskPromptContext<'a> {
+    pub thread_id: &'a str,
+    pub slug: &'a str,
+    pub title: &'a str,
+    pub question: &'a str,
+    pub project_root: &'a str,
+}
+
+/// The FR-5.1 in-app-ask prompt. Contract highlights: read the installed
+/// Conceptify skill and follow its authoring flow, but the project/thread are
+/// ALREADY created (skip `ensure-project`/`create-thread`); author into a temp
+/// file (never the repo); publish exactly once via `save-artifact --thread` as
+/// the final CLI call. Carries the same toolset-scope hint as the follow-up
+/// prompts (repo read-only, temp dirs writable, web/mutating-git denied — see
+/// settings.rs `default_adapters()` / docs/api.md permission scoping).
+pub(crate) fn build_ask_prompt(ctx: &AskPromptContext) -> String {
+    format!(
+        r#"You are Conceptify's in-app author, running headless inside the project this artifact will explain.
+
+A reader typed a question into Conceptify and wants a self-contained HTML explanation artifact published back into the app. Author it per the Conceptify artifact spec and publish it through the `conceptify` CLI (it is on your PATH). The project and thread already exist — do NOT create them.
+
+## Context
+- Project root (your working directory): {project_root}
+- Thread: "{title}" (thread id: {thread_id}, slug: {slug})
+- The question to answer (verbatim): {question}
+
+## How to author — exact contract
+1. Read ~/.claude/skills/conceptify/SKILL.md in full, then every skill file it tells you to read (the artifact spec, the design system, and the rendering + self-review references). They are the contract for what a valid artifact is, not background.
+2. Follow the skill's authoring flow, but the project and thread are ALREADY created for you: SKIP its "Check the CLI", "Ensure the project", and "Create the thread" steps entirely — never run `conceptify ensure-project` or `conceptify create-thread`. Start at "Author the artifact".
+3. Research the real code under the project root before writing a word — the artifact must be true of THIS codebase (real file paths, real type and function names, real control flow), never generic knowledge of how such systems usually work.
+4. Author the artifact into a temp file (e.g. under $TMPDIR), NEVER inside the project root — the app copies it into its own storage on save. The question above must reappear verbatim in `<meta name="cfy:question">`, and this is a new thread so `<meta name="cfy:version">` is `1`.
+5. Run the skill's pre-save review in full — the source review AND the visual self-review (references/self-review.md) — and fix until every frame is clean.
+6. Publish, exactly once, as the very last CLI call:
+   conceptify save-artifact --thread {thread_id} --file <path-to-your-artifact.html>
+
+## Hard rules
+- The project and thread already exist: never run `conceptify ensure-project` or `conceptify create-thread`. Publish only into thread {thread_id}.
+- Exactly one save-artifact per run, as the final CLI call. If you cannot produce a valid artifact, do NOT run save-artifact — an honest failure beats publishing a broken one.
+- Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root — read the project freely, but write only under your temp working directory.
+"#,
+        project_root = ctx.project_root,
+        title = ctx.title,
+        thread_id = ctx.thread_id,
+        slug = ctx.slug,
+        question = ctx.question,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,6 +1213,60 @@ Why this order: `--applied` freezes each comment at the artifact version it was 
 - If the file ~/.claude/skills/conceptify/references/follow-ups.md exists, read it first — it holds the house rules for follow-up and apply runs.
 "#;
         assert_eq!(prompt, expected);
+    }
+
+    #[test]
+    fn ask_prompt_exact_for_fixture() {
+        let prompt = build_ask_prompt(&AskPromptContext {
+            thread_id: "thread-1",
+            slug: "how-does-oauth-work",
+            title: "How does OAuth work?",
+            question: "Explain the OAuth 2.0 authorization code flow.",
+            project_root: "/Users/chris/code/myrepo",
+        });
+
+        let expected = r#"You are Conceptify's in-app author, running headless inside the project this artifact will explain.
+
+A reader typed a question into Conceptify and wants a self-contained HTML explanation artifact published back into the app. Author it per the Conceptify artifact spec and publish it through the `conceptify` CLI (it is on your PATH). The project and thread already exist — do NOT create them.
+
+## Context
+- Project root (your working directory): /Users/chris/code/myrepo
+- Thread: "How does OAuth work?" (thread id: thread-1, slug: how-does-oauth-work)
+- The question to answer (verbatim): Explain the OAuth 2.0 authorization code flow.
+
+## How to author — exact contract
+1. Read ~/.claude/skills/conceptify/SKILL.md in full, then every skill file it tells you to read (the artifact spec, the design system, and the rendering + self-review references). They are the contract for what a valid artifact is, not background.
+2. Follow the skill's authoring flow, but the project and thread are ALREADY created for you: SKIP its "Check the CLI", "Ensure the project", and "Create the thread" steps entirely — never run `conceptify ensure-project` or `conceptify create-thread`. Start at "Author the artifact".
+3. Research the real code under the project root before writing a word — the artifact must be true of THIS codebase (real file paths, real type and function names, real control flow), never generic knowledge of how such systems usually work.
+4. Author the artifact into a temp file (e.g. under $TMPDIR), NEVER inside the project root — the app copies it into its own storage on save. The question above must reappear verbatim in `<meta name="cfy:question">`, and this is a new thread so `<meta name="cfy:version">` is `1`.
+5. Run the skill's pre-save review in full — the source review AND the visual self-review (references/self-review.md) — and fix until every frame is clean.
+6. Publish, exactly once, as the very last CLI call:
+   conceptify save-artifact --thread thread-1 --file <path-to-your-artifact.html>
+
+## Hard rules
+- The project and thread already exist: never run `conceptify ensure-project` or `conceptify create-thread`. Publish only into thread thread-1.
+- Exactly one save-artifact per run, as the final CLI call. If you cannot produce a valid artifact, do NOT run save-artifact — an honest failure beats publishing a broken one.
+- Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root — read the project freely, but write only under your temp working directory.
+"#;
+        assert_eq!(prompt, expected);
+    }
+
+    #[test]
+    fn derive_title_uses_explicit_or_truncates_question() {
+        // Explicit non-blank title wins, trimmed.
+        assert_eq!(derive_title(Some("  My Title "), "some question"), "My Title");
+        // Blank/whitespace-only title falls through to the derived one (first
+        // 8 words of the question).
+        assert_eq!(
+            derive_title(Some("   "), "How does the anchor re-attachment pass work exactly here"),
+            "How does the anchor re-attachment pass work exactly"
+        );
+        assert_eq!(
+            derive_title(None, "Explain the boot sequence"),
+            "Explain the boot sequence"
+        );
+        // A derived title is never empty for a non-empty question.
+        assert!(!derive_title(None, "word").is_empty());
     }
 
     // -- PATH preparation ------------------------------------------------------
@@ -1065,6 +1493,12 @@ Why this order: `--applied` freezes each comment at the artifact version it was 
         /// Fake agent whose argv[1] is the assembled prompt; tests use the
         /// script body to capture the prompt/env or control the exit.
         fn install_fake_agent(&self, script_body: &str) {
+            self.install_fake_agent_timeout(script_body, 60);
+        }
+
+        /// Same, with an explicit run timeout (seconds) so the FR-5.3 timeout
+        /// path can be exercised without a 15-minute wait.
+        fn install_fake_agent_timeout(&self, script_body: &str, timeout_secs: u64) {
             let script = self.work_dir.join("fake-agent.sh");
             std::fs::write(&script, script_body).unwrap();
             let mut perm = std::fs::metadata(&script).unwrap().permissions();
@@ -1081,9 +1515,45 @@ Why this order: `--applied` freezes each comment at the artifact version it was 
                 },
             );
             s.default_adapter = "fake".to_owned();
-            s.timeout_secs = 60;
+            s.timeout_secs = timeout_secs;
             let conn = self.db.lock().unwrap();
             crate::settings::update_settings(&conn, &s).unwrap();
+        }
+
+        /// Status of an arbitrary thread (the ask flow creates fresh threads,
+        /// so tests can't rely on `self.thread_id`).
+        fn thread_status_of(&self, thread_id: &str) -> String {
+            let conn = self.db.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM threads WHERE id = ?1",
+                [thread_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        }
+
+        /// Save an artifact for an arbitrary thread (simulates the ask agent's
+        /// mid-run `save-artifact`, which flips the thread to `ready`).
+        fn save_artifact_for(&self, thread_id: &str, version: i64) {
+            let conn = self.db.lock().unwrap();
+            crate::artifacts::save_artifact(
+                &conn,
+                &shared_artifacts_root(),
+                thread_id,
+                artifact_html(version).as_bytes(),
+            )
+            .unwrap_or_else(|e| panic!("save v{version} for {thread_id}: {e:?}"));
+        }
+
+        /// How many run rows exist for a thread (retry must add a fresh one).
+        fn run_count(&self, thread_id: &str) -> i64 {
+            let conn = self.db.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM follow_up_runs WHERE thread_id = ?1",
+                [thread_id],
+                |r| r.get(0),
+            )
+            .unwrap()
         }
 
         fn registry(&self) -> RunRegistry {
@@ -1350,6 +1820,192 @@ Why this order: `--applied` freezes each comment at the artifact version it was 
         let events = h.thread_updated.lock().unwrap().clone();
         assert!(events.iter().all(|e| e["thread_id"] == h.thread_id.as_str()));
         assert_eq!(events.len(), 2, "{events:?}");
+    }
+
+    // -- ask_from_app / retry_ask (FR-5.1/5.2/5.3) ------------------------------
+
+    #[tokio::test]
+    async fn ask_from_app_completed_without_artifact_errors_thread() {
+        let h = harness("ask-app-noartifact");
+        // Capture the assembled prompt; exit 0 WITHOUT saving an artifact.
+        h.install_fake_agent(
+            "#!/bin/sh\n\
+             printf '%s' \"$1\" > \"$(dirname \"$0\")/prompt.txt\"\n\
+             exit 0\n",
+        );
+
+        let started = ask_from_app(&h.handle, &h.project_id, Some("OAuth"), "Explain OAuth.")
+            .await
+            .unwrap();
+        assert_ne!(started.thread_id, h.thread_id, "a fresh thread is created");
+
+        let run_id = started.run_id.clone();
+        assert!(wait_until(|| h.run_row(&run_id).0 == "completed", 15_000).await);
+        assert_eq!(h.run_row(&run_id).1, "ask");
+
+        // Exit 0 but nothing saved → FR-5.3 completed-without-artifact = error.
+        assert!(
+            wait_until(|| h.thread_status_of(&started.thread_id) == "error", 15_000).await,
+            "status = {}",
+            h.thread_status_of(&started.thread_id)
+        );
+        // A thread-updated {status:"error"} landed for the new thread.
+        assert!(
+            wait_until(
+                || h.thread_updated.lock().unwrap().iter().any(|e| e["thread_id"]
+                    == started.thread_id.as_str()
+                    && e["status"] == "error"),
+                5_000
+            )
+            .await
+        );
+
+        // The agent saw the ask prompt: the new thread id in the save contract,
+        // the skill reference, and the verbatim question.
+        let prompt = std::fs::read_to_string(h.work_dir.join("prompt.txt")).unwrap();
+        assert!(
+            prompt.contains(&format!("save-artifact --thread {}", started.thread_id)),
+            "{prompt}"
+        );
+        assert!(prompt.contains("~/.claude/skills/conceptify/SKILL.md"), "{prompt}");
+        assert!(prompt.contains("Explain OAuth."), "{prompt}");
+
+        // latest_run_for_thread resolves the just-finished run (FR-5.3 log state).
+        let latest = {
+            let conn = h.db.lock().unwrap();
+            latest_run_for_thread(&conn, &started.thread_id).unwrap().unwrap()
+        };
+        assert_eq!(latest.run_id, run_id);
+        assert_eq!(latest.mode, "ask");
+        assert_eq!(latest.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn ask_ready_survives_when_agent_saves() {
+        let h = harness("ask-ready");
+        // Sleep so a save can land mid-run before the process exits 0.
+        h.install_fake_agent("#!/bin/sh\nsleep 1\nexit 0\n");
+
+        let started = ask_from_app(&h.handle, &h.project_id, None, "Explain the flow")
+            .await
+            .unwrap();
+        assert_eq!(h.thread_status_of(&started.thread_id), "generating");
+
+        // Simulate the agent's mid-run save-artifact → thread flips to `ready`.
+        h.save_artifact_for(&started.thread_id, 1);
+        assert_eq!(h.thread_status_of(&started.thread_id), "ready");
+
+        // Run completes; the watcher's conditional generating→error must NOT
+        // regress the `ready` the save set.
+        let run_id = started.run_id.clone();
+        assert!(wait_until(|| h.run_row(&run_id).0 == "completed", 15_000).await);
+        assert!(
+            !wait_until(|| h.thread_status_of(&started.thread_id) == "error", 1_500).await,
+            "watcher must not regress ready → error"
+        );
+        assert_eq!(h.thread_status_of(&started.thread_id), "ready");
+        assert!(h
+            .thread_updated
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| !(e["thread_id"] == started.thread_id.as_str() && e["status"] == "error")));
+    }
+
+    #[tokio::test]
+    async fn ask_crash_errors_thread() {
+        let h = harness("ask-crash");
+        h.install_fake_agent("#!/bin/sh\nexit 3\n");
+        let started = ask_from_app(&h.handle, &h.project_id, None, "Explain crash handling")
+            .await
+            .unwrap();
+        let run_id = started.run_id.clone();
+        assert!(wait_until(|| h.run_row(&run_id).0 == "failed", 15_000).await);
+        assert!(wait_until(|| h.thread_status_of(&started.thread_id) == "error", 15_000).await);
+    }
+
+    #[tokio::test]
+    async fn ask_timeout_errors_thread() {
+        let h = harness("ask-timeout");
+        h.install_fake_agent_timeout("#!/bin/sh\nsleep 30\n", 1);
+        let started = ask_from_app(&h.handle, &h.project_id, None, "Explain timeouts")
+            .await
+            .unwrap();
+        let run_id = started.run_id.clone();
+        assert!(wait_until(|| h.run_row(&run_id).0 == "timeout", 15_000).await);
+        assert!(wait_until(|| h.thread_status_of(&started.thread_id) == "error", 15_000).await);
+    }
+
+    #[tokio::test]
+    async fn retry_ask_respawns_into_same_thread_and_reaches_ready() {
+        let h = harness("ask-retry");
+        // First ask: exit 0 without saving → error.
+        h.install_fake_agent("#!/bin/sh\nexit 0\n");
+        let first = ask_from_app(&h.handle, &h.project_id, Some("Retry me"), "Explain retries")
+            .await
+            .unwrap();
+        let thread_id = first.thread_id.clone();
+        assert!(wait_until(|| h.thread_status_of(&thread_id) == "error", 15_000).await);
+        assert_eq!(h.run_count(&thread_id), 1);
+
+        // Retry: a sleeping agent so we can observe `generating` + land a save.
+        h.install_fake_agent("#!/bin/sh\nsleep 1\nexit 0\n");
+        let retry = retry_ask(&h.handle, &thread_id).await.unwrap();
+        assert_eq!(retry.thread_id, thread_id, "retry re-uses the same thread");
+        assert_ne!(retry.run_id, first.run_id, "retry spawns a NEW run row");
+        assert_eq!(h.run_count(&thread_id), 2);
+
+        // Thread went back to `generating`, with a thread-updated event.
+        assert_eq!(h.thread_status_of(&thread_id), "generating");
+        assert!(
+            wait_until(
+                || h.thread_updated.lock().unwrap().iter().any(|e| e["thread_id"]
+                    == thread_id.as_str()
+                    && e["status"] == "generating"),
+                5_000
+            )
+            .await
+        );
+
+        // latest_run_for_thread now points at the retry run.
+        let latest = {
+            let conn = h.db.lock().unwrap();
+            latest_run_for_thread(&conn, &thread_id).unwrap().unwrap()
+        };
+        assert_eq!(latest.run_id, retry.run_id);
+
+        // The retry's agent saves → ready; completing doesn't regress it.
+        h.save_artifact_for(&thread_id, 1);
+        assert_eq!(h.thread_status_of(&thread_id), "ready");
+        let run_id = retry.run_id.clone();
+        assert!(wait_until(|| h.run_row(&run_id).0 == "completed", 15_000).await);
+        assert!(!wait_until(|| h.thread_status_of(&thread_id) == "error", 1_500).await);
+        assert_eq!(h.thread_status_of(&thread_id), "ready");
+    }
+
+    #[tokio::test]
+    async fn ask_guards_empty_question_and_unknown_targets() {
+        let h = harness("ask-guards2");
+        h.install_fake_agent("#!/bin/sh\nexit 0\n");
+
+        // Empty/whitespace question → EmptyQuestion (no thread created).
+        let err = ask_from_app(&h.handle, &h.project_id, None, "   ")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FlowError::EmptyQuestion), "{err:?}");
+
+        // Unknown project → ProjectNotFound (no thread created).
+        let err = ask_from_app(&h.handle, "no-such-project", None, "q")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FlowError::ProjectNotFound(_)), "{err:?}");
+
+        // Retry on an unknown thread → ThreadNotFound (via ContextError).
+        let err = retry_ask(&h.handle, "no-such-thread").await.unwrap_err();
+        assert!(
+            matches!(err, FlowError::Context(ContextError::ThreadNotFound(_))),
+            "{err:?}"
+        );
     }
 }
 

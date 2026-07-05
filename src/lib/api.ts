@@ -136,8 +136,10 @@ export function openArtifactInBrowser(threadId: string): Promise<string> {
 // Follow-up runs (PRD FR-4.6/4.7/4.8/4.9 — the interrogation loop)
 // ---------------------------------------------------------------------------
 
-/** `answer` = FR-4.6 sidebar answers only; `apply` = FR-4.7 new artifact version. */
-export type RunMode = "answer" | "apply";
+/** `answer` = FR-4.6 sidebar answers only; `apply` = FR-4.7 new artifact
+ *  version; `ask` = FR-5.1 in-app generation run (authors a thread's first
+ *  artifact). */
+export type RunMode = "answer" | "apply" | "ask";
 
 /** Terminal + initial run states (docs/api.md "Run events"). `failed` and
  *  `timeout` are the same error class for UI purposes; the distinction only
@@ -216,4 +218,53 @@ export function getRunLogTail(runId: string, maxLines?: number): Promise<RunLogT
     run_id: runId,
     max_lines: maxLines ?? null,
   });
+}
+
+// ---------------------------------------------------------------------------
+// In-app ask (PRD §7.5, UC5 — FR-5.1/5.2/5.3)
+// ---------------------------------------------------------------------------
+
+/** A started in-app ask: the new (or, on retry, the same) thread and the
+ *  `ask`-mode generation run now authoring its artifact. */
+export interface AskStarted {
+  run_id: string;
+  thread_id: string;
+}
+
+/**
+ * Start an FR-5.1 in-app ask: create a thread in `projectId` (status
+ * `generating`) and spawn a headless agent that authors an artifact per the
+ * skill and publishes it via `conceptify save-artifact`. `title` is optional —
+ * when blank the core derives one from the question. Rejects (user-facing
+ * message) on an empty question, an unknown project, or a missing agent/CLI.
+ */
+export function askFromApp(
+  projectId: string,
+  title: string | null,
+  question: string,
+): Promise<AskStarted> {
+  return invoke<AskStarted>("ask_from_app", {
+    project_id: projectId,
+    title: title ?? null,
+    question,
+  });
+}
+
+/** Retry a failed in-app ask (FR-5.3): re-spawn the same question into the same
+ *  thread, which returns to `generating`. */
+export function retryAsk(threadId: string): Promise<AskStarted> {
+  return invoke<AskStarted>("retry_ask", { thread_id: threadId });
+}
+
+/** The most recent run for a thread (any mode/status), or `null`. The FR-5.3
+ *  generation-error state uses it to resolve the failed run's id for the log
+ *  tail — works after an app restart, unlike `getActiveRun` (live runs only). */
+export interface LatestRun {
+  run_id: string;
+  mode: RunMode;
+  status: RunStatus;
+}
+
+export function getLatestRun(threadId: string): Promise<LatestRun | null> {
+  return invoke<LatestRun | null>("get_latest_run", { thread_id: threadId });
 }

@@ -86,6 +86,9 @@ pub fn run() {
             commands::apply_to_artifact,
             commands::get_active_run,
             commands::get_run_log_tail,
+            commands::ask_from_app,
+            commands::retry_ask,
+            commands::get_latest_run,
             runs::cancel_run,
         ])
         .setup(|app| {

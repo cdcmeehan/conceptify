@@ -2,9 +2,11 @@
 // threads sorted by last activity, so this renders them in order with a status
 // chip and open-comment count. Arrow keys move the selection when focused.
 
+import { useState } from "preact/hooks";
 import type { Thread } from "../lib/api";
 import { appStore } from "../store/appStore";
 import { relativeTime } from "../lib/time";
+import { NewThreadComposer } from "./NewThreadComposer";
 import { StatusChip } from "./StatusChip";
 
 interface Props {
@@ -24,6 +26,9 @@ export function ThreadList({
   loading,
   error,
 }: Props) {
+  // FR-5.1 in-app ask composer, toggled by the "New thread" header button.
+  const [composerOpen, setComposerOpen] = useState(false);
+
   function onListKeyDown(e: KeyboardEvent) {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     if (threads.length === 0) return;
@@ -43,11 +48,35 @@ export function ThreadList({
       onKeyDown={onListKeyDown}
       aria-label="Threads"
     >
-      <header class="flex items-center px-3 py-2.5">
-        <h2 class="truncate text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+      <header class="flex items-center gap-2 px-3 py-2.5">
+        <h2 class="min-w-0 flex-1 truncate text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
           {projectName ?? "Threads"}
         </h2>
+        {projectSelected && !composerOpen && (
+          <button
+            type="button"
+            onClick={() => setComposerOpen(true)}
+            title="Ask a new question in this project"
+            class="inline-flex shrink-0 items-center gap-1 rounded-md bg-blue-600 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700"
+          >
+            <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5" aria-hidden="true">
+              <path
+                d="M10 4.5v11M4.5 10h11"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+              />
+            </svg>
+            New thread
+          </button>
+        )}
       </header>
+
+      {projectSelected && composerOpen && (
+        <div class="px-2 pb-2">
+          <NewThreadComposer onClose={() => setComposerOpen(false)} />
+        </div>
+      )}
 
       <div class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         {!projectSelected ? (

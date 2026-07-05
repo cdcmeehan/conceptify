@@ -131,6 +131,10 @@ export function CommentsSidebar({
   const runIdle = activeRun == null && !starting;
   const canAsk = runIdle && viewerVersion != null && counts.open > 0;
   const canApply = runIdle && viewerVersion != null;
+  // The sidebar only owns answer/apply runs. An `ask` (in-app generation) run is
+  // thread-scoped and surfaced by the main thread view's progress panel (FR-5.2),
+  // never as a follow-up run block here.
+  const sidebarRun = activeRun != null && activeRun.mode !== "ask" ? activeRun : null;
 
   async function startRunAction(action: () => Promise<void>) {
     setActionError(null);
@@ -213,8 +217,8 @@ export function CommentsSidebar({
           buttons (idle) or the live run block (FR-4.9: the disabled state IS
           the guard's UI half — the engine enforces it server-side too). */}
       <div class="flex flex-col gap-1.5 border-b border-neutral-200 px-2 py-1.5 dark:border-neutral-800">
-        {activeRun != null ? (
-          <RunStatusBlock run={activeRun} comments={comments} />
+        {sidebarRun != null ? (
+          <RunStatusBlock run={sidebarRun} comments={comments} />
         ) : (
           <div class="flex gap-1.5">
             <button

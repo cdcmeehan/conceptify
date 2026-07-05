@@ -876,3 +876,84 @@ pub fn get_run_log_tail(
         lines,
     })
 }
+
+// ---------------------------------------------------------------------------
+// In-app ask (PRD §7.5, UC5, FR-5.1/5.2/5.3) — beads 959.1 / 959.2.
+//
+// Thin command wrappers over `crate::flows`' in-app ask layer (which owns thread
+// creation, the ask prompt, the generation run, and the FR-5.3 status policy).
+// The composer (src/components/NewThreadComposer.tsx) invokes `ask_from_app`;
+// the thread-view error state invokes `get_latest_run` (to resolve the failed
+// run's id for the log tail) and `retry_ask`.
+// ---------------------------------------------------------------------------
+
+/// What a started in-app ask hands the composer: the new (or retried) thread and
+/// the generation run now authoring its artifact.
+#[derive(Serialize)]
+pub struct AskStartedDto {
+    pub run_id: String,
+    pub thread_id: String,
+}
+
+impl From<crate::flows::AskStarted> for AskStartedDto {
+    fn from(s: crate::flows::AskStarted) -> Self {
+        AskStartedDto {
+            run_id: s.run_id,
+            thread_id: s.thread_id,
+        }
+    }
+}
+
+/// Start an FR-5.1 in-app ask: create a thread in `project_id` (status
+/// `generating`) and spawn a headless generation run that authors an artifact
+/// per the skill and publishes it via `conceptify save-artifact`. `title` is
+/// optional (derived from the question when blank). Rejects (user-facing string)
+/// on an empty question, an unknown project, or a missing CLI/agent binary.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn ask_from_app(
+    app: tauri::AppHandle,
+    project_id: String,
+    title: Option<String>,
+    question: String,
+) -> Result<AskStartedDto, String> {
+    crate::flows::ask_from_app(&app, &project_id, title.as_deref(), &question)
+        .await
+        .map(AskStartedDto::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Retry a failed in-app ask (FR-5.3): re-spawn the same question into the same
+/// thread and move it back to `generating`. Backs the thread-view "Retry"
+/// button on the generation-error state.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn retry_ask(app: tauri::AppHandle, thread_id: String) -> Result<AskStartedDto, String> {
+    crate::flows::retry_ask(&app, &thread_id)
+        .await
+        .map(AskStartedDto::from)
+        .map_err(|e| e.to_string())
+}
+
+/// The most recent run for a thread (any mode/status), or `null`. The FR-5.3
+/// generation-error state uses it to resolve the failed run's id (for the log
+/// tail via `get_run_log_tail`) — this works after an app restart too, unlike
+/// `get_active_run` which only reports live runs.
+#[derive(Serialize)]
+pub struct LatestRunDto {
+    pub run_id: String,
+    pub mode: String,
+    pub status: String,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_latest_run(
+    db: State<DbHandle>,
+    thread_id: String,
+) -> Result<Option<LatestRunDto>, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let latest = crate::flows::latest_run_for_thread(&conn, &thread_id).map_err(|e| e.to_string())?;
+    Ok(latest.map(|r| LatestRunDto {
+        run_id: r.run_id,
+        mode: r.mode,
+        status: r.status,
+    }))
+}
