@@ -77,7 +77,13 @@ Notes:
   so the `900` height above is irrelevant; only width matters.
 - `scale 2` gives retina-sharp text for contrast/overlap judgement. If a
   full-page PNG comes back too tall to read clearly (very long artifact),
-  drop to scale `1`, or screenshot the offending section on its own.
+  drop to scale `1`, or crop the region you need from the full-page PNG:
+  `cp full.png crop.png && sips --cropOffset <y> 0 --cropToHeightWidth
+  <h> <w> crop.png` (offsets in device pixels = CSS px × scale). Judging
+  a diagram's labels needs this close-up pass — thumbnails hide overlap
+  and contrast problems. Don't use `screenshot <selector>` element
+  captures for this: they intermittently return blank frames on `file://`
+  pages (observed with agent-browser 0.27).
 - Optional determinism: append `reduced-motion`
   (`set media dark reduced-motion`) to force settled, animation-free
   frames.
@@ -143,7 +149,16 @@ re-render.
 ## Fallback (no `agent-browser`)
 
 `agent-browser` is the supported tool — install it if missing:
-`npm i -g agent-browser && agent-browser install`. If you truly cannot,
+`npm i -g agent-browser && agent-browser install`. If its daemon wedges
+(every `screenshot` hangs or errors "Resource temporarily unavailable"
+even on a trivial page), `pkill -f agent-browser` and retry once; if it
+stays wedged, fall back rather than fight it. A reliable last resort on
+macOS is a ~60-line Swift harness around `WKWebView.takeSnapshot`
+(offscreen borderless window, `NSAppearance` `.darkAqua`/`.aqua` for the
+color scheme, height from `document.documentElement.scrollHeight`,
+compiled with `swiftc`) — it renders the *real* WKWebView target, and
+evaluating `document.documentElement.scrollWidth` replaces the
+pixelWidth overflow tripwire. If you truly cannot,
 any headless Chromium with `prefers-color-scheme` + viewport emulation
 works; e.g. best-effort Playwright CLI (unreliable — browsers may be
 uninstalled):

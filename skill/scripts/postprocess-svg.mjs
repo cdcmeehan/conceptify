@@ -163,13 +163,20 @@ if (tool === "d2") {
     if (!cls) return tag;
     const key = b64key(cls[1]);
     if (key === null) return tag;
-    // connection keys look like `(client -> middleware)[n]`; n=0 is the
-    // first (often only) parallel edge and gets no suffix, n>=1 gets -{n+1}
+    // connection keys look like `(client -> middleware)[n]` — optionally
+    // container-prefixed for edges inside a container:
+    // `walk.(ignore -> globset)[n]`. n=0 is the first (often only)
+    // parallel edge and gets no suffix, n>=1 gets -{n+1}.
     let segment;
-    const conn = /^\((.*)\)\[(\d+)\]$/.exec(key);
+    const conn = /^(?:(.*)\.)?\((.*)\)\[(\d+)\]$/.exec(key);
     if (conn) {
-      segment = derive(conn[1]);
-      if (segment && Number(conn[2]) >= 1) segment += `-${Number(conn[2]) + 1}`;
+      // Sequence-diagram lifelines are edges with an empty destination:
+      // `(walker -- )[0]`. A lifeline is not a commentable concept (and
+      // would otherwise stamp as `<actor>-2`, a diagram-tall ambiguous
+      // click target) — skip it.
+      if (/(?:^|\s)--\s*$/.test(conn[2])) return tag;
+      segment = derive(conn[1] ? `${conn[1]} ${conn[2]}` : conn[2]);
+      if (segment && Number(conn[3]) >= 1) segment += `-${Number(conn[3]) + 1}`;
     } else {
       segment = derive(key);
     }

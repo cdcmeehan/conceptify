@@ -88,6 +88,14 @@ artifact-only rules).
 | `.cfy-reveal` (+ `--cfy-reveal-n: 0,1,2…`) | Staged rise-into-place on load (D6); intro elements only, ≤ ~6 items. |
 | `.cfy-flow` (SVG) | Marching-dash edge flow; dashed stroke at rest. Gated on `prefers-reduced-motion`. |
 
+Table gotcha: `cfy-compare` row headers are `white-space: nowrap`, so a
+long unbreakable row header (e.g. a filesystem path in `<code>`) sets a
+huge first-column width and pushes the other columns out of view even at
+comfortable reading width. For path-keyed tables, override in the
+artifact's second style block (`table-layout: fixed` on the table plus
+`tbody th { white-space: normal; overflow-wrap: anywhere }`), or keep
+row headers short.
+
 ## Code blocks (D4)
 
 Pre-render with **Shiki v4 dual themes**: `themes: { light: "vitesse-light",

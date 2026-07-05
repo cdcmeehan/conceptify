@@ -65,6 +65,36 @@ d2 --layout=elk --pad 0 diagram.d2 diagram.svg
   so a long `direction: right` chain (6+ nodes) renders small. Prefer
   `direction: down` for long chains, or break flows into ranks with
   containers, so the diagram stays tall enough to read.
+- Cycle edges that re-enter a container (`walker.ignore -> core.haystack`
+  when `core` already feeds `walker`) get routed across the container's
+  centered title text. Point such back-edges at the **container itself**
+  (`walker.ignore -> core: DirEntry`) — the arrow stops at the border and
+  the title stays clear. Verified: `label.near: top-left` does *not*
+  reliably dodge the edge.
+- Sequence diagrams: repeated messages between the same actor pair derive
+  `-2`, `-3`, … ids in message order (`searcher-to-matcher`,
+  `searcher-to-matcher-2`). Those suffixes re-bind if you later insert an
+  earlier duplicate — when a specific repeated message is likely to be
+  commented on, prefer wording the flow so each pair's messages stay
+  unique, or accept that follow-up edits must not reorder them.
+- The scaffold scales every diagram to the full text column
+  (`.cfy-diagram svg { width: 100%; height: auto }`), which *magnifies*
+  tall, narrow output — a vertical elk layout is often only 300–500
+  units wide, so at a 900px column it blows up ~2× and eats a full
+  screen of scroll. Cap such figures at natural size in the artifact's
+  second `<style>` block:
+  `figure[data-cfy-id="fig-x"] svg { max-width: <viewBox-width>px;
+  margin-inline: auto; }` (read the width off the SVG's `viewBox`).
+- A labeled fan-out to one rank (`api -> db: a` plus `api -> files: b`
+  from the same node) can place both edge labels at the same midpoint,
+  overlapping them into garbage. Label at most one edge of such a
+  fan-out and let the caption or prose carry the rest.
+- Long *edge* labels can lose their outermost characters: d2 computes
+  canvas bounds with its embedded font, the post-processed SVG renders
+  in the (wider) system font, and glyphs overhanging d2's bounds are
+  clipped by the inner `viewBox`. Keep edge labels short or split them
+  onto two lines with `\n`; node labels are safe (their boxes grow with
+  the text).
 
 **Post-processing (required)** — d2's raw SVG embeds base64 fonts and a
 baked light-only palette; run the bundled script before inlining
@@ -213,8 +243,13 @@ Where each tool exposes the DSL name (both verified):
   `KGNsaWVudCAtJmd0OyBtaWRkbGV3YXJlKVswXQ==` →
   `(client -&gt; middleware)[0]`. Decode (`base64 -d`), unescape
   `-&gt;` to `->`, drop a `[0]` index (for parallel edges `[n]`, n ≥ 1,
-  append `-{n+1}` instead), then derive. Stamp the same `<g>`; ignore the
-  inner `<g class="shape">`.
+  append `-{n+1}` instead — edges inside a container carry the container
+  prefix outside the parens, `walk.(ignore -> globset)[0]`, treated the
+  same way), then derive. Stamp the same `<g>`; ignore the inner
+  `<g class="shape">`. In **sequence diagrams**, the actor box carries the
+  plain actor key (stamp it); the actor's *lifeline* is an edge with an
+  empty destination, `(walker -- )[0]`. Lifelines are not commentable
+  concepts: leave them unstamped (the script skips them).
 - **Graphviz**: `<g class="node">` / `<g class="edge">` /
   `<g class="cluster">`, each with a child `<title>` holding the DOT name
   (`client`, `client&#45;&gt;middleware`, `cluster_x`). Entity-decode,
@@ -290,7 +325,11 @@ scaffold's dark-mode rules expect, D4). Wrap it:
 
 `.line.highlighted` (via `--highlight`), `.line.diff.add` /
 `.line.diff.remove` (add the classes by hand where useful), and
-`.highlighted-word` are styled by the scaffold. If node is genuinely
+`.highlighted-word` are styled by the scaffold. When inserting
+`cfy-code-mark` markers into the emitted HTML, string-replace on a single
+distinctive identifier token and append the mark after its closing
+`</span>` — Shiki splits tokens unpredictably (`async` and ` fn` are
+separate spans), so multi-word match strings silently miss. If node is genuinely
 unavailable, fall back to Tier-2 highlight.js
 (`@highlightjs/cdn-assets@11` on the allowlist) with the mandatory
 offline fallback pattern below.
