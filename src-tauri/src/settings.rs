@@ -33,7 +33,11 @@
 //!     "claude": {
 //!       "command": "claude",
 //!       "args": ["-p", "{prompt}", "--model", "{model}",
-//!                "--permission-mode", "acceptEdits", "--output-format", "stream-json"],
+//!                "--permission-mode", "acceptEdits", "--output-format", "stream-json",
+//!                "--strict-mcp-config",
+//!                "--allowedTools", "Bash", "Edit", "Write",
+//!                "--disallowedTools", /* web + mutating-git + project-root writes,
+//!                                        see default_adapters() */ "..."],
 //!       "cwd": "{project_root}"
 //!     }
 //!   },
@@ -106,8 +110,59 @@ const SETTINGS_KEY: &str = "agent_settings";
 
 // --- Defaults (single source of truth, shared by `Default` + serde) ---------
 
-/// The built-in `claude` adapter template (PRD §5.5). `b12.8`/OQ3 may tighten
-/// the permission mode later; this ships the PRD default (`acceptEdits`).
+/// The built-in `claude` adapter template (PRD §5.5), with the OQ3 permission
+/// scoping decided by bead `b12.8` (PRD §12 OQ3, §9 right-sized security).
+///
+/// # Scoping rationale (verified against claude CLI 2.1.201, headless `-p`)
+///
+/// **`--permission-mode acceptEdits` alone does NOT work headless**: in print
+/// mode only a small safelist of read-only Bash commands is auto-approved;
+/// anything else (including `conceptify …`, `mktemp`, `d2`/`dot`/`node`
+/// renders) is denied with "command requires approval" — which would break
+/// every flow. Hence the explicit allows:
+///
+/// - `--allowedTools Bash Edit Write` — every flow needs arbitrary Bash (the
+///   `conceptify` CLI contract, `mktemp`, diagram renderers) and Write/Edit
+///   *outside* the cwd (answer files and artifact working copies live in
+///   `mktemp -d` scratch dirs). A fine-grained Bash whitelist
+///   (`Bash(conceptify:*)`, …) was rejected: prefix rules break on env
+///   assignments/pipes/quoting and every headless denial is a wasted flail —
+///   the "prison that breaks the product" §9 warns about.
+///
+/// Deny rules always win over allows + acceptEdits (verified), so the
+/// dangerous-and-unneeded surface is subtracted:
+///
+/// - `WebFetch` / `WebSearch` — all flows are grounded in local code and the
+///   artifact; web tools are pure accident/injection surface here. A denied
+///   tool is removed from the toolset entirely (no flailing).
+/// - `Bash(git <mutating>:*)` — no flow ever mutates the target repo; denying
+///   `commit/push/add/rebase/merge/reset/checkout/switch/restore/stash/clean`
+///   keeps agent accidents away from the user's history and working tree
+///   while leaving git *reads* (`log`, `diff`, `blame`, `grep`) available for
+///   grounding. Prefix matching, hygiene not adversarial containment.
+/// - `Edit(/{project_root}/**)` / `Write(/{project_root}/**)` — the target
+///   repo is **read-only** in every flow (answer: sidebar only; apply/ask:
+///   edits happen in a temp working copy, artifact-dir writes go through the
+///   CLI/server). `{project_root}` starts with `/`, so the resolved pattern
+///   gains the `//…` absolute-path prefix the permission-rule syntax expects.
+///
+/// `--strict-mcp-config` (with no `--mcp-config`) keeps the user's personal
+/// MCP servers (browser automation, doc fetchers, …) from being spawned into
+/// every headless run — surface and startup-latency hygiene.
+///
+/// **Rejected** (recorded for OQ3): `bypassPermissions` (no containment at
+/// all); `--tools` whitelisting (must enumerate every built-in incl.
+/// Read/Glob/Grep/Task — brittle across CLI versions, disallows achieve the
+/// same subtraction); per-purpose arg overrides such as denying
+/// `Bash(conceptify save-artifact:*)` in answer runs (needs a new adapter
+/// data-model dimension for an accident that is prompt-forbidden and, being
+/// append-only versioning, recoverable); `sandbox-exec`/network firewalling
+/// (adversarial-grade, §9 explicitly out of scope).
+///
+/// Each pattern is its own argv element (the variadic flags accept that, and
+/// `Bash(git commit:*)` contains a space, so comma-joining is riskier); the
+/// two list flags sit *after* the positional `{prompt}` so they can never
+/// swallow it.
 fn default_adapters() -> BTreeMap<String, Adapter> {
     let mut m = BTreeMap::new();
     m.insert(
@@ -123,6 +178,27 @@ fn default_adapters() -> BTreeMap<String, Adapter> {
                 "acceptEdits".to_owned(),
                 "--output-format".to_owned(),
                 "stream-json".to_owned(),
+                "--strict-mcp-config".to_owned(),
+                "--allowedTools".to_owned(),
+                "Bash".to_owned(),
+                "Edit".to_owned(),
+                "Write".to_owned(),
+                "--disallowedTools".to_owned(),
+                "WebFetch".to_owned(),
+                "WebSearch".to_owned(),
+                "Bash(git commit:*)".to_owned(),
+                "Bash(git push:*)".to_owned(),
+                "Bash(git add:*)".to_owned(),
+                "Bash(git rebase:*)".to_owned(),
+                "Bash(git merge:*)".to_owned(),
+                "Bash(git reset:*)".to_owned(),
+                "Bash(git checkout:*)".to_owned(),
+                "Bash(git switch:*)".to_owned(),
+                "Bash(git restore:*)".to_owned(),
+                "Bash(git stash:*)".to_owned(),
+                "Bash(git clean:*)".to_owned(),
+                "Edit(/{project_root}/**)".to_owned(),
+                "Write(/{project_root}/**)".to_owned(),
             ],
             cwd: default_cwd(),
         },
@@ -590,12 +666,59 @@ mod tests {
         assert_eq!(inv.program, "claude");
         assert_eq!(inv.args[0], "-p");
         assert_eq!(inv.args[1], evil);
-        // The default template has 8 args; nothing was injected/split.
-        assert_eq!(inv.args.len(), 8);
+        // The default template has 29 args; nothing was injected/split.
+        assert_eq!(inv.args.len(), 29);
         // The model/permission structure is intact and untouched by the prompt.
         assert_eq!(inv.args[2], "--model");
         assert_eq!(inv.args[3], "claude-haiku-4-5");
         assert_eq!(inv.args[5], "acceptEdits");
+    }
+
+    #[test]
+    fn default_claude_scoping_exact() {
+        // OQ3/b12.8: pin the whole default scoping so an accidental template
+        // edit is caught. Verified against claude CLI 2.1.201 headless probes:
+        // acceptEdits alone denies non-safelisted Bash in -p mode, allows are
+        // required, denies win over allows, and `X(/{project_root}/**)`
+        // resolves to the `//…` absolute-path rule form.
+        let settings = AgentSettings::default();
+        let inv = settings
+            .resolve(Purpose::ArtifactUpdate, Path::new("/tmp/proj"), "q")
+            .unwrap();
+        assert_eq!(
+            inv.args,
+            vec![
+                "-p",
+                "q",
+                "--model",
+                "claude-sonnet-5",
+                "--permission-mode",
+                "acceptEdits",
+                "--output-format",
+                "stream-json",
+                "--strict-mcp-config",
+                "--allowedTools",
+                "Bash",
+                "Edit",
+                "Write",
+                "--disallowedTools",
+                "WebFetch",
+                "WebSearch",
+                "Bash(git commit:*)",
+                "Bash(git push:*)",
+                "Bash(git add:*)",
+                "Bash(git rebase:*)",
+                "Bash(git merge:*)",
+                "Bash(git reset:*)",
+                "Bash(git checkout:*)",
+                "Bash(git switch:*)",
+                "Bash(git restore:*)",
+                "Bash(git stash:*)",
+                "Bash(git clean:*)",
+                "Edit(//tmp/proj/**)",
+                "Write(//tmp/proj/**)",
+            ]
+        );
     }
 
     // --- Defaults / storage -------------------------------------------------

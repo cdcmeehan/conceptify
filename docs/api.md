@@ -146,6 +146,40 @@ login-shell `which`, cached) and prepends its directory to the spawned
 agent's `PATH` — Finder-launched GUI apps inherit a minimal `PATH` (PRD
 §5.1), and the prompts' contract is that plain `conceptify` works.
 
+**Permission scoping (PRD §12 OQ3, decided by b12.8):** the default `claude`
+adapter template (`src-tauri/src/settings.rs`, `default_adapters()`) runs
+headless as `--permission-mode acceptEdits` **plus** `--allowedTools Bash
+Edit Write` — required, because in `-p` (print) mode `acceptEdits` alone
+auto-approves only a safelist of read-only Bash commands, and everything the
+flows depend on (`conceptify …`, `mktemp`, `d2`/`dot`/`node` renders,
+temp-dir writes outside the cwd) would be denied headlessly. Subtracted from
+that via `--disallowedTools` (denies always beat allows):
+
+- `WebFetch` / `WebSearch` — flows are grounded in local code + the artifact;
+  web tools are unneeded accident/injection surface.
+- Mutating git (`commit`, `push`, `add`, `rebase`, `merge`, `reset`,
+  `checkout`, `switch`, `restore`, `stash`, `clean`) — no flow touches the
+  repo's history or working tree; git *reads* (`log`/`diff`/`blame`/`grep`)
+  stay available for grounding.
+- `Edit(/{project_root}/**)` + `Write(/{project_root}/**)` — the target repo
+  is **read-only in every mode**: answer runs write only sidebar answer
+  files, apply/ask runs edit a temp working copy, and artifact-dir writes go
+  through the CLI/server, never the agent's file tools.
+
+`--strict-mcp-config` keeps user-configured MCP servers out of headless runs.
+This is §9 right-sized containment (hygiene against accidents, not
+adversarial sandboxing): rejected alternatives — `bypassPermissions` (no
+containment), a fine-grained Bash whitelist (prefix rules break on pipes/env
+assignments and every headless denial is a wasted flail), `--tools`
+whitelisting (brittle enumeration of built-ins), per-purpose arg overrides
+(a new adapter dimension for a prompt-forbidden, versioning-recoverable
+accident), and `sandbox-exec`/network firewalls (adversarial-grade, out of
+scope). Future adapters (Codex, …) should follow the same principle: repo
+read-only, temp dirs writable, arbitrary local commands allowed, web and
+repo-mutating commands denied. All behavior verified against claude CLI
+2.1.201 with headless probes; both prompts tell the agent its toolset is
+scoped so it does not flail against denials.
+
 Read-only routes (`GET /api/v1/debug/db-check`, `GET /api/v1/projects`,
 `GET /api/v1/threads`, `GET /api/v1/threads/:id/context`, `GET /api/v1/comments`)
 emit no events.

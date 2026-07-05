@@ -582,6 +582,7 @@ Each object has: `id`; `body` (the reader's question); `anchor` (where it points
 ## Hard rules
 - Do NOT modify or save the artifact: never run `conceptify save-artifact`, and never pass `--applied` to resolve-comment. Answering and applying-to-the-artifact are deliberately separate steps; this run only answers.
 - Use the conceptify CLI only as specified above.
+- Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root — read the project freely, but write only under your scratch directory.
 - If the file ~/.claude/skills/conceptify/references/follow-ups.md exists, read it before answering — it holds the house rules for follow-up answers.
 "#,
         project_root = ctx.project_root,
@@ -636,6 +637,7 @@ Why this order: `--applied` freezes each comment at the artifact version it was 
 - Every resolve-comment --applied call comes BEFORE the single save-artifact call, never after.
 - Exactly one save-artifact per run, as the final CLI call.
 - If you cannot complete the edits, do NOT run save-artifact and do NOT mark comments applied — an honest failure beats publishing a broken version.
+- Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root — read the project freely, but write only under your working directory copy.
 - If the file ~/.claude/skills/conceptify/references/follow-ups.md exists, read it first — it holds the house rules for follow-up and apply runs.
 "#,
         project_root = ctx.project_root,
@@ -767,6 +769,7 @@ Each object has: `id`; `body` (the reader's question); `anchor` (where it points
 ## Hard rules
 - Do NOT modify or save the artifact: never run `conceptify save-artifact`, and never pass `--applied` to resolve-comment. Answering and applying-to-the-artifact are deliberately separate steps; this run only answers.
 - Use the conceptify CLI only as specified above.
+- Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root — read the project freely, but write only under your scratch directory.
 - If the file ~/.claude/skills/conceptify/references/follow-ups.md exists, read it before answering — it holds the house rules for follow-up answers.
 "#;
         assert_eq!(prompt, expected);
@@ -832,6 +835,7 @@ Why this order: `--applied` freezes each comment at the artifact version it was 
 - Every resolve-comment --applied call comes BEFORE the single save-artifact call, never after.
 - Exactly one save-artifact per run, as the final CLI call.
 - If you cannot complete the edits, do NOT run save-artifact and do NOT mark comments applied — an honest failure beats publishing a broken version.
+- Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root — read the project freely, but write only under your working directory copy.
 - If the file ~/.claude/skills/conceptify/references/follow-ups.md exists, read it first — it holds the house rules for follow-up and apply runs.
 "#;
         assert_eq!(prompt, expected);
