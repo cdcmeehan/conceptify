@@ -206,6 +206,8 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
             error={state.commentsError}
             threadId={threadId}
             viewerVersion={resolvedVersion}
+            activeRun={state.activeRun}
+            runFailure={state.runFailure}
             onClose={() => setSidebarOpen(false)}
           />
         )}

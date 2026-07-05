@@ -32,9 +32,12 @@
 // store and issues scroll commands.
 
 import { useState } from "preact/hooks";
-import type { Comment, CommentStatus } from "../lib/api";
+import * as api from "../lib/api";
+import type { Comment, CommentStatus, RunLogTail } from "../lib/api";
 import type { Anchor } from "../lib/bridge";
 import { artifactBridge } from "../lib/bridge";
+import type { ActiveRunState, RunFailureState } from "../store/appStore";
+import { appStore } from "../store/appStore";
 import { CommentComposer } from "./CommentComposer";
 
 type Filter = "all" | CommentStatus;
@@ -55,6 +58,11 @@ interface Props {
    *  resolved), or `null` when the thread has no artifact yet. Drives
    *  cross-version tagging and whether a row can scroll-to-anchor. */
   viewerVersion: number | null;
+  /** In-flight follow-up run for this thread, if any (FR-4.8). Gates the
+   *  FR-4.6/4.7 action buttons (FR-4.9: one run per thread). */
+  activeRun: ActiveRunState | null;
+  /** Latest failed/timed-out run on this thread (FR-4.8 failure panel). */
+  runFailure: RunFailureState | null;
   onClose: () => void;
 }
 
@@ -98,9 +106,16 @@ export function CommentsSidebar({
   error,
   threadId,
   viewerVersion,
+  activeRun,
+  runFailure,
   onClose,
 }: Props) {
   const [filter, setFilter] = useState<Filter>("all");
+  // Inline error from a rejected run start (guard messages are user-facing);
+  // `starting` bridges the click → activeRun gap so a double-click can't race
+  // the FR-4.9 guard.
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
 
   const counts: Record<Filter, number> = {
     all: comments.length,
@@ -111,6 +126,31 @@ export function CommentsSidebar({
   for (const c of comments) counts[c.status] += 1;
 
   const visible = filter === "all" ? comments : comments.filter((c) => c.status === filter);
+
+  // FR-4.6/4.7 preconditions: an artifact exists and no run is active (FR-4.9).
+  const runIdle = activeRun == null && !starting;
+  const canAsk = runIdle && viewerVersion != null && counts.open > 0;
+  const canApply = runIdle && viewerVersion != null;
+
+  async function startRunAction(action: () => Promise<void>) {
+    setActionError(null);
+    setStarting(true);
+    try {
+      await action();
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  function onAskFollowUps() {
+    void startRunAction(() => appStore.askFollowUps(threadId));
+  }
+
+  function onApplyComments(commentIds: string[]) {
+    void startRunAction(() => appStore.applyToArtifact(threadId, commentIds));
+  }
 
   function scrollTo(comment: Comment) {
     // Only anchored comments on the viewed version can be located in the frame.
@@ -169,6 +209,54 @@ export function CommentsSidebar({
         })}
       </div>
 
+      {/* FR-4.6/4.7 actions + FR-4.8 run status. Exactly one of: action
+          buttons (idle) or the live run block (FR-4.9: the disabled state IS
+          the guard's UI half — the engine enforces it server-side too). */}
+      <div class="flex flex-col gap-1.5 border-b border-neutral-200 px-2 py-1.5 dark:border-neutral-800">
+        {activeRun != null ? (
+          <RunStatusBlock run={activeRun} comments={comments} />
+        ) : (
+          <div class="flex gap-1.5">
+            <button
+              type="button"
+              onClick={onAskFollowUps}
+              disabled={!canAsk}
+              title={
+                viewerVersion == null
+                  ? "Available once the thread has an artifact"
+                  : counts.open === 0
+                    ? "No open comments to answer"
+                    : "Answer every open comment in the sidebar (the artifact is not modified)"
+              }
+              class="flex-1 rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400 dark:disabled:bg-neutral-800 dark:disabled:text-neutral-600"
+            >
+              Ask follow-ups
+              {counts.open > 0 && (
+                <span class="ml-1 tabular-nums opacity-80">({counts.open})</span>
+              )}
+            </button>
+            {counts.answered > 0 && (
+              <button
+                type="button"
+                onClick={() => onApplyComments([])}
+                disabled={!canApply}
+                title="Apply every answered comment to the artifact (saves a new version)"
+                class="flex-1 rounded-md border border-violet-300 bg-violet-600/10 px-2.5 py-1.5 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-600/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-violet-500/40 dark:bg-violet-500/15 dark:text-violet-300"
+              >
+                Apply all answered
+                <span class="ml-1 tabular-nums opacity-80">({counts.answered})</span>
+              </button>
+            )}
+          </div>
+        )}
+        {actionError != null && (
+          <p class="break-words text-xs text-rose-600 dark:text-rose-400">{actionError}</p>
+        )}
+        {runFailure != null && activeRun == null && (
+          <RunFailurePanel failure={runFailure} />
+        )}
+      </div>
+
       <div class="min-h-0 flex-1 overflow-y-auto p-2">
         {error != null ? (
           <p class="px-2 py-3 text-xs text-rose-600 dark:text-rose-400">{error}</p>
@@ -184,7 +272,14 @@ export function CommentsSidebar({
         ) : (
           <ul class="flex flex-col gap-2">
             {visible.map((c) => (
-              <CommentRow key={c.id} comment={c} viewerVersion={viewerVersion} onScroll={scrollTo} />
+              <CommentRow
+                key={c.id}
+                comment={c}
+                viewerVersion={viewerVersion}
+                onScroll={scrollTo}
+                canApply={canApply && c.status === "answered"}
+                onApply={(comment) => onApplyComments([comment.id])}
+              />
             ))}
           </ul>
         )}
@@ -199,10 +294,16 @@ function CommentRow({
   comment,
   viewerVersion,
   onScroll,
+  canApply,
+  onApply,
 }: {
   comment: Comment;
   viewerVersion: number | null;
   onScroll: (c: Comment) => void;
+  /** Whether the FR-4.7 per-comment "Apply to artifact" action is available
+   *  (answered comment, artifact present, no active run). */
+  canApply: boolean;
+  onApply: (c: Comment) => void;
 }) {
   const excerpt = anchorExcerpt(comment.anchor);
   const status = STATUS_META[comment.status] ?? STATUS_META.open;
@@ -285,7 +386,146 @@ function CommentRow({
       {comment.answer_html != null && comment.answer_html.length > 0 && (
         <AnswerHtml html={comment.answer_html} />
       )}
+
+      {canApply && (
+        <div class="border-t border-neutral-100 px-2.5 py-1.5 dark:border-neutral-800">
+          <button
+            type="button"
+            onClick={() => onApply(comment)}
+            title="Have the agent incorporate this clarification into the artifact (saves a new version)"
+            class="rounded-md border border-violet-300 bg-violet-600/10 px-2 py-1 text-[11px] font-medium text-violet-700 transition-colors hover:bg-violet-600/20 dark:border-violet-500/40 dark:bg-violet-500/15 dark:text-violet-300"
+          >
+            Apply to artifact
+          </button>
+        </div>
+      )}
     </li>
+  );
+}
+
+/**
+ * The FR-4.8 live-run block: spinner + mode label, per-comment progress
+ * (derived from the store's comment statuses against the run's target set —
+ * each `comment-updated` refetch advances it), the latest agent activity
+ * line, and the cancel button. A run re-attached after a thread switch has no
+ * target set (not persisted) and shows an indeterminate spinner.
+ */
+function RunStatusBlock({ run, comments }: { run: ActiveRunState; comments: Comment[] }) {
+  const label = run.mode === "answer" ? "Answering follow-ups…" : "Applying to artifact…";
+
+  let progress: string | null = null;
+  if (run.targetIds != null) {
+    const done = run.targetIds.filter((id) => {
+      const c = comments.find((x) => x.id === id);
+      if (c == null) return false;
+      // Answer runs advance targets out of `open`; apply runs land them on
+      // `applied`.
+      return run.mode === "answer" ? c.status !== "open" : c.status === "applied";
+    }).length;
+    const verb = run.mode === "answer" ? "answered" : "applied";
+    progress = `${done} of ${run.targetIds.length} ${verb}`;
+  }
+
+  return (
+    <div class="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-2 dark:border-blue-500/30 dark:bg-blue-500/10">
+      <div class="flex items-center gap-2">
+        <svg
+          viewBox="0 0 20 20"
+          fill="none"
+          class="h-3.5 w-3.5 shrink-0 animate-spin text-blue-600 dark:text-blue-400"
+          aria-hidden="true"
+        >
+          <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="2" class="opacity-25" />
+          <path d="M17 10a7 7 0 0 0-7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </svg>
+        <span class="flex-1 text-xs font-medium text-blue-800 dark:text-blue-300">{label}</span>
+        {progress != null && (
+          <span class="tabular-nums text-[11px] text-blue-700/80 dark:text-blue-300/80">
+            {progress}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={() => appStore.cancelActiveRun()}
+          title="Cancel this run (kills the agent process; answers already given are kept)"
+          class="rounded border border-blue-300 px-1.5 py-0.5 text-[11px] font-medium text-blue-700 transition-colors hover:bg-blue-600/10 dark:border-blue-500/40 dark:text-blue-300"
+        >
+          Cancel
+        </button>
+      </div>
+      {run.lastProgress != null && (
+        <p class="mt-1 line-clamp-1 break-all font-mono text-[10px] text-blue-700/60 dark:text-blue-300/50">
+          {run.lastProgress}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The FR-4.8 failure panel: names the failure class (`failed` vs `timeout` —
+ * same handling, different message), loads the log tail on demand via
+ * `get_run_log_tail`, and always shows the full log path (the transcript is
+ * retained on disk for debugging).
+ */
+function RunFailurePanel({ failure }: { failure: RunFailureState }) {
+  const [tail, setTail] = useState<RunLogTail | null>(null);
+  const [tailError, setTailError] = useState<string | null>(null);
+  const [loadingTail, setLoadingTail] = useState(false);
+
+  const message =
+    failure.status === "timeout"
+      ? "The follow-up run timed out and was stopped."
+      : "The follow-up run failed.";
+
+  function onShowLog() {
+    setLoadingTail(true);
+    setTailError(null);
+    api
+      .getRunLogTail(failure.runId)
+      .then(setTail)
+      .catch((e) => setTailError(String(e)))
+      .finally(() => setLoadingTail(false));
+  }
+
+  return (
+    <div class="rounded-md border border-rose-200 bg-rose-50 px-2.5 py-2 dark:border-rose-500/30 dark:bg-rose-500/10">
+      <div class="flex items-center gap-2">
+        <span class="flex-1 text-xs font-medium text-rose-700 dark:text-rose-300">{message}</span>
+        {tail == null && (
+          <button
+            type="button"
+            onClick={onShowLog}
+            disabled={loadingTail}
+            class="rounded border border-rose-300 px-1.5 py-0.5 text-[11px] font-medium text-rose-700 transition-colors hover:bg-rose-600/10 disabled:opacity-50 dark:border-rose-500/40 dark:text-rose-300"
+          >
+            {loadingTail ? "Loading…" : "Show log"}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => appStore.clearRunFailure()}
+          title="Dismiss"
+          aria-label="Dismiss run failure"
+          class="rounded px-1 text-[11px] font-medium text-rose-400 transition-colors hover:text-rose-600 dark:hover:text-rose-300"
+        >
+          ✕
+        </button>
+      </div>
+      {tailError != null && (
+        <p class="mt-1 text-[11px] text-rose-600 dark:text-rose-400">{tailError}</p>
+      )}
+      {tail != null && (
+        <div class="mt-1.5">
+          <p class="break-all font-mono text-[10px] text-rose-700/70 dark:text-rose-300/60">
+            {tail.log_path}
+          </p>
+          <pre class="mt-1 max-h-48 overflow-auto rounded bg-white/60 p-1.5 font-mono text-[10px] leading-relaxed text-neutral-700 dark:bg-neutral-950/60 dark:text-neutral-300">
+            {tail.lines.join("\n")}
+          </pre>
+        </div>
+      )}
+    </div>
   );
 }
 

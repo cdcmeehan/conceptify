@@ -19,11 +19,36 @@
 
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../lib/api";
-import type { ArtifactVersion, Comment, Project, Thread } from "../lib/api";
+import type { ArtifactVersion, Comment, Project, RunMode, Thread } from "../lib/api";
 
 /** Which artifact version the viewer shows: a concrete number (read-only
  *  history view) or `"latest"` (tracks new saves live, FR-2.4). */
 export type ViewerVersion = number | "latest";
+
+/**
+ * A follow-up run the sidebar is tracking (FR-4.8). `targetIds` is the set of
+ * comments the run was started for — per-comment progress is *derived* from
+ * the store's comment statuses against this set as `comment-updated` events
+ * land (no separate counter to drift). `null` when the run was re-attached
+ * via `get_active_run` (targets aren't persisted): render an indeterminate
+ * spinner. `lastProgress` is the most recent `run-progress` detail line.
+ */
+export interface ActiveRunState {
+  runId: string;
+  threadId: string;
+  mode: RunMode;
+  targetIds: string[] | null;
+  lastProgress: string | null;
+}
+
+/** A terminal failure (`failed`/`timeout`) of the latest run on the selected
+ *  thread (FR-4.8): drives the inline failure panel with the on-demand log
+ *  tail. Cleared on dismiss, thread switch, or a new run start. */
+export interface RunFailureState {
+  runId: string;
+  threadId: string;
+  status: "failed" | "timeout";
+}
 
 export interface AppState {
   projects: Project[];
@@ -46,6 +71,10 @@ export interface AppState {
   comments: Comment[];
   commentsLoading: boolean;
   commentsError: string | null;
+  /** The in-flight follow-up run for the selected thread, if any (FR-4.8). */
+  activeRun: ActiveRunState | null;
+  /** The latest failed/timed-out run on the selected thread (FR-4.8). */
+  runFailure: RunFailureState | null;
 }
 
 type Listener = () => void;
@@ -67,10 +96,13 @@ const initialState: AppState = {
   comments: [],
   commentsLoading: false,
   commentsError: null,
+  activeRun: null,
+  runFailure: null,
 };
 
 /** Fresh viewer state, applied whenever the selected thread changes/vanishes.
- *  Comments belong to a thread, so they clear on the same boundary. */
+ *  Comments (and run tracking) belong to a thread, so they clear on the same
+ *  boundary. */
 const clearedViewer = {
   artifactVersions: [] as ArtifactVersion[],
   artifactVersionsLoading: false,
@@ -79,6 +111,8 @@ const clearedViewer = {
   comments: [] as Comment[],
   commentsLoading: false,
   commentsError: null,
+  activeRun: null as ActiveRunState | null,
+  runFailure: null as RunFailureState | null,
 };
 
 class AppStore {
@@ -268,6 +302,137 @@ class AppStore {
     this.set({ viewerVersion: version });
   }
 
+  // ---- follow-up runs (FR-4.6/4.7/4.8/4.9) ----
+
+  /**
+   * Start the FR-4.6 "Ask follow-ups" batch run for `threadId`. Throws (so the
+   * sidebar can surface the message inline) on guard failures — no artifact,
+   * no open comments, or an already-active run (FR-4.9). On success records
+   * the run (with its target ids, the basis for per-comment progress) and
+   * clears any previous failure panel.
+   */
+  async askFollowUps(threadId: string): Promise<void> {
+    const started = await api.askFollowUps(threadId);
+    if (this.state.selectedThreadId !== started.thread_id) return;
+    this.set({
+      activeRun: {
+        runId: started.run_id,
+        threadId: started.thread_id,
+        mode: started.mode,
+        targetIds: started.target_comment_ids,
+        lastProgress: null,
+      },
+      runFailure: null,
+    });
+  }
+
+  /**
+   * Start the FR-4.7 "Apply to artifact" run for the given comments (empty =
+   * all answered). Same throw/record contract as `askFollowUps`. The thread's
+   * `updating` status chip arrives via the `thread-updated` event.
+   */
+  async applyToArtifact(threadId: string, commentIds: string[]): Promise<void> {
+    const started = await api.applyToArtifact(threadId, commentIds);
+    if (this.state.selectedThreadId !== started.thread_id) return;
+    this.set({
+      activeRun: {
+        runId: started.run_id,
+        threadId: started.thread_id,
+        mode: started.mode,
+        targetIds: started.target_comment_ids,
+        lastProgress: null,
+      },
+      runFailure: null,
+    });
+  }
+
+  /**
+   * React to a `run-progress` event: keep the tracked run's activity line
+   * fresh, and — if we see progress for the selected thread with no tracked
+   * run (a run started before this thread was selected, or before app focus) —
+   * re-attach via `get_active_run`.
+   */
+  handleRunProgress(payload: { run_id: string; thread_id: string; kind: string; detail: string }): void {
+    const run = this.state.activeRun;
+    if (run != null && run.runId === payload.run_id) {
+      this.set({ activeRun: { ...run, lastProgress: payload.detail } });
+      return;
+    }
+    if (run == null && payload.thread_id === this.state.selectedThreadId) {
+      void this.syncActiveRun(payload.thread_id);
+    }
+  }
+
+  /**
+   * React to a `run-finished` event: drop the tracked run, surface a failure
+   * panel for `failed`/`timeout` (FR-4.8 — the two are the same error class,
+   * the message just says why), and reconcile comments/threads (answers landed
+   * per-comment already; this catches anything missed).
+   */
+  handleRunFinished(payload: { run_id: string; thread_id: string; status: string }): void {
+    void this.refetchComments(payload.thread_id);
+    void this.refetchThreads();
+
+    if (this.state.activeRun?.runId === payload.run_id) {
+      this.set({ activeRun: null });
+    }
+    if (
+      (payload.status === "failed" || payload.status === "timeout") &&
+      payload.thread_id === this.state.selectedThreadId
+    ) {
+      this.set({
+        runFailure: {
+          runId: payload.run_id,
+          threadId: payload.thread_id,
+          status: payload.status,
+        },
+      });
+    }
+  }
+
+  /**
+   * Re-attach to a possibly in-flight run for `threadId` (called on thread
+   * switch and when progress events arrive untracked). A re-attached run has
+   * no target ids (not persisted server-side) → indeterminate progress UI.
+   */
+  async syncActiveRun(threadId: string): Promise<void> {
+    try {
+      const run = await api.getActiveRun(threadId);
+      if (this.state.selectedThreadId !== threadId) return;
+      if (run != null) {
+        if (this.state.activeRun?.runId === run.run_id) return; // already tracked, keep targets
+        this.set({
+          activeRun: {
+            runId: run.run_id,
+            threadId: run.thread_id,
+            mode: run.mode,
+            targetIds: null,
+            lastProgress: null,
+          },
+        });
+      } else if (this.state.activeRun?.threadId === threadId) {
+        this.set({ activeRun: null }); // stale — run ended while we weren't looking
+      }
+    } catch {
+      // Non-fatal: the run block just won't render; run-finished still lands.
+    }
+  }
+
+  /** Cancel the tracked run (FR-4.8 cancel button). Fire-and-forget: the
+   *  authoritative `cancelled` arrives via `run-finished`. */
+  cancelActiveRun(): void {
+    const run = this.state.activeRun;
+    if (run == null) return;
+    api.cancelRun(run.runId).catch(() => {
+      // Already finished (NotActive) — run-finished will clear the block.
+    });
+  }
+
+  /** Dismiss the FR-4.8 failure panel. */
+  clearRunFailure(): void {
+    if (this.state.runFailure != null) this.set({ runFailure: null });
+  }
+
   // ---- selection ----
 
   selectProject(id: string): void {
@@ -287,6 +452,8 @@ class AppStore {
     this.set({ selectedThreadId: id, ...clearedViewer });
     void this.refetchArtifactVersions(id);
     void this.refetchComments(id);
+    // Re-attach to a run already in flight on this thread (FR-4.8).
+    void this.syncActiveRun(id);
   }
 
   setShowArchived(showArchived: boolean): void {

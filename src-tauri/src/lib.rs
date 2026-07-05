@@ -5,6 +5,7 @@ mod commands;
 mod comments;
 mod context;
 mod db;
+mod flows;
 mod projects;
 mod runs;
 mod server;
@@ -81,6 +82,10 @@ pub fn run() {
             commands::list_comments,
             commands::get_agent_settings,
             commands::set_agent_settings,
+            commands::ask_follow_ups,
+            commands::apply_to_artifact,
+            commands::get_active_run,
+            commands::get_run_log_tail,
             runs::cancel_run,
         ])
         .setup(|app| {

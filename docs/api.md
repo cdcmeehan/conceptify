@@ -58,6 +58,7 @@ webview updates live instead of polling. The frontend subscribes with
 | `navigate` | `POST /api/v1/open` | `{ project_id: string, thread_id: string \| null }` |
 | `run-progress` | agent-run engine (`runs` module, not an HTTP route) | `{ run_id: string, thread_id: string, kind: string, detail: string }` |
 | `run-finished` | agent-run engine (`runs` module, not an HTTP route) | `{ run_id: string, thread_id: string, status: string }` |
+| `thread-updated` | follow-up flow layer (`flows` module, not an HTTP route): thread status changes owned by the run lifecycle (apply-mode `updating` ↔ `ready`, PRD §4) | `{ project_id: string, thread_id: string, status: string }` |
 
 `artifact-updated` is the viewer's live-refresh trigger (PRD N2: save →
 visible refresh < 500ms): the frontend reloads the artifact iframe for
@@ -98,6 +99,52 @@ Cancellation is exposed to the frontend as the `cancel_run` Tauri command
 (`invoke('cancel_run', { run_id })`), which SIGKILLs the run's whole process
 group. One run per thread at a time (FR-4.9): starting a second returns a
 structured error naming the live run.
+
+### Flow commands (Tauri, not HTTP — FR-4.6/4.7/4.8)
+
+The follow-up flows live in `src-tauri/src/flows.rs` on top of the run engine
+and are invoked by the app shell as Tauri commands (snake_case args):
+
+- `ask_follow_ups { thread_id }` → `{ run_id, thread_id, mode: "answer",
+  target_comment_ids }` — FR-4.6: ONE headless run answers every **open**
+  comment individually via `conceptify resolve-comment`; the artifact is
+  never modified in this mode. Errors (user-facing strings): no artifact, no
+  open comments, run already active (FR-4.9).
+- `apply_to_artifact { thread_id, comment_ids }` → same shape with
+  `mode: "apply"` — FR-4.7: `comment_ids` empty targets every **answered**
+  comment; explicit ids may be `open` or `answered` (never `applied`). The
+  run edits a working copy, marks each target `applied`, then publishes ONE
+  new version via `conceptify save-artifact`.
+- `get_active_run { thread_id }` → the live run summary
+  (`{ run_id, thread_id, mode, status: "running" }`) or `null` — the UI
+  re-attaches to an in-flight run on thread switch. Target ids are not
+  persisted, so a re-attached run renders indeterminate progress.
+- `get_run_log_tail { run_id, max_lines? }` →
+  `{ run_id, log_path, lines }` (default last 30 lines) — FR-4.8 failure
+  surfacing; `log_path` is always returned even when the file is unreadable.
+
+**Apply ordering (FR-4.7 × FR-4.4):** the apply prompt instructs the agent to
+finish all edits, then run `resolve-comment --applied` for **every** target
+comment, then `save-artifact` exactly once, last. `applied` comments are
+frozen at their capture version and excluded from save-time re-attachment, so
+this order keeps re-anchoring away from the very text the apply rewrote. The
+ordering is prompt-enforced (marking comments applied server-side before the
+run could succeed would lie on failure); an agent that saves first anyway
+degrades gracefully — re-attachment just processes the not-yet-applied
+targets (noisier, never corrupting).
+
+**Thread status:** apply runs set the thread to `updating` on start and
+conditionally restore `ready` when the run terminates (a `ready` already set
+by the agent's mid-run `save-artifact` is never regressed); each change emits
+`thread-updated`. Answer runs never touch thread status, and **no follow-up
+run ever sets thread status `error`** — that state belongs to generation runs
+(FR-5.3); follow-up failures are surfaced by the run-status UI instead.
+
+**Child environment:** the flow layer resolves the `conceptify` CLI
+(`CONCEPTIFY_CLI` env override → binary sibling of the app executable →
+login-shell `which`, cached) and prepends its directory to the spawned
+agent's `PATH` — Finder-launched GUI apps inherit a minimal `PATH` (PRD
+§5.1), and the prompts' contract is that plain `conceptify` works.
 
 Read-only routes (`GET /api/v1/debug/db-check`, `GET /api/v1/projects`,
 `GET /api/v1/threads`, `GET /api/v1/threads/:id/context`, `GET /api/v1/comments`)

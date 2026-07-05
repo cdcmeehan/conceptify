@@ -741,3 +741,138 @@ pub fn set_agent_settings(
     let _ = app.emit("settings-changed", &());
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Follow-up flows (PRD FR-4.6/4.7/4.8/4.9) — beads b12.4/b12.5/b12.6.
+//
+// Thin command wrappers over the `crate::flows` layer (which owns the prompt
+// assembly, child PATH preparation, thread-status policy, and the apply
+// ordering contract — see flows.rs module docs). Following the established
+// pattern: wrappers marshal managed state and stringify errors; the strings
+// are shown verbatim in the sidebar. `cancel_run` (the FR-4.8 cancel button)
+// lives in `crate::runs` and is registered alongside these in lib.rs.
+// ---------------------------------------------------------------------------
+
+/// A started flow run: what the sidebar needs to render the FR-4.8 run block
+/// and compute per-comment progress. `target_comment_ids` is only available
+/// here (targets are not persisted) — a UI re-attaching to an in-flight run
+/// via `get_active_run` gets an indeterminate spinner instead.
+#[derive(Serialize)]
+pub struct RunStartedDto {
+    pub run_id: String,
+    pub thread_id: String,
+    /// `answer` (FR-4.6) or `apply` (FR-4.7).
+    pub mode: String,
+    pub target_comment_ids: Vec<String>,
+}
+
+impl From<crate::flows::FlowStarted> for RunStartedDto {
+    fn from(s: crate::flows::FlowStarted) -> Self {
+        RunStartedDto {
+            run_id: s.run_id,
+            thread_id: s.thread_id,
+            mode: s.mode.as_str().to_owned(),
+            target_comment_ids: s.target_comment_ids,
+        }
+    }
+}
+
+/// Start the FR-4.6 "Ask follow-ups" batch run: ONE headless agent answers
+/// every open comment individually via `resolve-comment` (sidebar-first; the
+/// artifact is never modified in this mode). One run per thread (FR-4.9): a
+/// second start while one is active fails with a clear error.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn ask_follow_ups(
+    app: tauri::AppHandle,
+    thread_id: String,
+) -> Result<RunStartedDto, String> {
+    crate::flows::ask_follow_ups(&app, &thread_id)
+        .await
+        .map(RunStartedDto::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Start the FR-4.7 "Apply to artifact" run for `comment_ids` (empty = every
+/// `answered` comment). The agent publishes ONE new artifact version via
+/// `save-artifact` after marking the targets `applied` (ordering contract in
+/// flows.rs). The thread shows `updating` for the duration.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn apply_to_artifact(
+    app: tauri::AppHandle,
+    thread_id: String,
+    comment_ids: Vec<String>,
+) -> Result<RunStartedDto, String> {
+    crate::flows::apply_to_artifact(&app, &thread_id, comment_ids)
+        .await
+        .map(RunStartedDto::from)
+        .map_err(|e| e.to_string())
+}
+
+/// The live run for a thread, if any (FR-4.8: the sidebar re-attaches to an
+/// in-flight run when the user switches back to its thread). `status` is
+/// always `running` — terminal runs leave the registry before `run-finished`
+/// is emitted, so the frontend never sees a stale "active" run here.
+#[derive(Serialize)]
+pub struct ActiveRunDto {
+    pub run_id: String,
+    pub thread_id: String,
+    pub mode: String,
+    pub status: String,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_active_run(
+    db: State<DbHandle>,
+    registry: State<crate::runs::RunRegistry>,
+    thread_id: String,
+) -> Result<Option<ActiveRunDto>, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let summary = crate::flows::active_run_summary(&conn, &registry, &thread_id)
+        .map_err(|e| e.to_string())?;
+    Ok(summary.map(|s| ActiveRunDto {
+        run_id: s.run_id,
+        thread_id: s.thread_id,
+        mode: s.mode,
+        status: crate::runs::RunStatus::Running.as_str().to_owned(),
+    }))
+}
+
+/// The tail of a run's transcript log (FR-4.8 failure surfacing). `log_path`
+/// is always returned (the full log is retained on disk for debugging); a
+/// missing/unreadable file degrades to a single explanatory line rather than
+/// an error, so the failure panel can always render the path.
+#[derive(Serialize)]
+pub struct RunLogTailDto {
+    pub run_id: String,
+    pub log_path: String,
+    pub lines: Vec<String>,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_run_log_tail(
+    db: State<DbHandle>,
+    run_id: String,
+    max_lines: Option<usize>,
+) -> Result<RunLogTailDto, String> {
+    let log_path: String = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT log_path FROM follow_up_runs WHERE id = ?1",
+            [&run_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => format!("run not found: {run_id}"),
+            other => other.to_string(),
+        })?
+    };
+
+    let max = max_lines.unwrap_or(crate::flows::DEFAULT_LOG_TAIL_LINES);
+    let lines = crate::flows::tail_lines(Path::new(&log_path), max)
+        .unwrap_or_else(|e| vec![format!("(could not read log: {e})")]);
+    Ok(RunLogTailDto {
+        run_id,
+        log_path,
+        lines,
+    })
+}

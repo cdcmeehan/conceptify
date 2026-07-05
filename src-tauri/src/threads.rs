@@ -263,6 +263,31 @@ pub fn set_thread_status(
     Ok(())
 }
 
+/// Conditionally transition a thread's status: `from → to`, applied only if
+/// the thread is currently in `from`. Returns whether a row actually changed.
+///
+/// This is the flow layer's (`crate::flows`) race-free "revert" primitive for
+/// the PRD §4 run-lifecycle statuses: an apply run sets `updating` at start
+/// and, when the run ends, restores `ready` *only if the thread is still
+/// `updating`* — if the agent's `save-artifact` already flipped it to `ready`
+/// mid-run, this is a no-op, with the check and the write in one statement so
+/// no interleaving can regress a fresher status. Bumps `updated_at` on change
+/// (same last-activity semantics as [`set_thread_status`]).
+pub fn transition_thread_status(
+    conn: &Connection,
+    thread_id: &str,
+    from: ThreadStatus,
+    to: ThreadStatus,
+) -> Result<bool, rusqlite::Error> {
+    let changed = conn.execute(
+        "UPDATE threads
+         SET status = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1 AND status = ?2",
+        rusqlite::params![thread_id, from.as_str(), to.as_str()],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Turn a human title into a filesystem-safe slug: lowercase ASCII
 /// alphanumerics, runs of any other character collapsed to a single hyphen,
 /// no leading/trailing hyphen, capped at `MAX_SLUG_LEN`.
@@ -523,6 +548,52 @@ mod tests {
             .unwrap();
         assert_eq!(status, "ready");
         assert!(updated_at > "2000-01-01T00:00:00.000Z".to_owned());
+    }
+
+    #[test]
+    fn transition_is_conditional_on_current_status() {
+        let conn = test_conn();
+        let t = create_thread(&conn, "p1", "Cond", "q").unwrap();
+        set_thread_status(&conn, &t.id, ThreadStatus::Updating).unwrap();
+
+        // Wrong `from` → no-op, status untouched.
+        assert!(!transition_thread_status(
+            &conn,
+            &t.id,
+            ThreadStatus::Generating,
+            ThreadStatus::Error
+        )
+        .unwrap());
+        let status: String = conn
+            .query_row("SELECT status FROM threads WHERE id = ?1", [&t.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "updating");
+
+        // Matching `from` → applied.
+        assert!(transition_thread_status(
+            &conn,
+            &t.id,
+            ThreadStatus::Updating,
+            ThreadStatus::Ready
+        )
+        .unwrap());
+        let status: String = conn
+            .query_row("SELECT status FROM threads WHERE id = ?1", [&t.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "ready");
+
+        // Unknown thread → false, no error.
+        assert!(!transition_thread_status(
+            &conn,
+            "ghost",
+            ThreadStatus::Updating,
+            ThreadStatus::Ready
+        )
+        .unwrap());
     }
 
     #[test]

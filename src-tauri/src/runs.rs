@@ -78,15 +78,6 @@
 //! finalization, abnormal ends). Plain appends — atomicity is not required
 //! for logs (the bead's contract), only that a terminal marker always lands.
 
-// Like `settings.rs` (see its identical note): the app lib compiles as a
-// cdylib, where pub items without an in-crate caller are flagged dead. The
-// live surface today is `cancel_run` (registered command), `RunRegistry` /
-// `reconcile_stale_runs` (lib.rs setup). `start_run`, `StartedRun`,
-// `active_run_for_thread`, `RunMode`, … have no callers until the flow beads
-// (b12.4/b12.5/959.1) land; every one is exercised by this module's tests.
-// Drop this allow when the first flow bead wires `start_run`.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -186,6 +177,13 @@ pub struct StartRun {
     pub thread_id: String,
     pub mode: RunMode,
     pub prompt: String,
+    /// Environment overrides applied on top of the inherited env (the engine
+    /// stays policy-free: *what* to override is the flows' decision). The
+    /// flow layer (`crate::flows`) uses this to hand the child a `PATH` that
+    /// contains the `conceptify` CLI — a Finder-launched GUI app inherits a
+    /// minimal `PATH` (PRD §5.1), and every headless run's contract is to
+    /// report back through the CLI.
+    pub env: Vec<(String, String)>,
 }
 
 /// Handle returned by [`start_run`]. Dropping it does **not** affect the run
@@ -334,6 +332,10 @@ impl RunRegistry {
 
 /// Convenience wrapper over the managed registry for flow beads holding an
 /// `AppHandle`.
+// The current flows (b12.4–b12.6) reach the registry through managed state /
+// `flows::active_run_summary` instead; this wrapper stays for the in-app ask
+// flow (bead 959.1) and is exercised by this module's tests.
+#[allow(dead_code)]
 pub fn active_run_for_thread<R: Runtime>(
     app_handle: &AppHandle<R>,
     thread_id: &str,
@@ -577,6 +579,9 @@ async fn start_reserved<R: Runtime>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for (key, value) in &req.env {
+        cmd.env(key, value);
+    }
     #[cfg(unix)]
     cmd.process_group(0); // child leads its own group → pgid == pid
 
@@ -1179,6 +1184,7 @@ mod tests {
                     thread_id: self.thread_id.clone(),
                     mode,
                     prompt: prompt.to_owned(),
+                    env: Vec::new(),
                 },
             )
             .await
@@ -1561,6 +1567,7 @@ mod tests {
                 thread_id: "no-such-thread".to_owned(),
                 mode: RunMode::Answer,
                 prompt: "p".to_owned(),
+                env: Vec::new(),
             },
         )
         .await

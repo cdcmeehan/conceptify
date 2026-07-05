@@ -131,3 +131,89 @@ export function listComments(threadId: string, status?: CommentStatus): Promise<
 export function openArtifactInBrowser(threadId: string): Promise<string> {
   return invoke<string>("open_artifact_in_browser", { thread_id: threadId });
 }
+
+// ---------------------------------------------------------------------------
+// Follow-up runs (PRD FR-4.6/4.7/4.8/4.9 — the interrogation loop)
+// ---------------------------------------------------------------------------
+
+/** `answer` = FR-4.6 sidebar answers only; `apply` = FR-4.7 new artifact version. */
+export type RunMode = "answer" | "apply";
+
+/** Terminal + initial run states (docs/api.md "Run events"). `failed` and
+ *  `timeout` are the same error class for UI purposes; the distinction only
+ *  changes the message. */
+export type RunStatus = "running" | "completed" | "failed" | "cancelled" | "timeout";
+
+/**
+ * A successfully started flow run. `target_comment_ids` are the comments this
+ * run is expected to resolve — the basis for the FR-4.8 per-comment progress
+ * ("n of m answered", derived from the store's comment statuses as
+ * `comment-updated` events land). Targets are not persisted server-side, so
+ * only the starting session has them (see `getActiveRun`).
+ */
+export interface RunStarted {
+  run_id: string;
+  thread_id: string;
+  mode: RunMode;
+  target_comment_ids: string[];
+}
+
+/**
+ * Start the FR-4.6 "Ask follow-ups" batch run: one headless agent answers every
+ * open comment individually via `resolve-comment`; the artifact is untouched.
+ * Rejects (with a user-facing message) when the thread has no artifact, no open
+ * comments, or already has an active run (FR-4.9).
+ */
+export function askFollowUps(threadId: string): Promise<RunStarted> {
+  return invoke<RunStarted>("ask_follow_ups", { thread_id: threadId });
+}
+
+/**
+ * Start the FR-4.7 "Apply to artifact" run for the given comments (empty array
+ * = every answered comment). The agent saves ONE new artifact version; the
+ * viewer refreshes live via `artifact-updated` and the comments transition to
+ * `applied`. The thread shows `updating` while the run is in flight.
+ */
+export function applyToArtifact(threadId: string, commentIds: string[]): Promise<RunStarted> {
+  return invoke<RunStarted>("apply_to_artifact", {
+    thread_id: threadId,
+    comment_ids: commentIds,
+  });
+}
+
+/** The live run for a thread, or `null`. `status` is always `"running"` —
+ *  finished runs leave the registry before `run-finished` fires. Carries no
+ *  target ids (not persisted): a re-attached run renders indeterminate
+ *  progress. */
+export interface ActiveRun {
+  run_id: string;
+  thread_id: string;
+  mode: RunMode;
+  status: RunStatus;
+}
+
+export function getActiveRun(threadId: string): Promise<ActiveRun | null> {
+  return invoke<ActiveRun | null>("get_active_run", { thread_id: threadId });
+}
+
+/** Cancel a live run (FR-4.8): SIGKILLs the whole process tree; the run ends
+ *  `cancelled` with partial answers preserved. */
+export function cancelRun(runId: string): Promise<void> {
+  return invoke<void>("cancel_run", { run_id: runId });
+}
+
+/** The tail of a run's transcript (FR-4.8 failure surfacing). `log_path` is
+ *  the full on-disk log, always returned; `lines` degrades to a single
+ *  explanatory entry if the file is unreadable. */
+export interface RunLogTail {
+  run_id: string;
+  log_path: string;
+  lines: string[];
+}
+
+export function getRunLogTail(runId: string, maxLines?: number): Promise<RunLogTail> {
+  return invoke<RunLogTail>("get_run_log_tail", {
+    run_id: runId,
+    max_lines: maxLines ?? null,
+  });
+}

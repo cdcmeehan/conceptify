@@ -35,6 +35,25 @@ interface CommentEventPayload {
   comment_id: string;
 }
 
+interface ThreadUpdatedPayload {
+  project_id: string;
+  thread_id: string;
+  status: string;
+}
+
+interface RunProgressPayload {
+  run_id: string;
+  thread_id: string;
+  kind: string;
+  detail: string;
+}
+
+interface RunFinishedPayload {
+  run_id: string;
+  thread_id: string;
+  status: string;
+}
+
 /**
  * Subscribe to the core's Tauri events and drive `appStore`. Call once at
  * startup; returns a cleanup function that removes every listener.
@@ -83,6 +102,27 @@ export function initEventListeners(): () => void {
     listen<CommentEventPayload>("comment-updated", (event) => {
       void appStore.refetchComments(event.payload.thread_id);
       void appStore.refetchThreads(event.payload.project_id);
+    }),
+
+    // A thread's status changed under the run lifecycle (M5 flows: apply-mode
+    // `updating` → `ready`, PRD §4). Refresh the thread list so status chips
+    // go live, and the project list for last-activity ordering.
+    listen<ThreadUpdatedPayload>("thread-updated", (event) => {
+      void appStore.refetchThreads(event.payload.project_id);
+      void appStore.refetchProjects();
+    }),
+
+    // A headless follow-up run emitted a stdout line (FR-4.8). Feeds the run
+    // status block's activity line; also lets the store re-attach to a run it
+    // isn't tracking yet.
+    listen<RunProgressPayload>("run-progress", (event) => {
+      appStore.handleRunProgress(event.payload);
+    }),
+
+    // A headless follow-up run reached a terminal state (FR-4.8): clear the
+    // run block, surface failures, reconcile lists.
+    listen<RunFinishedPayload>("run-finished", (event) => {
+      appStore.handleRunFinished(event.payload);
     }),
 
     // The user asked to open a specific project/thread (e.g. `conceptify open`).
