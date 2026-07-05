@@ -21,12 +21,24 @@ Contents: [How a run works](#how-a-follow-up-run-works) ·
   — your working directory is the project root. The real code is your
   ground truth; read it before answering or editing anything.
 - Your prompt embeds the run context: the thread question, the artifact
-  file path, and every target comment with its anchor. If you need to
-  re-fetch it fresh (or lost it), run
-  `conceptify get-context --thread <id>` — it returns the same context in
-  one round-trip (thread question, `projectRoot`, `artifactPath`, and the
+  file path, and each target as an **exchange** — a root comment with its
+  anchor, any answer already given, then any follow-up replies in order
+  (each with its `[status]` and answer). A closing
+  `Answer now: resolve comment <id>` line names the single message to answer.
+  If you need to re-fetch context fresh (or lost it), run
+  `conceptify get-context --thread <id>` — it returns the same data in one
+  round-trip (thread question, `projectRoot`, `artifactPath`, and the
   `openComments` array). Top-level keys are camelCase; **each comment's
   `anchor` is passed through verbatim** (see below).
+- **Exchanges may carry history.** A reader can reply to an answer they got
+  ("I still don't get why X"), which re-opens the root. In `get-context`,
+  `openComments` lists only **open roots**, and each carries a `replies`
+  array — its ordered reply chain (oldest first; every reply has
+  `parentId` = the root's id, a `null` `anchor`, and its own
+  `status`/`answerHtml`). The prompt renders that same chain as the exchange
+  transcript. Read the whole exchange before answering: the prior answer is
+  history to build on, not to repeat, and the newest message is the one you
+  actually owe a reply.
 - The artifact path is the **app-owned file**. Read it; never write to it.
   In apply mode you edit a *copy* and publish via the CLI (never a direct
   file write) — the app copies your working file into its own storage on
@@ -48,7 +60,12 @@ as-is and never rewrite it.
 - `type: "text"` = a text selection; `type: "element"` = a whole clicked
   element (diagram node / heading).
 - **A `null` anchor is a direct question about the artifact as a whole** —
-  not tied to any element. Answer it holistically.
+  not tied to any element. Answer it holistically. (A **reply's** `null`
+  anchor means something different: a reply has no anchor of its own — it
+  rides on its root's anchor as part of the same exchange, so read it
+  against the spot the root points at, not as a fresh whole-artifact
+  question. In the prompt transcript, only the root carries an `anchor`
+  line.)
 
 The `cfy_id`/`quote` pair is the durable cross-version contract that keeps
 comments attached after edits (re-attachment, below) — treat it as
@@ -58,9 +75,26 @@ load-bearing, not incidental.
 
 Reply to each comment in the sidebar; the artifact is **never modified**.
 
-- **Per-comment granularity.** One `conceptify resolve-comment` call per
-  comment — never combine several, never skip one. Resolve each the moment
-  its answer is ready so answers stream into the sidebar one by one.
+- **One answer per exchange — to the LATEST unanswered message.** Each
+  exchange's `Answer now` line names the single message to resolve. Answer
+  that message only, with one `conceptify resolve-comment` call — never
+  combine exchanges, never skip one. Resolve each the moment its answer is
+  ready so answers stream into the sidebar one by one.
+- **Resolve against the id the prompt names.** That id is the **reply's**
+  id when the latest message is a reply, the **root's** id for a fresh
+  root. A reply id is not the root id — resolve the wrong one and the answer
+  strands on the wrong message (and the reply the reader is waiting on stays
+  open). Pass exactly the `Answer now` id to `resolve-comment --id`.
+- **Build on the exchange; don't restart it.** When an exchange has history
+  (a prior answer plus a reply), the reply pins the *specific* confusion the
+  earlier answer left unresolved. Address that point — do not re-explain
+  from scratch and do not repeat the answer already shown in the sidebar;
+  extend it.
+- **If it still isn't landing, change strategy.** By a reader's second or
+  third "I still don't get it," restating the same explanation harder will
+  not help. Switch tack: a concrete analogy, a smaller worked example, or a
+  pointer to a specific element in the artifact ("see the Token Service node
+  in `fig-auth-flow`"). A different angle beats a louder repeat.
 - **Answer what you can; leave what you can't — never fabricate.** If the
   code doesn't support a confident answer, say what you *can* establish and
   name the uncertainty. A comment you genuinely can't address is better
@@ -82,8 +116,8 @@ Reply to each comment in the sidebar; the artifact is **never modified**.
 
 ```bash
 ANSWERS=$(mktemp -d)                                   # scratch, outside the repo
-# ...write $ANSWERS/<comment-id>.html per comment...
-conceptify resolve-comment --id <comment-id> --answer-file "$ANSWERS/<comment-id>.html"
+# ...write $ANSWERS/<message-id>.html per exchange (message-id = its "Answer now" id)...
+conceptify resolve-comment --id <message-id> --answer-file "$ANSWERS/<message-id>.html"
 ```
 
 ## Apply mode
@@ -101,6 +135,14 @@ property — the re-attachment pass runs inside the same transaction as the
 version insert and migrates only the comments you did *not* touch (full
 semantics: `docs/api.md → Re-attachment across versions` in the Conceptify
 repo).
+
+**Apply targets are roots — never a reply.** A comment chain applies as a
+unit: the `--applied` mark goes on the **root** (`resolve-comment --applied`
+on a reply id is rejected — `applied` is root-only). Applying a root freezes
+the whole chain as history: the root and its replies keep their original
+`artifact_version`, and both are excluded from the save-time re-attachment
+pass — so an already-applied conversation is never re-anchored or re-touched
+on later saves.
 
 **Editing the working copy:**
 
@@ -143,8 +185,8 @@ WORK=$(mktemp -d)/artifact.html          # working copy, outside the repo
 cp "<artifact-path>" "$WORK"
 # ...edit $WORK until every comment is addressed; bump cfy:version...
 # THEN, only once the file is final — mark every target applied:
-conceptify resolve-comment --id <comment-id> --answer-file <note-file> --applied
-# ...one --applied call per target...
+conceptify resolve-comment --id <root-comment-id> --answer-file <note-file> --applied
+# ...one --applied call per target ROOT (never a reply id)...
 # THEN publish, exactly once, as the very last CLI call:
 conceptify save-artifact --thread <thread-id> --file "$WORK"
 ```
