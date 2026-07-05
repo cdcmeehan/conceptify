@@ -115,11 +115,18 @@ const MAX_RUN_PROGRESS_LINES = 8;
 
 /** A terminal failure (`failed`/`timeout`) of the latest run on the selected
  *  thread (FR-4.8): drives the inline failure panel with the on-demand log
- *  tail. Cleared on dismiss, thread switch, or a new run start. */
+ *  tail. Cleared on dismiss, thread switch, or a new run start.
+ *
+ *  `targetRootId` is the single root comment a failed "Ask now" run was
+ *  targeting (epic conceptify-6xi), so the sidebar can highlight that root's
+ *  chain alongside the failure panel. `null` for a batch answer/apply run, a
+ *  run re-attached after reload (targets aren't persisted), or a generation
+ *  run — those aren't scoped to one root. */
 export interface RunFailureState {
   runId: string;
   threadId: string;
   status: "failed" | "timeout";
+  targetRootId: string | null;
 }
 
 export interface AppState {
@@ -456,6 +463,31 @@ class AppStore {
   }
 
   /**
+   * Start the "Ask now" single-comment answer run for `rootCommentId` (epic
+   * conceptify-6xi). Mirrors `askFollowUps`: throws (so the sidebar surfaces the
+   * guard message inline near the button) on no artifact / not-open / reply /
+   * already-active-run, and on success records the run (`targetIds` = the single
+   * root id — the basis for the inline single-run state that renders on that
+   * root's chain instead of the header batch block) and clears any prior
+   * failure panel.
+   */
+  async askSingleComment(threadId: string, rootCommentId: string): Promise<void> {
+    const started = await api.askSingleComment(threadId, rootCommentId);
+    if (this.state.selectedThreadId !== started.thread_id) return;
+    this.set({
+      activeRun: {
+        runId: started.run_id,
+        threadId: started.thread_id,
+        mode: started.mode,
+        targetIds: started.target_comment_ids,
+        lastProgress: null,
+        recentProgress: [],
+      },
+      runFailure: null,
+    });
+  }
+
+  /**
    * Start the FR-4.7 "Apply to artifact" run for the given comments (empty =
    * all answered). Same throw/record contract as `askFollowUps`. The thread's
    * `updating` status chip arrives via the `thread-updated` event.
@@ -571,6 +603,18 @@ class AppStore {
         payload.thread_id === this.state.selectedThreadId &&
         this.state.artifactVersions.length === 0);
 
+    // An "Ask now" single-comment run (epic conceptify-6xi) is an answer run
+    // with exactly one target root — carry that root id onto the failure so the
+    // sidebar highlights its chain. Batch/apply/reload-restored runs (no or many
+    // targets) stay unscoped (`null`).
+    const targetRootId =
+      finishing != null &&
+      finishing.mode === "answer" &&
+      finishing.targetIds != null &&
+      finishing.targetIds.length === 1
+        ? finishing.targetIds[0]
+        : null;
+
     if (finishing != null) {
       this.set({ activeRun: null });
     }
@@ -584,6 +628,7 @@ class AppStore {
           runId: payload.run_id,
           threadId: payload.thread_id,
           status: payload.status,
+          targetRootId,
         },
       });
     }

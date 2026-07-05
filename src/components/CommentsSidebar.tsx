@@ -154,6 +154,34 @@ export function CommentsSidebar({
   // never as a follow-up run block here.
   const sidebarRun = activeRun != null && activeRun.mode !== "ask" ? activeRun : null;
 
+  // "Ask now" single-comment run (epic conceptify-6xi): an answer run targeting
+  // exactly ONE root renders compactly INLINE on that root's chain, not as the
+  // header batch block. Distinguished purely by target ids:
+  //  - a batch "Ask follow-ups" that happened to have a single open comment is
+  //    also length-1, and is correctly shown the same way (it *is* answering that
+  //    one root — the inline treatment is coherent either way);
+  //  - a run re-attached after a reload/thread-switch has no target ids (not
+  //    persisted server-side) → we can't tell single from batch, so it falls
+  //    back to the header block with its indeterminate spinner.
+  const inlineRunRootId =
+    sidebarRun != null && sidebarRun.mode === "answer" && sidebarRun.targetIds?.length === 1
+      ? sidebarRun.targetIds[0]
+      : null;
+  // The inline single-run state can only render if its root is actually on
+  // screen; if the active filter hides that root, fall back to the header block
+  // so the run is never left with no visible indicator.
+  const inlineRootVisible =
+    inlineRunRootId != null && visibleChains.some((ch) => ch.root.id === inlineRunRootId);
+  // The header shows the batch/apply run block for every sidebar run EXCEPT a
+  // single-comment answer run whose root is visible (that one lives inline on
+  // its root).
+  const headerRun = inlineRootVisible ? null : sidebarRun;
+  // The failure panel lives in the header (always visible regardless of the
+  // active filter); a single-comment failure additionally highlights its root's
+  // chain via `runFailure.targetRootId`.
+  const failureRootId =
+    runFailure != null && activeRun == null ? runFailure.targetRootId : null;
+
   async function startRunAction(action: () => Promise<void>) {
     setActionError(null);
     setStarting(true);
@@ -168,6 +196,10 @@ export function CommentsSidebar({
 
   function onAskFollowUps() {
     void startRunAction(() => appStore.askFollowUps(threadId));
+  }
+
+  function onAskNow(rootId: string) {
+    void startRunAction(() => appStore.askSingleComment(threadId, rootId));
   }
 
   function onApplyComments(commentIds: string[]) {
@@ -235,8 +267,8 @@ export function CommentsSidebar({
           buttons (idle) or the live run block (FR-4.9: the disabled state IS
           the guard's UI half — the engine enforces it server-side too). */}
       <div class="flex flex-col gap-1.5 border-b border-neutral-200 px-2 py-1.5 dark:border-neutral-800">
-        {sidebarRun != null ? (
-          <RunStatusBlock run={sidebarRun} comments={comments} />
+        {headerRun != null ? (
+          <RunStatusBlock run={headerRun} comments={comments} />
         ) : (
           <div class="flex gap-1.5">
             <button
@@ -244,11 +276,13 @@ export function CommentsSidebar({
               onClick={onAskFollowUps}
               disabled={!canAsk}
               title={
-                viewerVersion == null
-                  ? "Available once the thread has an artifact"
-                  : counts.open === 0
-                    ? "No open comments to answer"
-                    : "Answer every open comment in the sidebar (the artifact is not modified)"
+                !runIdle
+                  ? "A run is already in progress"
+                  : viewerVersion == null
+                    ? "Available once the thread has an artifact"
+                    : counts.open === 0
+                      ? "No open comments to answer"
+                      : "Answer every open comment in the sidebar (the artifact is not modified)"
               }
               class="flex-1 rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-neutral-200 disabled:text-neutral-400 dark:disabled:bg-neutral-800 dark:disabled:text-neutral-600"
             >
@@ -262,7 +296,11 @@ export function CommentsSidebar({
                 type="button"
                 onClick={() => onApplyComments([])}
                 disabled={!canApply}
-                title="Apply every answered comment to the artifact (saves a new version)"
+                title={
+                  !runIdle
+                    ? "A run is already in progress"
+                    : "Apply every answered comment to the artifact (saves a new version)"
+                }
                 class="flex-1 rounded-md border border-violet-300 bg-violet-600/10 px-2.5 py-1.5 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-600/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-violet-500/40 dark:bg-violet-500/15 dark:text-violet-300"
               >
                 Apply all answered
@@ -300,8 +338,11 @@ export function CommentsSidebar({
                 threadId={threadId}
                 viewerVersion={viewerVersion}
                 onScroll={scrollTo}
-                canApply={canApply}
+                runIdle={runIdle}
                 onApply={(comment) => onApplyComments([comment.id])}
+                onAskNow={() => onAskNow(chain.root.id)}
+                inlineRun={inlineRunRootId === chain.root.id ? sidebarRun : null}
+                failedHighlight={failureRootId === chain.root.id}
               />
             ))}
           </ul>
@@ -328,23 +369,42 @@ export function CommentsSidebar({
  * answer or already has replies) — a fresh, unanswered root doesn't need one
  * (the agent hasn't spoken yet). Replying re-opens an answered/applied root
  * server-side; the flipped status chip lands live via `addComment`'s refetch.
+ *
+ * "Ask now" (epic conceptify-6xi.4): an OPEN root also carries an "Ask now"
+ * button in the same action slot, firing a single-comment answer run for just
+ * that root. While that run is active on THIS root, `inlineRun` is set and the
+ * action slot is replaced by a compact inline run state (spinner + cancel).
+ * FR-4.9: while ANY run is active on the thread (`!runIdle`), every per-root
+ * action button (Ask now, Apply) is disabled with a "run in progress" tooltip.
  */
 function ChainItem({
   chain,
   threadId,
   viewerVersion,
   onScroll,
-  canApply,
+  runIdle,
   onApply,
+  onAskNow,
+  inlineRun,
+  failedHighlight,
 }: {
   chain: CommentChain;
   threadId: string;
   viewerVersion: number | null;
   onScroll: (c: Comment) => void;
-  /** Whether FR-4.7 "Apply to artifact" is available at all (artifact present,
-   *  no active run). Gated per-root against `answered` status inside. */
-  canApply: boolean;
+  /** Whether no run is active on the thread (FR-4.9): gates whether the per-root
+   *  Ask now / Apply buttons are enabled. They still *render* during a run —
+   *  disabled with a tooltip — so the FR-4.9 lockout is visible, not silent. */
+  runIdle: boolean;
   onApply: (c: Comment) => void;
+  /** Fire an FR-4.6-style "Ask now" answer run for this (open) root. */
+  onAskNow: () => void;
+  /** The single-comment answer run currently targeting THIS root, or `null`.
+   *  When set, the action slot is replaced by a compact inline run state. */
+  inlineRun: ActiveRunState | null;
+  /** Whether a failed "Ask now" run on this root should highlight its chain
+   *  (the failure panel itself lives in the sidebar header). */
+  failedHighlight: boolean;
 }) {
   const { root, replies } = chain;
   const [replyOpen, setReplyOpen] = useState(false);
@@ -355,14 +415,21 @@ function ChainItem({
   const moved = root.anchor_state === "moved";
   const scrollable = root.anchor != null && !crossVersion && viewerVersion != null;
 
-  const canApplyRoot = canApply && root.status === "answered";
+  const hasArtifact = viewerVersion != null;
+  // Apply (FR-4.7) shows on answered roots; Ask now (6xi.4) on open roots. Both
+  // need an artifact to exist. They render regardless of run state and disable
+  // (not vanish) while a run is active, so the FR-4.9 lockout is visible.
+  const showApply = hasArtifact && root.status === "answered";
+  const showAskNow = hasArtifact && root.status === "open";
   // Reply shows once the exchange has started: the root has an answer, or it
   // already carries replies. A fresh unanswered root gets no Reply affordance.
   const hasAnswer = root.answer_html != null && root.answer_html.length > 0;
   const showReply = hasAnswer || replies.length > 0;
-  // The action slot renders only when it has a visible button. When the reply
-  // composer is open the Reply button is hidden (the composer replaces it).
-  const showActions = canApplyRoot || (showReply && !replyOpen);
+  // The action slot renders only when it has a visible button, and only when no
+  // inline run occupies this root (the run state replaces the buttons). When the
+  // reply composer is open the Reply button is hidden (the composer replaces it).
+  const showActions =
+    inlineRun == null && (showApply || showAskNow || (showReply && !replyOpen));
 
   const clickProps = scrollable
     ? {
@@ -380,7 +447,13 @@ function ChainItem({
     : {};
 
   return (
-    <li class="overflow-hidden rounded-lg border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-900">
+    <li
+      class={`overflow-hidden rounded-lg border bg-white dark:bg-neutral-900 ${
+        failedHighlight
+          ? "border-rose-300 dark:border-rose-500/40"
+          : "border-neutral-200 dark:border-neutral-800"
+      }`}
+    >
       <div
         {...clickProps}
         class={`px-2.5 py-2 outline-none ${
@@ -446,18 +519,40 @@ function ChainItem({
         </ul>
       )}
 
-      {/* Per-root action slot (epic conceptify-6xi). Apply + Reply live here;
-          bead 6xi.4's per-root "Ask now" button lands in this same row. */}
+      {/* Per-root action slot (epic conceptify-6xi). Apply + Reply + 6xi.4's
+          "Ask now" live in this row; while a single-comment run targets this
+          root the compact inline run state replaces it. */}
+      {inlineRun != null && <InlineRunState />}
       {showActions && (
         <div class="flex flex-wrap items-center gap-1.5 border-t border-neutral-100 px-2.5 py-1.5 dark:border-neutral-800">
-          {canApplyRoot && (
+          {showApply && (
             <button
               type="button"
               onClick={() => onApply(root)}
-              title="Have the agent incorporate this clarification into the artifact (saves a new version)"
-              class="rounded-md border border-violet-300 bg-violet-600/10 px-2 py-1 text-[11px] font-medium text-violet-700 transition-colors hover:bg-violet-600/20 dark:border-violet-500/40 dark:bg-violet-500/15 dark:text-violet-300"
+              disabled={!runIdle}
+              title={
+                !runIdle
+                  ? "A run is already in progress"
+                  : "Have the agent incorporate this clarification into the artifact (saves a new version)"
+              }
+              class="rounded-md border border-violet-300 bg-violet-600/10 px-2 py-1 text-[11px] font-medium text-violet-700 transition-colors hover:bg-violet-600/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-violet-500/40 dark:bg-violet-500/15 dark:text-violet-300"
             >
               Apply to artifact
+            </button>
+          )}
+          {showAskNow && (
+            <button
+              type="button"
+              onClick={onAskNow}
+              disabled={!runIdle}
+              title={
+                !runIdle
+                  ? "A run is already in progress"
+                  : "Answer just this comment now (the artifact is not modified)"
+              }
+              class="rounded-md border border-blue-300 bg-blue-600/10 px-2 py-1 text-[11px] font-medium text-blue-700 transition-colors hover:bg-blue-600/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-500/40 dark:bg-blue-500/15 dark:text-blue-300"
+            >
+              Ask now
             </button>
           )}
           {showReply && !replyOpen && (
@@ -481,6 +576,46 @@ function ChainItem({
         />
       )}
     </li>
+  );
+}
+
+/**
+ * Compact inline run state for an "Ask now" single-comment run (epic
+ * conceptify-6xi.4), rendered in place of a root's action slot while its run is
+ * live: a small spinner, "Answering…", and an icon cancel wired to `cancel_run`
+ * (via `appStore.cancelActiveRun`, which cancels the one active run). Kept tiny
+ * on purpose — the header batch block owns the fuller per-comment progress; a
+ * single-target run needs only "working / cancel". It clears when the run
+ * finishes (`run-finished` drops `activeRun` → the parent stops passing
+ * `inlineRun`), at which point the chain shows the freshly-landed answer.
+ */
+function InlineRunState() {
+  return (
+    <div class="flex items-center gap-2 border-t border-blue-100 bg-blue-50 px-2.5 py-1.5 dark:border-blue-500/20 dark:bg-blue-500/10">
+      <svg
+        viewBox="0 0 20 20"
+        fill="none"
+        class="h-3 w-3 shrink-0 animate-spin text-blue-600 dark:text-blue-400"
+        aria-hidden="true"
+      >
+        <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="2" class="opacity-25" />
+        <path d="M17 10a7 7 0 0 0-7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </svg>
+      <span class="flex-1 text-[11px] font-medium text-blue-800 dark:text-blue-300">
+        Answering…
+      </span>
+      <button
+        type="button"
+        onClick={() => appStore.cancelActiveRun()}
+        title="Cancel this run (kills the agent process; answers already given are kept)"
+        aria-label="Cancel this run"
+        class="rounded p-0.5 text-blue-600 transition-colors hover:bg-blue-600/10 dark:text-blue-400 dark:hover:bg-blue-500/20"
+      >
+        <svg viewBox="0 0 20 20" fill="currentColor" class="h-3.5 w-3.5" aria-hidden="true">
+          <rect x="6" y="6" width="8" height="8" rx="1.5" />
+        </svg>
+      </button>
+    </div>
   );
 }
 

@@ -215,6 +215,24 @@ export function askFollowUps(threadId: string): Promise<RunStarted> {
 }
 
 /**
+ * Start the "Ask now" single-comment answer run (epic conceptify-6xi): one
+ * headless agent answers just this one root comment's latest open message via
+ * `resolve-comment`; the artifact is untouched. Same `RunStarted` shape and
+ * FR-4.9 one-run-per-thread guard as {@link askFollowUps}, but scoped to a
+ * single root (`target_comment_ids` is `[rootCommentId]`; the resolve may land
+ * on a reply row when the root was re-opened by a reply). Rejects (with a
+ * user-facing message) when the thread has no artifact, the comment isn't found,
+ * the target is a reply, the target root isn't open, a run is already active
+ * (FR-4.9), or the agent/CLI is missing.
+ */
+export function askSingleComment(threadId: string, rootCommentId: string): Promise<RunStarted> {
+  return invoke<RunStarted>("ask_single_comment", {
+    thread_id: threadId,
+    root_comment_id: rootCommentId,
+  });
+}
+
+/**
  * Start the FR-4.7 "Apply to artifact" run for the given comments (empty array
  * = every answered comment). The agent saves ONE new artifact version; the
  * viewer refreshes live via `artifact-updated` and the comments transition to
