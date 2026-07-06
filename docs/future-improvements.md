@@ -2,9 +2,10 @@
 
 Candidate features beyond the current work, roughly in priority order. Each
 should become a bead (or epic) when picked up — this file is the parking lot,
-not the tracker.
+not the tracker. All five items below were planned as beads on 2026-07-06
+(see the ids in each heading); the beads are the source of truth for scope.
 
-## 1. ⌘K quick switcher + full-text search (FTS5)
+## 1. ⌘K quick switcher + full-text search (FTS5) — planned: `conceptify-7x3`
 
 As artifacts accumulate, the app becomes a personal knowledge base — but the
 only navigation is project → thread list. Add SQLite **FTS5** over thread
@@ -15,7 +16,7 @@ where possible). Worth building *before* content piles up. (PRD Phase 2 lists
 this; index maintenance hooks belong in `save-artifact` and the comment
 mutation paths.)
 
-## 2. Local / self-hosted models via a LiteLLM proxy
+## 2. Local / self-hosted models via a LiteLLM proxy — planned: `conceptify-cmu`
 
 Provider-routed execution (bead `conceptify-e7m.7`) covers anthropic-native,
 openai-native, and everything-else-via-OpenRouter. Local or self-hosted models
@@ -28,7 +29,7 @@ provider. Cheap to add on top of the routing layer when wanted: a new
 `RouteTag`/route arm with a configurable base URL instead of the hardcoded
 OpenRouter one.
 
-## 3. Artifact version diffing
+## 3. Artifact version diffing — planned: `conceptify-3nn`
 
 After an apply run, v1 → v2 happens live but there's no way to see *what
 changed* — a trust gap in the apply loop. Even a simple view would help:
@@ -36,7 +37,7 @@ changed-section highlighting in the viewer (diff the two HTML files
 server-side, mark changed `data-cfy-id` blocks), or a side-by-side text diff
 as a first cut. PRD lists visual diff as P2/nice-to-have (FR-2.4).
 
-## 4. Streaming answers into the sidebar
+## 4. Streaming answers into the sidebar — planned: `conceptify-bds`
 
 Follow-up answers currently land wholesale per comment (`comment-updated`
 fires when `resolve-comment` completes). Streaming the answer text
@@ -46,7 +47,7 @@ alive. Requires the headless agent to emit partial answers (or the run
 pipeline forwards to a per-comment buffer). Polish, not structure — do after
 the conversational-interrogation epic lands.
 
-## 5. Structured codex run-progress parsing
+## 5. Structured codex run-progress parsing — planned: `conceptify-dqq`
 
 The `codex` adapter ships plain stdout passthrough: `codex exec` writes its
 human-readable transcript to **stderr** and only the final message to stdout,
