@@ -94,6 +94,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::artifacts;
 use crate::db::{self, DbHandle};
+use crate::routing;
 use crate::settings::{self, Purpose, RunOverride, SettingsError};
 
 /// How long after a kill we keep draining the (should-be-closing) streams /
@@ -420,12 +421,19 @@ struct Loaded {
     root_path: String,
     slug: String,
     settings: settings::AgentSettings,
+    /// The stored OpenRouter key (bead e7m.7), consumed only by an
+    /// openrouter-routed run. **Secret**: reaches the child exclusively via
+    /// `Command::env`; never logged, never persisted on the row, never part of
+    /// an error/event (test-proven below).
+    openrouter_key: Option<String>,
 }
 
 /// Start a headless agent run for a thread (PRD §5.1, §5.5 surface 2).
 ///
 /// Sequence: registry reservation (FR-4.9 guard, atomic) → thread/project +
-/// settings load + DB `running` double-check (one connection lock) →
+/// settings/OpenRouter-key load + DB `running` double-check (one connection
+/// lock) → provider routing (`crate::routing`, bead e7m.7: model → adapter +
+/// per-run env + route tag; missing-key/unroutable-model fail fast here) →
 /// invocation resolution (pure) + binary lookup (cached login-shell `which`)
 /// → `follow_up_runs` row inserted (`running`) → child spawned
 /// (`process_group(0)`, `kill_on_drop`, cwd = adapter template's cwd —
@@ -506,26 +514,47 @@ async fn start_reserved<R: Runtime>(
         }
 
         let settings = settings::get_settings(conn)?;
+        let openrouter_key = settings::get_openrouter_api_key(conn)?;
         Ok(Loaded {
             project_id,
             root_path,
             slug,
             settings,
+            openrouter_key,
         })
     })
     .await?;
 
-    // -- Resolve the invocation (pure, injection-safe — see settings.rs),
-    //    honoring the optional per-run override (epic conceptify-e7m). The
-    //    override is validated here (unknown adapter / bad model → error before
-    //    any row exists), and the binary is resolved after (the only effectful
-    //    step: cached `zsh -lc which`, so it runs off the async workers).
+    // -- Route, then resolve (bead conceptify-e7m.7). Routing derives the
+    //    (adapter, model, env, tag) from the chosen model's provider — or
+    //    passes the user's explicit adapter choice through untouched (manual
+    //    bypass) — and fails fast BEFORE any row exists on a missing
+    //    OpenRouter key or an unroutable model, exactly like the
+    //    unknown-adapter/bad-model validation below it. The catalog lookup is
+    //    disk-only (cache/snapshot), never the network. Resolution then stays
+    //    the pure, injection-safe template expansion (see settings.rs): the
+    //    routed selection is fed through the same override mechanism, so an
+    //    override-free anthropic-routed run is byte-identical to the
+    //    pre-routing invocation by construction.
     let purpose = req.mode.purpose();
     let over = req.run_override.as_ref();
-    let invocation =
-        loaded
-            .settings
-            .resolve_with_override(purpose, Path::new(&loaded.root_path), &req.prompt, over)?;
+    let route = routing::route_run(
+        &loaded.settings,
+        purpose,
+        over,
+        crate::catalog::provider_of,
+        loaded.openrouter_key.as_deref(),
+    )?;
+    let routed_selection = RunOverride {
+        adapter: Some(route.adapter.clone()),
+        model: Some(route.model.clone()),
+    };
+    let invocation = loaded.settings.resolve_with_override(
+        purpose,
+        Path::new(&loaded.root_path),
+        &req.prompt,
+        Some(&routed_selection),
+    )?;
     let program = {
         let command = invocation.program.clone();
         let override_path = loaded.settings.agent_binary_path.clone();
@@ -541,9 +570,11 @@ async fn start_reserved<R: Runtime>(
         return Err(RunError::CwdMissing(invocation.cwd));
     }
 
-    // The RESOLVED adapter key + model actually used (honoring the override),
-    // so the row honestly records what ran rather than the bare defaults.
-    let (agent, model) = loaded.settings.selection_for(purpose, over)?;
+    // The RESOLVED adapter key + model actually used (honoring override +
+    // routing), so the row honestly records what ran rather than the bare
+    // defaults. The route tag is recorded alongside (token-free — route
+    // visibility, bead e7m.7).
+    let (agent, model) = (route.adapter.clone(), route.model.clone());
     // The override INTENT persisted on the row (NULL for an override-free run),
     // so retry re-applies a real override but re-derives current defaults for a
     // run that had none. `is_empty()` collapses an all-None override to NULL.
@@ -567,7 +598,7 @@ async fn start_reserved<R: Runtime>(
     //    run is honest history (marked failed below), and the reverse order
     //    could leave a live process with no row.
     {
-        let (run_id, thread_id, agent, model, mode, log_path_str, override_json) = (
+        let (run_id, thread_id, agent, model, mode, log_path_str, override_json, route_tag) = (
             run_id.to_owned(),
             req.thread_id.clone(),
             agent.clone(),
@@ -575,22 +606,41 @@ async fn start_reserved<R: Runtime>(
             req.mode.as_str(),
             log_path.to_string_lossy().into_owned(),
             override_json,
+            route.tag.as_str(),
         );
         db::with_conn(db, move |conn| {
             conn.execute(
                 "INSERT INTO follow_up_runs
-                     (id, thread_id, agent, model, mode, status, log_path, override_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7)",
-                rusqlite::params![run_id, thread_id, agent, model, mode, log_path_str, override_json],
+                     (id, thread_id, agent, model, mode, status, log_path, override_json, route)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8)",
+                rusqlite::params![
+                    run_id,
+                    thread_id,
+                    agent,
+                    model,
+                    mode,
+                    log_path_str,
+                    override_json,
+                    route_tag
+                ],
             )
         })
         .await?;
     }
 
+    // Route visibility in the log header (bead e7m.7): tag + base-url note,
+    // NEVER env values — the OpenRouter token must not appear in any logged or
+    // persisted representation of the invocation (test-proven below).
+    let route_note = match route.tag {
+        routing::RouteTag::Openrouter => {
+            format!(" route=openrouter base_url={}", routing::OPENROUTER_BASE_URL)
+        }
+        tag => format!(" route={}", tag.as_str()),
+    };
     append_log(
         &log_path,
         &format!(
-            "[run] started {run_id} at {} mode={} agent={agent} model={model} program={} cwd={} timeout={}s prompt_chars={}",
+            "[run] started {run_id} at {} mode={} agent={agent} model={model}{route_note} program={} cwd={} timeout={}s prompt_chars={}",
             now_iso(),
             req.mode.as_str(),
             program.display(),
@@ -610,6 +660,12 @@ async fn start_reserved<R: Runtime>(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     for (key, value) in &req.env {
+        cmd.env(key, value);
+    }
+    // Route env last (last-writer-wins over the flow env): the OpenRouter
+    // route's ANTHROPIC_* triple, empty for every other route. Values may be
+    // secrets — they go ONLY into the child's env, never into logs/rows/events.
+    for (key, value) in &route.env {
         cmd.env(key, value);
     }
     #[cfg(unix)]
@@ -1255,6 +1311,72 @@ mod tests {
             )
             .unwrap()
         }
+
+        /// The `route` tag recorded on a run row (bead e7m.7).
+        fn run_route(&self, run_id: &str) -> Option<String> {
+            let conn = self.db.lock().unwrap();
+            conn.query_row(
+                "SELECT route FROM follow_up_runs WHERE id = ?1",
+                [run_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        }
+
+        /// Every TEXT column of a run row concatenated — the haystack for the
+        /// "no secret ever persisted" assertions (bead e7m.7).
+        fn run_row_text(&self, run_id: &str) -> String {
+            let conn = self.db.lock().unwrap();
+            conn.query_row(
+                "SELECT id || thread_id || agent || model || mode || status || log_path
+                        || COALESCE(override_json,'') || COALESCE(route,'')
+                 FROM follow_up_runs WHERE id = ?1",
+                [run_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        }
+
+        /// Point a BUILT-IN adapter's command at a fake capture script while
+        /// keeping `default_adapter = "claude"` — a ROUTABLE config, so
+        /// provider routing engages (unlike `install_fake_agent`, whose custom
+        /// default adapter deliberately hits the manual bypass). The script
+        /// records its argv and the ANTHROPIC_* env to files in the work dir
+        /// (never to stdout/stderr — those land in the run log, and the secret
+        /// tests assert the log stays token-free).
+        fn install_routed_capture(&self, adapter_key: &str) -> PathBuf {
+            let script = self.work_dir.join(format!("fake-{adapter_key}.sh"));
+            std::fs::write(
+                &script,
+                "#!/bin/sh\n\
+                 d=\"$(dirname \"$0\")\"\n\
+                 printf '%s\\n' \"$@\" > \"$d/argv.txt\"\n\
+                 printf 'base=%s\\ntoken=%s\\nkey=<%s>\\nkey_present=%s\\n' \\\n\
+                   \"$ANTHROPIC_BASE_URL\" \"$ANTHROPIC_AUTH_TOKEN\" \\\n\
+                   \"$ANTHROPIC_API_KEY\" \"${ANTHROPIC_API_KEY+set}\" > \"$d/env.txt\"\n\
+                 exit 0\n",
+            )
+            .unwrap();
+            let mut perm = std::fs::metadata(&script).unwrap().permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&script, perm).unwrap();
+
+            let mut s = AgentSettings::default();
+            let adapter = s
+                .adapters
+                .get_mut(adapter_key)
+                .expect("built-in adapter key");
+            adapter.command = script.to_string_lossy().into_owned();
+            adapter.args = vec![
+                "--model".to_owned(),
+                "{model}".to_owned(),
+                "{prompt}".to_owned(),
+            ];
+            s.timeout_secs = 60;
+            let conn = self.db.lock().unwrap();
+            crate::settings::update_settings(&conn, &s).unwrap();
+            script
+        }
     }
 
     async fn wait_until(mut f: impl FnMut() -> bool, timeout_ms: u64) -> bool {
@@ -1525,6 +1647,10 @@ mod tests {
         assert_eq!(agent, "fake");
         assert_eq!(model, "claude-haiku-4-5"); // Answer -> FollowUp default
         assert!(over_json.is_none(), "override-free run stores NULL override_json");
+        // A custom default_adapter bypasses provider routing (bead e7m.7):
+        // the row records the bypass, and the invocation is byte-identical to
+        // pre-routing behavior (this whole test ran unchanged through it).
+        assert_eq!(h.run_route(&run_id).as_deref(), Some("manual"));
     }
 
     #[tokio::test]
@@ -1556,6 +1682,204 @@ mod tests {
             .unwrap()
         };
         assert_eq!(count, 0, "invalid override creates no run row");
+        assert_eq!(h.registry().active_run_for_thread(&h.thread_id), None);
+    }
+
+    // -- provider routing (bead conceptify-e7m.7) -----------------------------
+
+    #[tokio::test]
+    async fn openrouter_route_env_reaches_child_and_secret_never_logged_or_persisted() {
+        // The invocation-contract proof for the OpenRouter route, at the real
+        // engine seam (real subprocess): a slash-form model on a routable
+        // config (default_adapter=claude, its command re-pointed at a capture
+        // script) must (a) hand the child EXACTLY the verified ANTHROPIC_* env
+        // triple, (b) pass the OpenRouter slug through --model verbatim (no
+        // remap), (c) record route=openrouter on the row + log header, and
+        // (d) keep the token out of the entire log file and every TEXT column
+        // of the run row.
+        let h = harness("orroute");
+        h.install_routed_capture("claude");
+        let token = "sk-or-v1-DEADBEEF-secret";
+        {
+            let conn = h.db.lock().unwrap();
+            crate::settings::set_openrouter_api_key(&conn, Some(token)).unwrap();
+        }
+
+        let over = RunOverride {
+            adapter: None,
+            model: Some("google/gemini-3-pro".to_owned()),
+        };
+        let started = h
+            .start_over(RunMode::Answer, "the routed prompt", Some(over))
+            .await
+            .unwrap();
+        let run_id = started.run_id.clone();
+        let fin = finished(started).await;
+        assert_eq!(fin.status, RunStatus::Completed);
+
+        // (a)+(b): the child observed the exact env contract + verbatim slug.
+        let argv = std::fs::read_to_string(h.work_dir.join("argv.txt")).unwrap();
+        assert_eq!(
+            argv.lines().collect::<Vec<_>>(),
+            vec!["--model", "google/gemini-3-pro", "the routed prompt"]
+        );
+        let env = std::fs::read_to_string(h.work_dir.join("env.txt")).unwrap();
+        assert_eq!(
+            env,
+            format!(
+                "base=https://openrouter.ai/api\ntoken={token}\nkey=<>\nkey_present=set\n"
+            ),
+            "ANTHROPIC_BASE_URL → OpenRouter, AUTH_TOKEN = stored key, \
+             API_KEY set-but-empty"
+        );
+
+        // (c): route visibility on row + log header (token-free tag).
+        assert_eq!(h.run_route(&run_id).as_deref(), Some("openrouter"));
+        let (agent, model, over_json) = h.run_selection(&run_id);
+        assert_eq!(agent, "claude");
+        assert_eq!(model, "google/gemini-3-pro");
+        assert_eq!(
+            over_json.as_deref(),
+            Some(r#"{"model":"google/gemini-3-pro"}"#),
+            "override intent persists the MODEL choice, not the routed adapter"
+        );
+        let log = std::fs::read_to_string(&fin.log_path).unwrap();
+        assert!(
+            log.contains("route=openrouter base_url=https://openrouter.ai/api"),
+            "{log}"
+        );
+
+        // (d): the secret is nowhere in the log or the persisted row.
+        assert!(!log.contains(token), "token leaked into run log:\n{log}");
+        assert!(!log.contains("DEADBEEF"), "token fragment in run log:\n{log}");
+        let row_text = h.run_row_text(&run_id);
+        assert!(!row_text.contains("DEADBEEF"), "token in run row: {row_text}");
+    }
+
+    #[tokio::test]
+    async fn openrouter_route_without_key_errors_before_row() {
+        // FR-4.9 discipline for the missing-key path (same contract as the
+        // unknown-adapter override): actionable error BEFORE spawning — no run
+        // row, registry slot freed.
+        let h = harness("orkeyless");
+        h.install_routed_capture("claude"); // routable config, NO key stored
+
+        let over = RunOverride {
+            adapter: None,
+            model: Some("google/gemini-3-pro".to_owned()),
+        };
+        let err = h
+            .start_over(RunMode::Answer, "p", Some(over))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RunError::Settings(SettingsError::OpenRouterKeyMissing(ref m))
+                    if m == "google/gemini-3-pro"
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("Settings"), "actionable: {err}");
+
+        let count: i64 = {
+            let conn = h.db.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM follow_up_runs WHERE thread_id = ?1",
+                [&h.thread_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count, 0, "missing key creates no run row");
+        assert_eq!(h.registry().active_run_for_thread(&h.thread_id), None);
+        // The capture script never ran.
+        assert!(!h.work_dir.join("argv.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn openai_model_routes_to_codex_adapter_without_env() {
+        // provider openai → the codex adapter, even though default_adapter is
+        // claude — and NO ANTHROPIC_* env is injected on a native route.
+        let h = harness("openairoute");
+        h.install_routed_capture("codex");
+
+        let over = RunOverride {
+            adapter: None,
+            model: Some("gpt-5.4-mini".to_owned()),
+        };
+        let started = h
+            .start_over(RunMode::Ask, "codex prompt", Some(over))
+            .await
+            .unwrap();
+        let run_id = started.run_id.clone();
+        let fin = finished(started).await;
+        assert_eq!(fin.status, RunStatus::Completed);
+
+        let argv = std::fs::read_to_string(h.work_dir.join("argv.txt")).unwrap();
+        assert_eq!(
+            argv.lines().collect::<Vec<_>>(),
+            vec!["--model", "gpt-5.4-mini", "codex prompt"]
+        );
+        // Native route: no base-url/auth env reaches the child.
+        let env = std::fs::read_to_string(h.work_dir.join("env.txt")).unwrap();
+        assert_eq!(env, "base=\ntoken=\nkey=<>\nkey_present=\n");
+
+        assert_eq!(h.run_route(&run_id).as_deref(), Some("openai"));
+        let (agent, model, _) = h.run_selection(&run_id);
+        assert_eq!(agent, "codex");
+        assert_eq!(model, "gpt-5.4-mini");
+        let log = std::fs::read_to_string(&fin.log_path).unwrap();
+        assert!(log.contains("route=openai"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn anthropic_default_routes_native_and_unroutable_fails_fast() {
+        // No override at all: the per-purpose anthropic default routes native
+        // (route=anthropic, no env) — the engine-level byte-identity check.
+        // Then an unroutable custom id on the same routable config fails fast
+        // pre-row.
+        let h = harness("anthroute");
+        h.install_routed_capture("claude");
+
+        let started = h.start(RunMode::Answer, "plain prompt").await.unwrap();
+        let run_id = started.run_id.clone();
+        let fin = finished(started).await;
+        assert_eq!(fin.status, RunStatus::Completed);
+        let argv = std::fs::read_to_string(h.work_dir.join("argv.txt")).unwrap();
+        assert_eq!(
+            argv.lines().collect::<Vec<_>>(),
+            vec!["--model", "claude-haiku-4-5", "plain prompt"]
+        );
+        let env = std::fs::read_to_string(h.work_dir.join("env.txt")).unwrap();
+        assert_eq!(env, "base=\ntoken=\nkey=<>\nkey_present=\n");
+        assert_eq!(h.run_route(&run_id).as_deref(), Some("anthropic"));
+        let log = std::fs::read_to_string(&fin.log_path).unwrap();
+        assert!(log.contains("route=anthropic"), "{log}");
+
+        // Unroutable custom id → structured error, no second row.
+        let over = RunOverride {
+            adapter: None,
+            model: Some("totally-custom-llm".to_owned()),
+        };
+        let err = h
+            .start_over(RunMode::Answer, "p", Some(over))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RunError::Settings(SettingsError::UnroutableModel(..))),
+            "{err:?}"
+        );
+        let count: i64 = {
+            let conn = h.db.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM follow_up_runs WHERE thread_id = ?1",
+                [&h.thread_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count, 1, "only the successful anthropic run has a row");
         assert_eq!(h.registry().active_run_for_thread(&h.thread_id), None);
     }
 

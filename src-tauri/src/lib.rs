@@ -8,6 +8,7 @@ mod context;
 mod db;
 mod flows;
 mod projects;
+mod routing;
 mod runs;
 mod server;
 mod settings;
@@ -95,6 +96,7 @@ pub fn run() {
             commands::set_agent_settings,
             commands::reset_agent_settings,
             commands::get_agent_options,
+            commands::set_openrouter_api_key,
             commands::ask_follow_ups,
             commands::ask_single_comment,
             commands::apply_to_artifact,

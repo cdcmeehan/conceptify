@@ -36,6 +36,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(FOLLOW_UP_RUNS_ASK_MODE).foreign_key_check(),
         M::up(COMMENT_PARENT_ID),
         M::up(FOLLOW_UP_RUNS_OVERRIDE),
+        M::up(FOLLOW_UP_RUNS_ROUTE),
     ])
 }
 
@@ -311,6 +312,26 @@ const FOLLOW_UP_RUNS_OVERRIDE: &str = "
 ALTER TABLE follow_up_runs ADD COLUMN override_json TEXT NULL;
 ";
 
+/// Adds `follow_up_runs.route` — the resolved execution route recorded by
+/// provider routing (epic `conceptify-e7m`, bead `conceptify-e7m.7`):
+/// `'anthropic'` (native claude CLI), `'openai'` (native codex CLI),
+/// `'openrouter'` (claude CLI pointed at OpenRouter via per-run env), or
+/// `'manual'` (routing bypassed by an explicit adapter choice). Token-free by
+/// construction — it is a tag, never credentials — and recorded so a user can
+/// always tell which path executed (the run-log header carries the same tag).
+/// Free-form TEXT rather than a CHECK, matching `status`'s rationale: the
+/// authoritative value set lives in `crate::routing::RouteTag`.
+///
+/// Plain nullable `ALTER TABLE ... ADD COLUMN`, no `DEFAULT`, like
+/// `FOLLOW_UP_RUNS_OVERRIDE` above: pre-routing rows backfill to `NULL`
+/// (correctly meaning "route unrecorded"). Appended per this file's
+/// append-only contract — `rusqlite_migration` tracks progress positionally by
+/// `user_version`, so an in-place edit would be silently skipped by databases
+/// already migrated past `FOLLOW_UP_RUNS_OVERRIDE`.
+const FOLLOW_UP_RUNS_ROUTE: &str = "
+ALTER TABLE follow_up_runs ADD COLUMN route TEXT NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,7 +339,13 @@ mod tests {
 
     /// `user_version` after the full chain — the count of `M::up` entries in
     /// [`migrations`].
-    const LATEST: usize = 11;
+    const LATEST: usize = 12;
+
+    /// Position of the `follow_up_runs.override_json` ALTER (the 11th
+    /// migration), pinned explicitly — like `ASK_MODE` below — so appending
+    /// later migrations never shifts its before/after boundary out from under
+    /// its test.
+    const OVERRIDE_JSON: usize = 11;
 
     /// Position of the `follow_up_runs` ask-mode rebuild (the 9th migration), so
     /// `ASK_MODE - 1` is the schema state immediately before it. Pinned
@@ -618,7 +645,8 @@ mod tests {
 
         // Migrate to just before override_json, then seed a run row under the
         // OLD schema (no override_json column exists yet).
-        m.to_version(&mut conn, LATEST - 1).expect("to pre-override_json");
+        m.to_version(&mut conn, OVERRIDE_JSON - 1)
+            .expect("to pre-override_json");
         seed_thread(&conn);
         conn.execute(
             "INSERT INTO follow_up_runs
@@ -629,7 +657,8 @@ mod tests {
         .expect("seed pre-migration run");
 
         // Apply the override_json migration.
-        m.to_version(&mut conn, LATEST).expect("apply override_json migration");
+        m.to_version(&mut conn, OVERRIDE_JSON)
+            .expect("apply override_json migration");
 
         // The pre-existing row survives with override_json NULL.
         let over: Option<String> = conn
@@ -657,5 +686,52 @@ mod tests {
             )
             .unwrap();
         assert_eq!(over.as_deref(), Some(r#"{"adapter":"codex","model":"gpt-5"}"#));
+    }
+
+    /// Migration 12 (`FOLLOW_UP_RUNS_ROUTE`): a run row written under the
+    /// pre-`route` schema survives the plain ALTER with `route` backfilled to
+    /// `NULL` ("route unrecorded"), and a row inserted afterward stores a tag.
+    #[test]
+    fn add_route_preserves_runs_and_stores_tag() {
+        let mut conn = fresh_conn();
+        let m = migrations();
+
+        m.to_version(&mut conn, LATEST - 1).expect("to pre-route");
+        seed_thread(&conn);
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path)
+             VALUES ('r-pre', 't1', 'claude', 'claude-sonnet-5', 'ask', 'completed', '/l.log')",
+            [],
+        )
+        .expect("seed pre-migration run");
+
+        m.to_version(&mut conn, LATEST).expect("apply route migration");
+
+        let route: Option<String> = conn
+            .query_row(
+                "SELECT route FROM follow_up_runs WHERE id = 'r-pre'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row should survive");
+        assert!(route.is_none(), "pre-routing run backfills to NULL route");
+
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path, route)
+             VALUES ('r-routed', 't1', 'claude', 'google/gemini-3-pro', 'ask', 'running',
+                     '/l2.log', 'openrouter')",
+            [],
+        )
+        .expect("insert run with route");
+        let route: Option<String> = conn
+            .query_row(
+                "SELECT route FROM follow_up_runs WHERE id = 'r-routed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(route.as_deref(), Some("openrouter"));
     }
 }

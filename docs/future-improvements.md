@@ -25,6 +25,19 @@ default for that one run. Cheap: the adapter template already takes `{model}`
 per invocation; the flow commands just need an optional model override
 parameter plumbed through to `settings.resolve()`.
 
+## 2b. Local / self-hosted models via a LiteLLM proxy
+
+Provider-routed execution (bead `conceptify-e7m.7`) covers anthropic-native,
+openai-native, and everything-else-via-OpenRouter. Local or self-hosted models
+(Ollama, vLLM, …) were explicitly scoped OUT of that bead: they would ride the
+same claude-CLI env mechanism (`ANTHROPIC_BASE_URL` pointed at a local LiteLLM
+proxy exposing an Anthropic-compatible endpoint, per-run env already supported
+by `StartRun::env` + `routing.rs`), but need a base-URL + optional-key settings
+surface per endpoint and a way to attribute catalog entries to a local
+provider. Cheap to add on top of the routing layer when wanted: a new
+`RouteTag`/route arm with a configurable base URL instead of the hardcoded
+OpenRouter one.
+
 ## 3. Artifact version diffing
 
 After an apply run, v1 → v2 happens live but there's no way to see *what

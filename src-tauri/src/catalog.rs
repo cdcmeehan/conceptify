@@ -441,6 +441,20 @@ pub fn load_for_serving() -> (CachedCatalog, &'static str) {
     }
 }
 
+/// The provider family the effective catalog (disk cache, else bundled
+/// snapshot — never the network) records for an **exact** model id, or `None`
+/// when the id is unknown. Provider routing's primary lookup (bead
+/// `conceptify-e7m.7`); its callers fall back to prefix heuristics on `None`.
+/// A fresh disk read per call — run starts are user-action-rate, and reading
+/// keeps a mid-session catalog refresh visible without cache invalidation.
+pub fn provider_of(model_id: &str) -> Option<String> {
+    let (cat, _) = load_for_serving();
+    cat.models
+        .iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.provider.clone())
+}
+
 /// Project a [`CachedCatalog`] into the API response: models filtered to the
 /// `enabled` providers (sorted by provider then id), plus every provider with its
 /// full-catalog model count and enabled flag (for the settings toggles). Pure.

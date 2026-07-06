@@ -1014,6 +1014,12 @@ pub struct AgentOptionsDto {
     pub default_adapter: String,
     /// The per-purpose default models (the `{model}`-override fallback).
     pub models: AgentModelsDto,
+    /// Whether an OpenRouter API key is stored (bead conceptify-e7m.7) — the
+    /// ONLY key-derived fact that ever reaches the frontend. The Settings UI
+    /// uses it to show "key set / not set"; the pickers use it to know whether
+    /// openrouter-runnable models can actually run. The key itself is stored
+    /// outside the settings blob and is never returned by any command.
+    pub open_router_key_set: bool,
 }
 
 /// Expose the available adapters + per-purpose default models to the frontend
@@ -1024,6 +1030,8 @@ pub struct AgentOptionsDto {
 pub fn get_agent_options(db: State<DbHandle>) -> Result<AgentOptionsDto, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     let s = crate::settings::get_settings(&conn).map_err(|e| e.to_string())?;
+    let open_router_key_set =
+        crate::settings::has_openrouter_api_key(&conn).map_err(|e| e.to_string())?;
     Ok(AgentOptionsDto {
         adapters: s.adapters.keys().cloned().collect(),
         default_adapter: s.default_adapter,
@@ -1032,7 +1040,31 @@ pub fn get_agent_options(db: State<DbHandle>) -> Result<AgentOptionsDto, String>
             artifact_update: s.models.artifact_update,
             in_app_ask: s.models.in_app_ask,
         },
+        open_router_key_set,
     })
+}
+
+/// Store (or clear, with `null`/blank) the OpenRouter API key (bead
+/// conceptify-e7m.7). Write-only by design: no command ever returns the key —
+/// the frontend learns only the `openRouterKeySet` boolean from
+/// `get_agent_options`. Stored in its own settings row (never inside the
+/// `agent_settings` blob — see the storage decision recorded in
+/// `settings::OPENROUTER_KEY_SETTINGS_KEY`'s docs), so `reset_agent_settings`
+/// leaves it intact. Emits `settings-changed` so option readers refresh.
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_openrouter_api_key(
+    app: tauri::AppHandle,
+    db: State<DbHandle>,
+    key: Option<String>,
+) -> Result<(), String> {
+    {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        crate::settings::set_openrouter_api_key(&conn, key.as_deref())
+            .map_err(|e| e.to_string())?;
+    }
+    use tauri::Emitter;
+    let _ = app.emit("settings-changed", &());
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

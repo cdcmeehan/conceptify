@@ -192,6 +192,49 @@ override-free run) so `retry_ask` re-applies it without the frontend re-passing
 it. The adapter/model picker the UI reads for this comes from `get_agent_options`
 (below) plus the live model catalog (bead conceptify-e7m.6).
 
+**Provider-routed execution (bead conceptify-e7m.7):** the user picks a
+**model**; the run engine derives the execution path from the model's provider
+(`src-tauri/src/routing.rs`, applied inside `start_run` before any row exists):
+
+| model's provider | route tag    | adapter  | per-run env |
+|------------------|--------------|----------|-------------|
+| anthropic        | `anthropic`  | `claude` | none (today's native path) |
+| openai           | `openai`     | `codex`  | none (native codex path)   |
+| anything else    | `openrouter` | `claude` | `ANTHROPIC_BASE_URL=https://openrouter.ai/api`, `ANTHROPIC_AUTH_TOKEN=<stored OpenRouter key>`, `ANTHROPIC_API_KEY=` (explicitly empty) |
+
+Provider derivation (decided + tested, in order): a **slash-form** id
+(`vendor/model`, incl. `~vendor/...` aliases) is an OpenRouter slug → the
+OpenRouter route unconditionally (even `anthropic/...` — the user picked the
+OpenRouter-namespaced catalog entry; native runs use bare ids); else an exact
+**catalog lookup** (disk cache/snapshot, never network); else **prefix
+heuristics** for custom ids (`claude-*`/`sonnet`/`opus`/`haiku` → anthropic;
+`gpt-*`/`codex-*`/`chatgpt-*`/`o<digit>…` → openai); anything else fails fast
+with an actionable `UnroutableModel` error — never a guessed route. A bare id
+the catalog attributes to a non-native provider is likewise unroutable (bare
+ids are not OpenRouter slugs); the error suggests the `vendor/model` form.
+
+Bypass precedence (highest first): (1) an explicit `run_override.adapter` — the
+advanced escape hatch: routing is skipped entirely, **no env is injected**;
+(2) a custom (non-built-in) `defaultAdapter` — the user configured their own
+harness, routing respects it verbatim. Both record route tag `manual`. With
+either built-in as `defaultAdapter`, the model alone decides (e.g.
+`defaultAdapter: codex` + a `claude-*` model still routes to the claude CLI).
+
+The OpenRouter route was verified live against claude CLI 2.1.201: `--model`
+passes the slug through verbatim (no `ANTHROPIC_MODEL` remap needed);
+`ANTHROPIC_AUTH_TOKEN` becomes the `Authorization: Bearer` header; the env is
+per-child-process only, so the user's normal claude login is untouched on every
+other route. Routing failures happen **before** any run row exists (FR-4.9
+guard freed): `OpenRouterKeyMissing` ("add one in Settings") when an
+openrouter-routed run has no stored key, `UnroutableModel` as above.
+
+**Route visibility:** the resolved route tag (`anthropic` | `openai` |
+`openrouter` | `manual`) is recorded on the run row's new nullable `route`
+column (`NULL` = pre-routing row) and in the run-log header
+(`route=… [base_url=…]`) — always token-free. The OpenRouter key itself never
+appears in any log line, event payload, error string, command response, or DB
+column (test-proven); it reaches the child process env only.
+
 **Exchange-history prompts (epic conceptify-6xi):** the answer prompt (both
 `ask_follow_ups` and `ask_single_comment`) renders each targeted root as an
 exchange transcript — the root body with its anchor, any answer already given,
@@ -347,19 +390,33 @@ settings commands are the exception (they emit `settings-changed`, above).
   models: { followUp, artifactUpdate, inAppAsk }, timeoutSecs, agentBinaryPath,
   appearance: "system"|"light"|"dark", autoProjectBaseDir }`. `agentBinaryPath`
   and `autoProjectBaseDir` are `null` when unset (code default applies).
+  Built-in adapters merge **additively** on read (bead conceptify-e7m.7): a
+  stored `adapters` map written before a built-in existed still yields it; user
+  overrides of a built-in key and user-defined adapters win. The OpenRouter API
+  key is **not** part of this shape (see `set_openrouter_api_key`).
 - `set_agent_settings { settings }` → `void` — persist (validated: `defaultAdapter`
   must name an existing adapter, else a user-facing error). Emits `settings-changed`.
 - `reset_agent_settings {}` → `AgentSettings` — delete the stored override so the
   next read returns pure code defaults (FR-7.4 reset); returns those defaults.
   Emits `settings-changed`.
 - `get_agent_options {}` → `{ adapters: string[], defaultAdapter, models:
-  { followUp, artifactUpdate, inAppAsk } }` (camelCase) — a UI-friendly view of
-  the run-selection options a per-ask override picker (bead conceptify-e7m.4)
-  needs: the configured adapter **keys** (sorted, e.g. `["claude"]`) rather than
-  the full `{ command, args, cwd }` templates `get_agent_settings` returns, plus
-  the default adapter and the per-purpose default models (the fallback baseline
-  when a run carries no override). Distinct from the live model *catalog* (bead
-  conceptify-e7m.6); read-only, never mutates settings.
+  { followUp, artifactUpdate, inAppAsk }, openRouterKeySet: boolean }`
+  (camelCase) — a UI-friendly view of the run-selection options a per-ask
+  override picker (bead conceptify-e7m.4) needs: the configured adapter
+  **keys** (sorted, e.g. `["claude", "codex"]`) rather than the full
+  `{ command, args, cwd }` templates `get_agent_settings` returns, plus the
+  default adapter, the per-purpose default models (the fallback baseline when a
+  run carries no override), and whether an OpenRouter API key is stored — the
+  ONLY key-derived fact the frontend is ever given. Distinct from the live
+  model *catalog* (bead conceptify-e7m.6); read-only, never mutates settings.
+- `set_openrouter_api_key { key? }` → `void` — store (or clear, with
+  `null`/blank) the OpenRouter API key used by openrouter-routed runs (bead
+  conceptify-e7m.7). **Write-only**: no command returns the key. Stored in its
+  own settings row — never inside the `agent_settings` blob, so
+  `reset_agent_settings` leaves it intact — and never surfaced in logs, events,
+  error strings, or run rows (see the Keychain-vs-blob decision recorded in
+  `settings.rs`). Validation: no embedded whitespace/control characters, with
+  an error that never echoes the value. Emits `settings-changed`.
 
 ## Endpoints
 

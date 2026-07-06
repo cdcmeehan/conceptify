@@ -125,6 +125,33 @@ use serde::{Deserialize, Serialize};
 /// …) added by other beads never collide.
 const SETTINGS_KEY: &str = "agent_settings";
 
+/// The `settings` key holding the OpenRouter API key (bead `conceptify-e7m.7`),
+/// stored as a **separate row** — deliberately NOT a field of [`AgentSettings`].
+///
+/// # Key storage decision (recorded per the bead): settings row, not Keychain
+///
+/// macOS Keychain (via the `security-framework` or `keyring` crate) was
+/// evaluated and rejected for this app:
+/// - **Cost:** a new native dependency plus real dev-loop friction — an ad-hoc
+///   signed debug binary changes identity on every rebuild, so Keychain access
+///   re-prompts constantly under `just dev`, and tests would need a live
+///   keychain session (CI/headless pain).
+/// - **Benefit under our threat model:** marginal. PRD §9 scopes security to
+///   *containment and hygiene, not adversarial hardening*; the DB already sits
+///   under `~/Library/Application Support` with user-only file permissions —
+///   the same local-user boundary the Keychain item would effectively have
+///   once the app is authorized to read it non-interactively.
+///
+/// The hygiene obligations that DO matter are enforced structurally instead:
+/// the key lives outside the `agent_settings` blob, so the whole
+/// `get_agent_settings`/`set_agent_settings`/`get_agent_options` surface that
+/// reaches the frontend can never carry it (nothing to mask — the type doesn't
+/// contain it); the frontend gets only a has-key boolean and a set command; and
+/// the run engine keeps it out of every log line, event payload, error string,
+/// and run row (test-proven in `runs::tests`). Revisit Keychain only if the app
+/// ever syncs its DB off-machine.
+const OPENROUTER_KEY_SETTINGS_KEY: &str = "openrouter_api_key";
+
 // --- Defaults (single source of truth, shared by `Default` + serde) ---------
 
 /// The built-in `claude` adapter template (PRD §5.5), with the OQ3 permission
@@ -264,11 +291,15 @@ const SETTINGS_KEY: &str = "agent_settings";
 /// make the failure log-tail unreadable. A structured codex progress mode is
 /// filed as a follow-up bead.
 ///
-/// **Merge caveat:** a stored settings blob that already contains an
-/// `adapters` map (written by an older app version) replaces this map
-/// wholesale on read — field-level serde defaults do not merge *inside* the
-/// map — so such a blob hides the new `codex` entry until the user resets or
-/// re-saves settings. Acceptable for a personal app (documented on the bead).
+/// **Merge behavior (bead `conceptify-e7m.7`):** a stored settings blob that
+/// already contains an `adapters` map replaces this map wholesale on
+/// *deserialize* (field-level serde defaults do not merge inside the map), so
+/// [`get_settings`] injects any missing built-in adapter **after**
+/// deserializing — a blob written before `codex` existed still yields both
+/// built-ins. Stored entries always win: a user override of a built-in key and
+/// any user-defined adapters are preserved verbatim. Consequence: built-ins
+/// cannot be *deleted* via config, only overridden — which provider routing
+/// relies on (the `claude`/`codex` keys are always resolvable).
 fn default_adapters() -> BTreeMap<String, Adapter> {
     let mut m = BTreeMap::new();
     m.insert(
@@ -583,7 +614,7 @@ impl RunOverride {
 /// agent. Mirrors how [`AgentSettings::validate`] rejects an unknown adapter key
 /// before use. Model ids with `/`, `.`, `-`, `:` (OpenRouter/LiteLLM shapes)
 /// stay valid.
-fn validate_model(model: &str) -> Result<(), SettingsError> {
+pub(crate) fn validate_model(model: &str) -> Result<(), SettingsError> {
     if model.trim().is_empty() || model.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(SettingsError::InvalidModel(model.to_owned()));
     }
@@ -613,6 +644,34 @@ pub enum SettingsError {
          whitespace or control characters"
     )]
     InvalidModel(String),
+
+    /// The submitted OpenRouter API key is structurally invalid. Deliberately
+    /// carries NO payload: an error string must never echo (even a malformed)
+    /// secret back to logs or the UI.
+    #[error(
+        "invalid OpenRouter API key: it must be non-empty and contain no \
+         whitespace or control characters"
+    )]
+    InvalidApiKey,
+
+    /// A run routed via OpenRouter (bead `conceptify-e7m.7`) but no key is
+    /// stored. Raised BEFORE any run row exists (FR-4.9 guard freed).
+    #[error(
+        "model '{0}' runs via OpenRouter, but no OpenRouter API key is \
+         configured — add one in Settings"
+    )]
+    OpenRouterKeyMissing(String),
+
+    /// Provider routing (bead `conceptify-e7m.7`) could not derive an execution
+    /// path for a model id. The second field is a pre-formatted reason clause
+    /// (e.g. why the derived provider has no runner, or that no provider could
+    /// be derived at all). Fail fast with an actionable message instead of
+    /// guessing a route.
+    #[error(
+        "cannot route model '{0}': {1}. Pick a model from the catalog, use its \
+         OpenRouter id ('vendor/model'), or set an explicit adapter override"
+    )]
+    UnroutableModel(String, String),
 
     #[error("agent binary '{0}' not found on PATH; set a path override in Settings")]
     BinaryNotFound(String),
@@ -916,8 +975,82 @@ pub fn get_settings(conn: &Connection) -> Result<AgentSettings, SettingsError> {
 
     match raw {
         None => Ok(AgentSettings::default()),
-        Some(json) => serde_json::from_str(&json).map_err(SettingsError::Deserialize),
+        Some(json) => {
+            let mut settings: AgentSettings =
+                serde_json::from_str(&json).map_err(SettingsError::Deserialize)?;
+            // Built-in adapters merge ADDITIVELY over a stored `adapters` map
+            // (bead conceptify-e7m.7, closing the e7m.2 caveat): serde replaces
+            // the whole map on deserialize, so a blob written before a built-in
+            // existed would otherwise hide it forever. Stored entries win —
+            // user overrides of a built-in key and user-defined adapters are
+            // untouched; only *missing* built-ins are injected. This also
+            // guarantees provider routing can always resolve `claude`/`codex`.
+            for (key, adapter) in default_adapters() {
+                settings.adapters.entry(key).or_insert(adapter);
+            }
+            Ok(settings)
+        }
     }
+}
+
+// --- OpenRouter API key (bead conceptify-e7m.7) ------------------------------
+//
+// Stored under its own `settings` row (see OPENROUTER_KEY_SETTINGS_KEY for the
+// Keychain-vs-blob decision + rationale), so the AgentSettings type — and every
+// command surface built on it — structurally cannot leak the key. Only these
+// three functions touch it; the run engine reads it, the frontend only ever
+// learns a boolean.
+
+/// The stored OpenRouter API key, if any. Trimmed; a blank stored value reads
+/// as `None`.
+pub fn get_openrouter_api_key(conn: &Connection) -> Result<Option<String>, SettingsError> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [OPENROUTER_KEY_SETTINGS_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(raw
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty()))
+}
+
+/// Store (or clear) the OpenRouter API key. `None`/blank deletes the row.
+/// Validation rejects embedded whitespace/control characters — never a real
+/// key, and catches paste accidents — with an error that deliberately does NOT
+/// echo the value ([`SettingsError::InvalidApiKey`]). One upsert/delete
+/// statement, atomic like [`update_settings`] (PRD N4).
+pub fn set_openrouter_api_key(
+    conn: &Connection,
+    key: Option<&str>,
+) -> Result<(), SettingsError> {
+    let key = key.map(str::trim).filter(|s| !s.is_empty());
+    match key {
+        None => {
+            conn.execute(
+                "DELETE FROM settings WHERE key = ?1",
+                [OPENROUTER_KEY_SETTINGS_KEY],
+            )?;
+        }
+        Some(k) => {
+            if k.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err(SettingsError::InvalidApiKey);
+            }
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![OPENROUTER_KEY_SETTINGS_KEY, k],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether an OpenRouter API key is stored — the ONLY key-related fact the
+/// frontend is ever given.
+pub fn has_openrouter_api_key(conn: &Connection) -> Result<bool, SettingsError> {
+    Ok(get_openrouter_api_key(conn)?.is_some())
 }
 
 /// Persist the agent settings (validated first, so a config whose
@@ -1253,6 +1386,110 @@ mod tests {
         .unwrap();
         let s = get_settings(&conn).unwrap();
         assert_eq!(s.adapters["claude"].cwd, "{project_root}");
+    }
+
+    // --- Built-in adapters merge additively (bead conceptify-e7m.7) ---------
+
+    #[test]
+    fn stored_adapters_map_gains_missing_builtins() {
+        // A blob written before `codex` existed (its `adapters` map only has a
+        // user-tweaked `claude`) must yield BOTH built-ins on read, with the
+        // user's claude override preserved verbatim.
+        let conn = in_memory_settings_db();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('agent_settings', ?1)",
+            [r#"{"adapters":{"claude":{"command":"/opt/my-claude","args":["-p","{prompt}"]}}}"#],
+        )
+        .unwrap();
+
+        let s = get_settings(&conn).unwrap();
+        // The user's override of the built-in wins…
+        assert_eq!(s.adapters["claude"].command, "/opt/my-claude");
+        assert_eq!(s.adapters["claude"].args, vec!["-p", "{prompt}"]);
+        // …and the missing built-in is injected with its code default.
+        assert_eq!(s.adapters["codex"], default_adapters()["codex"]);
+        assert_eq!(s.adapters.len(), 2);
+    }
+
+    #[test]
+    fn user_defined_adapters_survive_builtin_injection() {
+        // A map with ONLY a custom adapter keeps it AND gains both built-ins;
+        // a custom default_adapter still validates and resolves.
+        let conn = in_memory_settings_db();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('agent_settings', ?1)",
+            [r#"{"adapters":{"my-agent":{"command":"my-agent","args":["{prompt}"]}},
+                 "defaultAdapter":"my-agent"}"#],
+        )
+        .unwrap();
+
+        let s = get_settings(&conn).unwrap();
+        assert_eq!(s.adapters.len(), 3);
+        assert_eq!(s.adapters["my-agent"].command, "my-agent");
+        assert_eq!(s.adapters["claude"], default_adapters()["claude"]);
+        assert_eq!(s.adapters["codex"], default_adapters()["codex"]);
+        assert_eq!(s.default_adapter, "my-agent");
+        assert!(s.validate().is_ok());
+    }
+
+    // --- OpenRouter API key storage (bead conceptify-e7m.7) -----------------
+
+    #[test]
+    fn openrouter_key_round_trip_and_clear() {
+        let conn = in_memory_settings_db();
+        assert_eq!(get_openrouter_api_key(&conn).unwrap(), None);
+        assert!(!has_openrouter_api_key(&conn).unwrap());
+
+        set_openrouter_api_key(&conn, Some("  sk-or-v1-abc123  ")).unwrap();
+        assert_eq!(
+            get_openrouter_api_key(&conn).unwrap().as_deref(),
+            Some("sk-or-v1-abc123"), // trimmed
+        );
+        assert!(has_openrouter_api_key(&conn).unwrap());
+
+        // None and blank both clear.
+        set_openrouter_api_key(&conn, Some("   ")).unwrap();
+        assert_eq!(get_openrouter_api_key(&conn).unwrap(), None);
+        set_openrouter_api_key(&conn, Some("k2")).unwrap();
+        set_openrouter_api_key(&conn, None).unwrap();
+        assert!(!has_openrouter_api_key(&conn).unwrap());
+    }
+
+    #[test]
+    fn openrouter_key_rejects_embedded_whitespace_without_echoing_it() {
+        let conn = in_memory_settings_db();
+        for bad in ["sk with space", "sk\nnewline", "sk\ttab", "sk\u{0}nul"] {
+            let err = set_openrouter_api_key(&conn, Some(bad)).unwrap_err();
+            assert!(matches!(err, SettingsError::InvalidApiKey), "{bad:?}");
+            // The error string must never echo the (mis)pasted secret.
+            assert!(!err.to_string().contains("sk"), "{err}");
+        }
+        assert!(!has_openrouter_api_key(&conn).unwrap());
+    }
+
+    #[test]
+    fn openrouter_key_never_enters_the_agent_settings_blob() {
+        // The key lives in its own row: saving/reading AgentSettings cannot
+        // carry it, and clearing agent settings does not clear the key.
+        let conn = in_memory_settings_db();
+        set_openrouter_api_key(&conn, Some("sk-or-v1-SECRET")).unwrap();
+
+        let s = get_settings(&conn).unwrap();
+        let blob = serde_json::to_string(&s).unwrap();
+        assert!(!blob.contains("SECRET"), "{blob}");
+        update_settings(&conn, &s).unwrap();
+
+        let stored_blob: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'agent_settings'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!stored_blob.contains("SECRET"), "{stored_blob}");
+
+        clear_settings(&conn).unwrap();
+        assert!(has_openrouter_api_key(&conn).unwrap(), "reset keeps the key");
     }
 
     // --- Per-purpose model resolution --------------------------------------
