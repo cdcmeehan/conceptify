@@ -400,6 +400,61 @@ impl Default for AgentSettings {
     }
 }
 
+/// An optional per-run override of the adapter and/or model, layered over the
+/// configured defaults for a **single** invocation without mutating stored
+/// settings (epic `conceptify-e7m`). Fallback chain, per field independently:
+/// explicit override → per-purpose model ([`PurposeModels::for_purpose`]) /
+/// [`AgentSettings::default_adapter`]. A `{model}`-only override keeps the
+/// default adapter; an `{adapter}`-only override keeps the per-purpose model;
+/// an empty override (both `None`) is byte-identical to no override at all.
+///
+/// **Model-centric** by design (epic e7m rescope): `model` is the primary
+/// user-facing choice; `adapter` is the advanced escape hatch. Provider-routed
+/// execution (bead `conceptify-e7m.7`) normally *derives* the adapter from the
+/// chosen model's provider — this raw `{adapter}` form deliberately bypasses
+/// that routing. No routing logic lives here: [`resolve_with_override`]
+/// stays pure and only substitutes the selected adapter/model.
+///
+/// Serialized camelCase for the Tauri command surface (both fields are single
+/// words, so the wire shape is `{ "adapter": …, "model": … }`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunOverride {
+    /// Adapter key to use instead of `default_adapter`. Must name an existing
+    /// adapter (validated in [`AgentSettings::select`]); the escape hatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    /// Model id to use instead of the per-purpose default. Validated
+    /// ([`validate_model`]): non-empty, no whitespace/control characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl RunOverride {
+    /// True when neither field is set — indistinguishable from "no override".
+    /// The run engine stores `NULL` (not an empty `{}` blob) on the run row in
+    /// this case, so retry of an override-free run re-derives current defaults.
+    pub fn is_empty(&self) -> bool {
+        self.adapter.is_none() && self.model.is_none()
+    }
+}
+
+/// Validate an explicit per-run model override. Structural argv safety is
+/// already guaranteed by whole-string substitution (a model becomes exactly one
+/// argv element regardless of its bytes — see the module docs), so this is not a
+/// shell-injection guard; it rejects values that are never a real model id —
+/// empty/whitespace-only, or carrying embedded whitespace/control characters —
+/// so a bad override fails fast with a clear error instead of spawning a doomed
+/// agent. Mirrors how [`AgentSettings::validate`] rejects an unknown adapter key
+/// before use. Model ids with `/`, `.`, `-`, `:` (OpenRouter/LiteLLM shapes)
+/// stay valid.
+fn validate_model(model: &str) -> Result<(), SettingsError> {
+    if model.trim().is_empty() || model.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(SettingsError::InvalidModel(model.to_owned()));
+    }
+    Ok(())
+}
+
 /// A fully-substituted invocation ready for the spawner to run. `program` is the
 /// adapter's *command* (still a bare name unless it was already absolute) — the
 /// spawner resolves it to a real path via [`resolve_agent_binary`], honoring the
@@ -417,6 +472,12 @@ pub struct ResolvedInvocation {
 pub enum SettingsError {
     #[error("no adapter named '{0}' is configured")]
     UnknownAdapter(String),
+
+    #[error(
+        "invalid model override '{0}': a model must be non-empty and contain no \
+         whitespace or control characters"
+    )]
+    InvalidModel(String),
 
     #[error("agent binary '{0}' not found on PATH; set a path override in Settings")]
     BinaryNotFound(String),
@@ -463,28 +524,44 @@ impl AgentSettings {
         default_auto_project_base_dir().ok_or(SettingsError::NoAutoProjectBaseDir)
     }
 
-    /// Resolve an invocation for `purpose` against `project_root` and `prompt`.
-    /// Pure and total apart from the `UnknownAdapter` error: it does no I/O and
-    /// spawns nothing. Placeholder substitution is whole-string / single-pass /
-    /// never shell-interpreted (see module docs).
+    /// Resolve an invocation for `purpose` against `project_root` and `prompt`,
+    /// using the configured defaults (no per-run override). Thin wrapper over
+    /// [`resolve_with_override`] with `None` — so the no-override path is
+    /// literally the override path with an empty override, which is what makes
+    /// "omitted override == current behavior byte-identical" true by
+    /// construction (the exact-string arg tests exercise it). Pure and total
+    /// apart from the `UnknownAdapter` error: no I/O, spawns nothing.
     pub fn resolve(
         &self,
         purpose: Purpose,
         project_root: &Path,
         prompt: &str,
     ) -> Result<ResolvedInvocation, SettingsError> {
-        let adapter = self
-            .adapters
-            .get(&self.default_adapter)
-            .ok_or_else(|| SettingsError::UnknownAdapter(self.default_adapter.clone()))?;
+        self.resolve_with_override(purpose, project_root, prompt, None)
+    }
 
-        let model = self.models.for_purpose(purpose);
+    /// Resolve an invocation for `purpose`, honoring an optional per-run
+    /// [`RunOverride`] (epic `conceptify-e7m`). Fallback chain per field:
+    /// explicit override → per-purpose model / `default_adapter`. Validates the
+    /// override (unknown adapter → [`SettingsError::UnknownAdapter`], bad model
+    /// → [`SettingsError::InvalidModel`]) before substituting. Placeholder
+    /// substitution is whole-string / single-pass / never shell-interpreted, so
+    /// the selected model reaches `{model}` (and adapter command → `program`)
+    /// verbatim as single argv elements (see module docs). Pure — no routing.
+    pub fn resolve_with_override(
+        &self,
+        purpose: Purpose,
+        project_root: &Path,
+        prompt: &str,
+        over: Option<&RunOverride>,
+    ) -> Result<ResolvedInvocation, SettingsError> {
+        let (_, adapter, model) = self.select(purpose, over)?;
         // macOS project roots (under ~/Documents/conceptify, §5.6) are UTF-8 in
         // practice; a lossy conversion here only affects a non-UTF-8 cwd path.
         let root = project_root.to_string_lossy();
         let ctx = SubstCtx {
             prompt,
-            model,
+            model: &model,
             project_root: &root,
         };
 
@@ -493,6 +570,48 @@ impl AgentSettings {
             args: adapter.args.iter().map(|a| expand(a, &ctx)).collect(),
             cwd: expand(&adapter.cwd, &ctx),
         })
+    }
+
+    /// The `(adapter_key, model_id)` actually selected for `purpose` under
+    /// `over` — what the run engine records as the `follow_up_runs.agent` /
+    /// `.model` columns so a row honestly reflects what ran (not just the
+    /// defaults). Same fallback + validation as [`resolve_with_override`].
+    pub fn selection_for(
+        &self,
+        purpose: Purpose,
+        over: Option<&RunOverride>,
+    ) -> Result<(String, String), SettingsError> {
+        let (key, _, model) = self.select(purpose, over)?;
+        Ok((key, model))
+    }
+
+    /// Shared resolution core: pick the adapter (by key) and model for `purpose`
+    /// under `over`, validating the override. Returns the owned adapter key (so
+    /// no lifetime is tied to the borrowed `over`), a borrow of the chosen
+    /// [`Adapter`] from `self`, and the owned model id.
+    fn select(
+        &self,
+        purpose: Purpose,
+        over: Option<&RunOverride>,
+    ) -> Result<(String, &Adapter, String), SettingsError> {
+        let adapter_key: String = over
+            .and_then(|o| o.adapter.as_deref())
+            .unwrap_or(self.default_adapter.as_str())
+            .to_owned();
+        let adapter = self
+            .adapters
+            .get(&adapter_key)
+            .ok_or_else(|| SettingsError::UnknownAdapter(adapter_key.clone()))?;
+
+        let model = match over.and_then(|o| o.model.as_deref()) {
+            Some(m) => {
+                validate_model(m)?;
+                m.to_owned()
+            }
+            None => self.models.for_purpose(purpose).to_owned(),
+        };
+
+        Ok((adapter_key, adapter, model))
     }
 }
 
@@ -1006,6 +1125,168 @@ mod tests {
         assert_eq!(inv.program, "codex");
         assert_eq!(inv.args, vec!["exec", "--model", "gpt-x", "prompt text"]);
         assert_eq!(inv.cwd, "/tmp/proj");
+    }
+
+    // --- Per-run override (epic conceptify-e7m) -----------------------------
+
+    #[test]
+    fn override_model_wins_over_purpose_default() {
+        // A `{model}`-only override reaches `{model}` (args[3]) verbatim and
+        // keeps the default adapter; the per-purpose default is bypassed.
+        let settings = AgentSettings::default();
+        let over = RunOverride {
+            adapter: None,
+            model: Some("claude-opus-9".to_owned()),
+        };
+        let inv = settings
+            .resolve_with_override(Purpose::FollowUp, Path::new("/tmp/proj"), "q", Some(&over))
+            .unwrap();
+        assert_eq!(inv.program, "claude"); // default adapter unchanged
+        assert_eq!(inv.args[3], "claude-opus-9"); // NOT the FollowUp default
+        // selection_for records the same for the run row.
+        assert_eq!(
+            settings.selection_for(Purpose::FollowUp, Some(&over)).unwrap(),
+            ("claude".to_owned(), "claude-opus-9".to_owned())
+        );
+    }
+
+    #[test]
+    fn override_adapter_wins_over_default_adapter() {
+        // A `{adapter}`-only override swaps the whole template (the escape
+        // hatch) while keeping the per-purpose model.
+        let mut settings = AgentSettings::default();
+        settings.adapters.insert(
+            "codex".to_owned(),
+            Adapter {
+                command: "codex".to_owned(),
+                args: vec!["exec".to_owned(), "--model".to_owned(), "{model}".to_owned()],
+                cwd: "{project_root}".to_owned(),
+            },
+        );
+        let over = RunOverride {
+            adapter: Some("codex".to_owned()),
+            model: None,
+        };
+        let inv = settings
+            .resolve_with_override(Purpose::InAppAsk, Path::new("/tmp/proj"), "q", Some(&over))
+            .unwrap();
+        assert_eq!(inv.program, "codex");
+        // model still the InAppAsk per-purpose default (no model override).
+        assert_eq!(inv.args, vec!["exec", "--model", "claude-sonnet-5"]);
+        assert_eq!(
+            settings.selection_for(Purpose::InAppAsk, Some(&over)).unwrap(),
+            ("codex".to_owned(), "claude-sonnet-5".to_owned())
+        );
+    }
+
+    #[test]
+    fn override_adapter_and_model_together() {
+        let mut settings = AgentSettings::default();
+        settings.adapters.insert(
+            "codex".to_owned(),
+            Adapter {
+                command: "codex".to_owned(),
+                args: vec!["exec".to_owned(), "--model".to_owned(), "{model}".to_owned()],
+                cwd: "{project_root}".to_owned(),
+            },
+        );
+        let over = RunOverride {
+            adapter: Some("codex".to_owned()),
+            model: Some("gpt-5".to_owned()),
+        };
+        let inv = settings
+            .resolve_with_override(Purpose::FollowUp, Path::new("/tmp/proj"), "q", Some(&over))
+            .unwrap();
+        assert_eq!(inv.args, vec!["exec", "--model", "gpt-5"]);
+    }
+
+    #[test]
+    fn override_unknown_adapter_rejected() {
+        let settings = AgentSettings::default();
+        let over = RunOverride {
+            adapter: Some("does-not-exist".to_owned()),
+            model: None,
+        };
+        let err = settings
+            .resolve_with_override(Purpose::FollowUp, Path::new("/tmp"), "q", Some(&over))
+            .unwrap_err();
+        assert!(matches!(err, SettingsError::UnknownAdapter(a) if a == "does-not-exist"));
+        // selection_for rejects it identically (the engine calls both).
+        assert!(matches!(
+            settings.selection_for(Purpose::FollowUp, Some(&over)),
+            Err(SettingsError::UnknownAdapter(_))
+        ));
+    }
+
+    #[test]
+    fn override_invalid_model_rejected() {
+        let settings = AgentSettings::default();
+        for bad in ["", "   ", "has space", "new\nline", "tab\ttab", "ctrl\u{0}null"] {
+            let over = RunOverride {
+                adapter: None,
+                model: Some(bad.to_owned()),
+            };
+            let err = settings
+                .resolve_with_override(Purpose::FollowUp, Path::new("/tmp"), "q", Some(&over))
+                .unwrap_err();
+            assert!(
+                matches!(err, SettingsError::InvalidModel(_)),
+                "model {bad:?} should be rejected, got {err:?}"
+            );
+        }
+        // A slash/dot/dash/colon model (OpenRouter/LiteLLM shape) is accepted.
+        let over = RunOverride {
+            adapter: None,
+            model: Some("anthropic/claude-3.5-sonnet:beta".to_owned()),
+        };
+        assert!(settings
+            .resolve_with_override(Purpose::FollowUp, Path::new("/tmp"), "q", Some(&over))
+            .is_ok());
+    }
+
+    #[test]
+    fn omitted_and_empty_override_are_byte_identical_to_default() {
+        // The acceptance guarantee: no override, `None`, and an all-`None`
+        // RunOverride must all produce the exact same invocation as `resolve`.
+        let settings = AgentSettings::default();
+        let root = Path::new("/tmp/proj");
+        let base = settings.resolve(Purpose::ArtifactUpdate, root, "q").unwrap();
+
+        let via_none = settings
+            .resolve_with_override(Purpose::ArtifactUpdate, root, "q", None)
+            .unwrap();
+        let empty = RunOverride::default();
+        assert!(empty.is_empty());
+        let via_empty = settings
+            .resolve_with_override(Purpose::ArtifactUpdate, root, "q", Some(&empty))
+            .unwrap();
+
+        assert_eq!(base, via_none);
+        assert_eq!(base, via_empty);
+    }
+
+    #[test]
+    fn run_override_serde_shape_and_is_empty() {
+        // Wire shape is camelCase-single-word `{ "adapter", "model" }`; omitted
+        // fields deserialize to None; an all-None override is `is_empty`.
+        let parsed: RunOverride = serde_json::from_str(r#"{"model":"m1"}"#).unwrap();
+        assert_eq!(parsed.model.as_deref(), Some("m1"));
+        assert!(parsed.adapter.is_none());
+        assert!(!parsed.is_empty());
+
+        let empty: RunOverride = serde_json::from_str("{}").unwrap();
+        assert!(empty.is_empty());
+        // Empty override serializes to `{}` (both fields skipped when None).
+        assert_eq!(serde_json::to_string(&empty).unwrap(), "{}");
+
+        let full = RunOverride {
+            adapter: Some("codex".to_owned()),
+            model: Some("gpt-5".to_owned()),
+        };
+        assert_eq!(
+            serde_json::to_string(&full).unwrap(),
+            r#"{"adapter":"codex","model":"gpt-5"}"#
+        );
     }
 
     // --- Agent binary resolution -------------------------------------------

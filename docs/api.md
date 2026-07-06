@@ -121,15 +121,15 @@ structured error naming the live run.
 The follow-up flows live in `src-tauri/src/flows.rs` on top of the run engine
 and are invoked by the app shell as Tauri commands (snake_case args):
 
-- `ask_follow_ups { thread_id }` → `{ run_id, thread_id, mode: "answer",
-  target_comment_ids }` — FR-4.6: ONE headless run answers every open **root**
+- `ask_follow_ups { thread_id, run_override? }` → `{ run_id, thread_id,
+  mode: "answer", target_comment_ids }` — FR-4.6: ONE headless run answers every open **root**
   comment via `conceptify resolve-comment`; the artifact is never modified in
   this mode. Targets are open roots only (a root re-opened by a reply is
   included; its replies ride along as that root's exchange history, not as
   separate targets — epic conceptify-6xi); `target_comment_ids` is the root
   ids. Errors (user-facing strings): no artifact, no open comments, run
   already active (FR-4.9).
-- `ask_single_comment { thread_id, root_comment_id }` → same shape with
+- `ask_single_comment { thread_id, root_comment_id, run_override? }` → same shape with
   `mode: "answer"` — epic conceptify-6xi "Ask now": fire a single-root answer
   run immediately without gathering the batch. The target must be a **root**
   (not a reply) and **open** (re-opening by a reply counts). `target_comment_ids`
@@ -138,7 +138,7 @@ and are invoked by the app shell as Tauri commands (snake_case args):
   reply row. Errors (user-facing strings): no artifact; comment not found on
   this thread; target is a reply (reply to its root instead); target root not
   open; run already active (FR-4.9).
-- `apply_to_artifact { thread_id, comment_ids }` → same shape with
+- `apply_to_artifact { thread_id, comment_ids, run_override? }` → same shape with
   `mode: "apply"` — FR-4.7: `comment_ids` empty targets every **answered root**
   (roots only — `resolve-comment --applied` on a reply is rejected, so answered
   replies are never apply targets); explicit ids may be `open` or `answered`
@@ -155,8 +155,8 @@ and are invoked by the app shell as Tauri commands (snake_case args):
 
 The in-app ask flow (FR-5.1/5.2/5.3, bead 959.1/959.2) adds three more:
 
-- `ask_from_app { project_id, title?, question }` → `{ run_id, thread_id }` —
-  FR-5.1: creates a thread (status `generating`) and spawns ONE headless
+- `ask_from_app { project_id, title?, question, run_override? }` → `{ run_id,
+  thread_id }` — FR-5.1: creates a thread (status `generating`) and spawns ONE headless
   `ask` (`mode: "ask"`, `Purpose::InAppAsk`) generation run whose contract is
   to author an artifact per the installed Conceptify skill and publish it via
   `conceptify save-artifact` into that thread. `title` is optional (derived
@@ -165,10 +165,32 @@ The in-app ask flow (FR-5.1/5.2/5.3, bead 959.1/959.2) adds three more:
 - `retry_ask { thread_id }` → `{ run_id, thread_id }` — FR-5.3: re-spawns the
   SAME question into the SAME thread, moving it back to `generating`. A fresh
   `follow_up_runs` row is created; the failed run's history stays on disk.
+  **Takes no `run_override`** — it reuses the ORIGINAL run's persisted override
+  (see below), so a retried generation runs with the same adapter/model choice
+  the user made, robustly across app restarts.
 - `get_latest_run { thread_id }` → `{ run_id, mode, status }` or `null` — the
   most recent run row for a thread (any mode/status). The FR-5.3 error state
   uses it to resolve the failed generation run's id for `get_run_log_tail`;
   unlike `get_active_run` (live runs only) it works after an app restart.
+
+**Per-run override (`run_override?`, epic conceptify-e7m):** every run-starting
+flow command (`ask_follow_ups`, `ask_single_comment`, `apply_to_artifact`,
+`ask_from_app`) accepts an optional `run_override` object `{ adapter?, model? }`
+that overrides the configured defaults for that ONE invocation without mutating
+stored settings. Fallback chain, per field independently: explicit override →
+per-purpose model (`models.for_purpose`) / `default_adapter`. **Omitting it (or
+sending `{}`) is byte-identical to the pre-override behavior.** The override is
+**model-centric**: `model` is the primary choice; `adapter` is an advanced
+escape hatch (provider-routed execution, bead conceptify-e7m.7, normally derives
+the adapter FROM the model's provider). Validation: `adapter` must name an
+existing adapter (else an `UnknownAdapter` error); `model` must be non-empty and
+free of whitespace/control characters (else an `InvalidModel` error) — both
+rejected before any run row is created. The RESOLVED adapter/model are recorded
+on the `follow_up_runs` row's `agent`/`model` columns, and the override itself
+is persisted in the new nullable `override_json` column (`NULL` for an
+override-free run) so `retry_ask` re-applies it without the frontend re-passing
+it. The adapter/model picker the UI reads for this comes from `get_agent_options`
+(below) plus the live model catalog (bead conceptify-e7m.6).
 
 **Exchange-history prompts (epic conceptify-6xi):** the answer prompt (both
 `ask_follow_ups` and `ask_single_comment`) renders each targeted root as an
@@ -300,6 +322,14 @@ settings commands are the exception (they emit `settings-changed`, above).
 - `reset_agent_settings {}` → `AgentSettings` — delete the stored override so the
   next read returns pure code defaults (FR-7.4 reset); returns those defaults.
   Emits `settings-changed`.
+- `get_agent_options {}` → `{ adapters: string[], defaultAdapter, models:
+  { followUp, artifactUpdate, inAppAsk } }` (camelCase) — a UI-friendly view of
+  the run-selection options a per-ask override picker (bead conceptify-e7m.4)
+  needs: the configured adapter **keys** (sorted, e.g. `["claude"]`) rather than
+  the full `{ command, args, cwd }` templates `get_agent_settings` returns, plus
+  the default adapter and the per-purpose default models (the fallback baseline
+  when a run carries no override). Distinct from the live model *catalog* (bead
+  conceptify-e7m.6); read-only, never mutates settings.
 
 ## Endpoints
 

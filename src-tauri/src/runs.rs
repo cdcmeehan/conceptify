@@ -94,7 +94,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::artifacts;
 use crate::db::{self, DbHandle};
-use crate::settings::{self, Purpose, SettingsError};
+use crate::settings::{self, Purpose, RunOverride, SettingsError};
 
 /// How long after a kill we keep draining the (should-be-closing) streams /
 /// waiting for the exit status before declaring the run abandoned. Purely
@@ -192,6 +192,13 @@ pub struct StartRun {
     /// minimal `PATH` (PRD §5.1), and every headless run's contract is to
     /// report back through the CLI.
     pub env: Vec<(String, String)>,
+    /// Optional per-run adapter/model override (epic `conceptify-e7m`). `None`
+    /// (or an all-`None` override) means "use the configured defaults" —
+    /// byte-identical to the pre-override behavior. When set, the engine
+    /// resolves the invocation through it, records the resolved `agent`/`model`
+    /// on the row, and persists the override itself in `override_json` so a
+    /// retry can re-apply it (bead `conceptify-e7m.1`).
+    pub run_override: Option<RunOverride>,
 }
 
 /// Handle returned by [`start_run`]. Dropping it does **not** affect the run
@@ -508,14 +515,17 @@ async fn start_reserved<R: Runtime>(
     })
     .await?;
 
-    // -- Resolve the invocation (pure, injection-safe — see settings.rs) and
-    //    the binary (the only effectful step: cached `zsh -lc which`, so it
-    //    runs off the async workers).
+    // -- Resolve the invocation (pure, injection-safe — see settings.rs),
+    //    honoring the optional per-run override (epic conceptify-e7m). The
+    //    override is validated here (unknown adapter / bad model → error before
+    //    any row exists), and the binary is resolved after (the only effectful
+    //    step: cached `zsh -lc which`, so it runs off the async workers).
     let purpose = req.mode.purpose();
+    let over = req.run_override.as_ref();
     let invocation =
         loaded
             .settings
-            .resolve(purpose, Path::new(&loaded.root_path), &req.prompt)?;
+            .resolve_with_override(purpose, Path::new(&loaded.root_path), &req.prompt, over)?;
     let program = {
         let command = invocation.program.clone();
         let override_path = loaded.settings.agent_binary_path.clone();
@@ -531,8 +541,18 @@ async fn start_reserved<R: Runtime>(
         return Err(RunError::CwdMissing(invocation.cwd));
     }
 
-    let agent = loaded.settings.default_adapter.clone();
-    let model = loaded.settings.models.for_purpose(purpose).to_owned();
+    // The RESOLVED adapter key + model actually used (honoring the override),
+    // so the row honestly records what ran rather than the bare defaults.
+    let (agent, model) = loaded.settings.selection_for(purpose, over)?;
+    // The override INTENT persisted on the row (NULL for an override-free run),
+    // so retry re-applies a real override but re-derives current defaults for a
+    // run that had none. `is_empty()` collapses an all-None override to NULL.
+    let override_json: Option<String> = match over {
+        Some(o) if !o.is_empty() => {
+            Some(serde_json::to_string(o).expect("RunOverride always serializes"))
+        }
+        _ => None,
+    };
     let timeout = Duration::from_secs(loaded.settings.timeout_secs.max(1));
 
     // -- Log file under the thread's artifact dir (§5.6).
@@ -547,19 +567,21 @@ async fn start_reserved<R: Runtime>(
     //    run is honest history (marked failed below), and the reverse order
     //    could leave a live process with no row.
     {
-        let (run_id, thread_id, agent, model, mode, log_path_str) = (
+        let (run_id, thread_id, agent, model, mode, log_path_str, override_json) = (
             run_id.to_owned(),
             req.thread_id.clone(),
             agent.clone(),
             model.clone(),
             req.mode.as_str(),
             log_path.to_string_lossy().into_owned(),
+            override_json,
         );
         db::with_conn(db, move |conn| {
             conn.execute(
-                "INSERT INTO follow_up_runs (id, thread_id, agent, model, mode, status, log_path)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
-                rusqlite::params![run_id, thread_id, agent, model, mode, log_path_str],
+                "INSERT INTO follow_up_runs
+                     (id, thread_id, agent, model, mode, status, log_path, override_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7)",
+                rusqlite::params![run_id, thread_id, agent, model, mode, log_path_str, override_json],
             )
         })
         .await?;
@@ -1200,6 +1222,15 @@ mod tests {
         }
 
         async fn start(&self, mode: RunMode, prompt: &str) -> Result<StartedRun, RunError> {
+            self.start_over(mode, prompt, None).await
+        }
+
+        async fn start_over(
+            &self,
+            mode: RunMode,
+            prompt: &str,
+            run_override: Option<RunOverride>,
+        ) -> Result<StartedRun, RunError> {
             start_run(
                 &self.handle,
                 StartRun {
@@ -1207,9 +1238,22 @@ mod tests {
                     mode,
                     prompt: prompt.to_owned(),
                     env: Vec::new(),
+                    run_override,
                 },
             )
             .await
+        }
+
+        /// The `(agent, model, override_json)` recorded on a run row — for the
+        /// e7m override-persistence assertions.
+        fn run_selection(&self, run_id: &str) -> (String, String, Option<String>) {
+            let conn = self.db.lock().unwrap();
+            conn.query_row(
+                "SELECT agent, model, override_json FROM follow_up_runs WHERE id = ?1",
+                [run_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
         }
     }
 
@@ -1399,6 +1443,120 @@ mod tests {
 
         let fin_events = h.finished_events.lock().unwrap().clone();
         assert_eq!(fin_events[0]["status"], "completed");
+    }
+
+    // -- per-run override (epic conceptify-e7m) ------------------------------
+
+    #[tokio::test]
+    async fn override_reaches_invocation_and_persists_on_row() {
+        // End-to-end at the engine seam: a model override reaches the spawned
+        // child's argv verbatim (via {model}), the row records the RESOLVED
+        // agent/model, and the override intent is persisted in override_json.
+        let h = harness("override");
+
+        // A fake adapter whose args carry {model}; the script records its argv.
+        let script = h.work_dir.join("fake-agent.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv.txt\"\nexit 0\n",
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&script).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&script, perm).unwrap();
+        {
+            let mut s = AgentSettings::default();
+            s.adapters.insert(
+                "fake".to_owned(),
+                Adapter {
+                    command: script.to_string_lossy().into_owned(),
+                    args: vec![
+                        "--model".to_owned(),
+                        "{model}".to_owned(),
+                        "{prompt}".to_owned(),
+                    ],
+                    cwd: "{project_root}".to_owned(),
+                },
+            );
+            s.default_adapter = "fake".to_owned();
+            s.timeout_secs = 60;
+            let conn = h.db.lock().unwrap();
+            crate::settings::update_settings(&conn, &s).unwrap();
+        }
+
+        let over = RunOverride {
+            adapter: None,
+            model: Some("override-model-z".to_owned()),
+        };
+        let started = h
+            .start_over(RunMode::Ask, "the prompt", Some(over))
+            .await
+            .unwrap();
+        let run_id = started.run_id.clone();
+        let fin = finished(started).await;
+        assert_eq!(fin.status, RunStatus::Completed);
+
+        // The child saw the override model as its own argv element (verbatim).
+        let argv = std::fs::read_to_string(h.work_dir.join("argv.txt")).unwrap();
+        assert_eq!(
+            argv.lines().collect::<Vec<_>>(),
+            vec!["--model", "override-model-z", "the prompt"]
+        );
+
+        // The row records the resolved selection + the persisted override.
+        let (agent, model, over_json) = h.run_selection(&run_id);
+        assert_eq!(agent, "fake");
+        assert_eq!(model, "override-model-z");
+        assert_eq!(over_json.as_deref(), Some(r#"{"model":"override-model-z"}"#));
+    }
+
+    #[tokio::test]
+    async fn no_override_persists_null_and_default_selection() {
+        // The override-free path: the row stores the resolved DEFAULT selection
+        // and a NULL override_json — so a retry re-derives current defaults.
+        let h = harness("nooverride");
+        h.install_fake_agent("#!/bin/sh\nexit 0\n", 60);
+        let started = h.start(RunMode::Answer, "p").await.unwrap();
+        let run_id = started.run_id.clone();
+        let fin = finished(started).await;
+        assert_eq!(fin.status, RunStatus::Completed);
+
+        let (agent, model, over_json) = h.run_selection(&run_id);
+        assert_eq!(agent, "fake");
+        assert_eq!(model, "claude-haiku-4-5"); // Answer -> FollowUp default
+        assert!(over_json.is_none(), "override-free run stores NULL override_json");
+    }
+
+    #[tokio::test]
+    async fn unknown_adapter_override_errors_before_row() {
+        // An invalid override is rejected before any run row is created (like
+        // CwdMissing), and frees the FR-4.9 registry slot.
+        let h = harness("badoverride");
+        h.install_fake_agent("#!/bin/sh\nexit 0\n", 60);
+        let over = RunOverride {
+            adapter: Some("no-such-adapter".to_owned()),
+            model: None,
+        };
+        let err = h
+            .start_over(RunMode::Ask, "p", Some(over))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RunError::Settings(SettingsError::UnknownAdapter(_))),
+            "{err:?}"
+        );
+        // No row was inserted, and the per-thread guard is released.
+        let count: i64 = {
+            let conn = h.db.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM follow_up_runs WHERE thread_id = ?1",
+                [&h.thread_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count, 0, "invalid override creates no run row");
+        assert_eq!(h.registry().active_run_for_thread(&h.thread_id), None);
     }
 
     #[tokio::test]
@@ -1651,6 +1809,7 @@ mod tests {
                 mode: RunMode::Answer,
                 prompt: "p".to_owned(),
                 env: Vec::new(),
+                run_override: None,
             },
         )
         .await

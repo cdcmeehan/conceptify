@@ -35,6 +35,7 @@ pub fn migrations() -> Migrations<'static> {
         // before the migration's transaction commits (see the const's doc).
         M::up(FOLLOW_UP_RUNS_ASK_MODE).foreign_key_check(),
         M::up(COMMENT_PARENT_ID),
+        M::up(FOLLOW_UP_RUNS_OVERRIDE),
     ])
 }
 
@@ -287,6 +288,29 @@ ALTER TABLE comments ADD COLUMN parent_id TEXT NULL
 CREATE INDEX idx_comments_parent_id ON comments(parent_id);
 ";
 
+/// Adds `follow_up_runs.override_json` — the persisted per-run adapter/model
+/// override (epic `conceptify-e7m`, bead `conceptify-e7m.1`). A run started with
+/// an explicit `{adapter?, model?}` override stores its serialized
+/// [`crate::settings::RunOverride`] here (`NULL` when the run used pure
+/// defaults). Persisting on the row — rather than re-passing from the frontend
+/// — is what lets **retry** (FR-5.3) re-spawn a failed generation with the
+/// SAME override the original run used, robustly across app restarts (the
+/// frontend need not remember it). The row's `agent`/`model` columns already
+/// record the *resolved* selection; this extra column records the *intent* so a
+/// retry re-derives current defaults for an override-free run but re-applies a
+/// real override verbatim.
+///
+/// Plain nullable `ALTER TABLE ... ADD COLUMN`, no `DEFAULT` — like
+/// `COMMENT_ANCHOR_STATE`/`COMMENT_PARENT_ID` above: pre-existing rows backfill
+/// to `NULL` (correctly meaning "no override"), and no table rebuild is needed
+/// (no CHECK/constraint change). Appended (never folded into an earlier entry)
+/// per this file's append-only contract — `rusqlite_migration` tracks progress
+/// positionally by `user_version`, so an in-place edit would be silently skipped
+/// by databases already migrated past `follow_up_runs`.
+const FOLLOW_UP_RUNS_OVERRIDE: &str = "
+ALTER TABLE follow_up_runs ADD COLUMN override_json TEXT NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,7 +318,7 @@ mod tests {
 
     /// `user_version` after the full chain — the count of `M::up` entries in
     /// [`migrations`].
-    const LATEST: usize = 10;
+    const LATEST: usize = 11;
 
     /// Position of the `follow_up_runs` ask-mode rebuild (the 9th migration), so
     /// `ASK_MODE - 1` is the schema state immediately before it. Pinned
@@ -581,5 +605,57 @@ mod tests {
             )
             .ok();
         assert_eq!(idx.as_deref(), Some("idx_comments_parent_id"));
+    }
+
+    /// Migration 11 (`FOLLOW_UP_RUNS_OVERRIDE`): a `follow_up_runs` row written
+    /// under the pre-`override_json` schema survives the plain ALTER with
+    /// `override_json` backfilled to `NULL` ("no override"), and a row inserted
+    /// afterward can store and read back a serialized override blob.
+    #[test]
+    fn add_override_json_preserves_runs_and_stores_blob() {
+        let mut conn = fresh_conn();
+        let m = migrations();
+
+        // Migrate to just before override_json, then seed a run row under the
+        // OLD schema (no override_json column exists yet).
+        m.to_version(&mut conn, LATEST - 1).expect("to pre-override_json");
+        seed_thread(&conn);
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path)
+             VALUES ('r-old', 't1', 'claude', 'claude-sonnet-5', 'ask', 'failed', '/l.log')",
+            [],
+        )
+        .expect("seed pre-migration run");
+
+        // Apply the override_json migration.
+        m.to_version(&mut conn, LATEST).expect("apply override_json migration");
+
+        // The pre-existing row survives with override_json NULL.
+        let over: Option<String> = conn
+            .query_row(
+                "SELECT override_json FROM follow_up_runs WHERE id = 'r-old'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row should survive");
+        assert!(over.is_none(), "pre-migration run backfills to NULL override");
+
+        // A new row can store and read back a serialized override blob.
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path, override_json)
+             VALUES ('r-new', 't1', 'codex', 'gpt-5', 'ask', 'running', '/l2.log', ?1)",
+            [r#"{"adapter":"codex","model":"gpt-5"}"#],
+        )
+        .expect("insert run with override_json");
+        let over: Option<String> = conn
+            .query_row(
+                "SELECT override_json FROM follow_up_runs WHERE id = 'r-new'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(over.as_deref(), Some(r#"{"adapter":"codex","model":"gpt-5"}"#));
     }
 }

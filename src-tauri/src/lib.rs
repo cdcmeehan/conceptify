@@ -93,6 +93,7 @@ pub fn run() {
             commands::get_agent_settings,
             commands::set_agent_settings,
             commands::reset_agent_settings,
+            commands::get_agent_options,
             commands::ask_follow_ups,
             commands::ask_single_comment,
             commands::apply_to_artifact,

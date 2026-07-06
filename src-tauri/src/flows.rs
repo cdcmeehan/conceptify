@@ -80,7 +80,7 @@ use crate::comments::{Comment, CommentStatus, CommentThread};
 use crate::context::{self, ContextError};
 use crate::db::{self, DbHandle};
 use crate::runs::{self, RunError, RunMode, RunRegistry, RunStatus, StartRun};
-use crate::settings;
+use crate::settings::{self, RunOverride};
 use crate::threads::{self, ThreadStatus};
 
 /// Env var that pins the `conceptify` CLI binary path, bypassing discovery.
@@ -224,6 +224,7 @@ struct LoadedFlow<T> {
 pub async fn ask_follow_ups<R: Runtime>(
     app_handle: &AppHandle<R>,
     thread_id: &str,
+    run_override: Option<RunOverride>,
 ) -> Result<FlowStarted, FlowError> {
     let db = app_handle.state::<DbHandle>().inner().clone();
 
@@ -269,6 +270,7 @@ pub async fn ask_follow_ups<R: Runtime>(
             mode: RunMode::Answer,
             prompt,
             env,
+            run_override,
         },
     )
     .await?;
@@ -307,6 +309,7 @@ pub async fn ask_single_comment<R: Runtime>(
     app_handle: &AppHandle<R>,
     thread_id: &str,
     root_comment_id: &str,
+    run_override: Option<RunOverride>,
 ) -> Result<FlowStarted, FlowError> {
     let db = app_handle.state::<DbHandle>().inner().clone();
 
@@ -372,6 +375,7 @@ pub async fn ask_single_comment<R: Runtime>(
             mode: RunMode::Answer,
             prompt,
             env,
+            run_override,
         },
     )
     .await?;
@@ -398,6 +402,7 @@ pub async fn apply_to_artifact<R: Runtime>(
     app_handle: &AppHandle<R>,
     thread_id: &str,
     comment_ids: Vec<String>,
+    run_override: Option<RunOverride>,
 ) -> Result<FlowStarted, FlowError> {
     let db = app_handle.state::<DbHandle>().inner().clone();
 
@@ -468,6 +473,7 @@ pub async fn apply_to_artifact<R: Runtime>(
             mode: RunMode::Apply,
             prompt,
             env,
+            run_override,
         },
     )
     .await?;
@@ -598,6 +604,7 @@ pub async fn ask_from_app<R: Runtime>(
     project_id: &str,
     title: Option<&str>,
     question: &str,
+    run_override: Option<RunOverride>,
 ) -> Result<AskStarted, FlowError> {
     let question = question.trim();
     if question.is_empty() {
@@ -639,6 +646,7 @@ pub async fn ask_from_app<R: Runtime>(
         &title,
         question,
         &project_root,
+        run_override,
     )
     .await
     {
@@ -650,6 +658,18 @@ pub async fn ask_from_app<R: Runtime>(
             Err(e)
         }
     }
+}
+
+/// One DB snapshot for [`retry_ask`]: the thread/project identity a re-spawn
+/// needs, plus the original run's persisted override to reuse (epic
+/// conceptify-e7m).
+struct RetryLoad {
+    project_id: String,
+    project_root: String,
+    slug: String,
+    title: String,
+    question: String,
+    run_override: Option<RunOverride>,
 }
 
 /// Retry a failed in-app ask (FR-5.3): re-spawn the SAME question into the SAME
@@ -665,20 +685,33 @@ pub async fn retry_ask<R: Runtime>(
     let db = app_handle.state::<DbHandle>().inner().clone();
 
     let tid = thread_id.to_owned();
-    let (project_id, project_root, slug, title, question) = db::with_conn_result(
-        &db,
-        move |conn| -> Result<(String, String, String, String, String), FlowError> {
-            let ctx = context::thread_context(conn, &tid)?;
-            Ok((
-                ctx.project.id,
-                ctx.project.root_path,
-                ctx.thread.slug,
-                ctx.thread.title,
-                ctx.thread.initial_question,
-            ))
-        },
-    )
+    let loaded = db::with_conn_result(&db, move |conn| -> Result<RetryLoad, FlowError> {
+        let ctx = context::thread_context(conn, &tid)?;
+        // Reuse the ORIGINAL run's override (epic conceptify-e7m): read it back
+        // from the most recent run row (the failed generation — same ordering
+        // as `latest_run_for_thread`) rather than re-passing it from the
+        // frontend, so retry is robust across app restarts. A NULL
+        // (override-free run) or an unparseable blob → None → current defaults;
+        // a real override is re-applied verbatim.
+        let run_override = load_latest_run_override(conn, &tid)?;
+        Ok(RetryLoad {
+            project_id: ctx.project.id,
+            project_root: ctx.project.root_path,
+            slug: ctx.thread.slug,
+            title: ctx.thread.title,
+            question: ctx.thread.initial_question,
+            run_override,
+        })
+    })
     .await?;
+    let RetryLoad {
+        project_id,
+        project_root,
+        slug,
+        title,
+        question,
+        run_override,
+    } = loaded;
 
     // Show the thread `generating` again immediately (Retry is a fresh
     // generation into the same thread). Set BEFORE `start_run`: this closes the
@@ -702,6 +735,7 @@ pub async fn retry_ask<R: Runtime>(
         &title,
         &question,
         &project_root,
+        run_override,
     )
     .await
     {
@@ -711,6 +745,31 @@ pub async fn retry_ask<R: Runtime>(
             Err(e)
         }
     }
+}
+
+/// The persisted per-run override on a thread's most recent run row (epic
+/// conceptify-e7m), reconstructed for retry. Reads the latest `follow_up_runs`
+/// row (same ordering as [`latest_run_for_thread`]) and parses its
+/// `override_json`: `NULL`/absent → `None`, a valid blob → the stored
+/// [`RunOverride`]. A malformed blob degrades to `None` (retry re-derives
+/// current defaults) rather than failing the retry — the override is a
+/// convenience, never load-bearing for correctness.
+fn load_latest_run_override(
+    conn: &Connection,
+    thread_id: &str,
+) -> Result<Option<RunOverride>, rusqlite::Error> {
+    let raw: Option<Option<String>> = conn
+        .query_row(
+            "SELECT override_json FROM follow_up_runs
+             WHERE thread_id = ?1 ORDER BY started_at DESC, id DESC LIMIT 1",
+            [thread_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(raw
+        .flatten()
+        .and_then(|json| serde_json::from_str::<RunOverride>(&json).ok())
+        .filter(|o| !o.is_empty()))
 }
 
 /// Assemble the ask prompt, prepare the child env, start the generation run,
@@ -726,6 +785,7 @@ async fn try_spawn_ask<R: Runtime>(
     title: &str,
     question: &str,
     project_root: &str,
+    run_override: Option<RunOverride>,
 ) -> Result<AskStarted, FlowError> {
     let prompt = build_ask_prompt(&AskPromptContext {
         thread_id,
@@ -743,6 +803,7 @@ async fn try_spawn_ask<R: Runtime>(
             mode: RunMode::Ask,
             prompt,
             env,
+            run_override,
         },
     )
     .await?;
@@ -1818,6 +1879,18 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
             .unwrap()
         }
 
+        /// The `(agent, model, override_json)` recorded on a run row — for the
+        /// e7m override-persistence / retry-reuse assertions.
+        fn run_selection(&self, run_id: &str) -> (String, String, Option<String>) {
+            let conn = self.db.lock().unwrap();
+            conn.query_row(
+                "SELECT agent, model, override_json FROM follow_up_runs WHERE id = ?1",
+                [run_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+        }
+
         /// Fake agent whose argv[1] is the assembled prompt; tests use the
         /// script body to capture the prompt/env or control the exit.
         fn install_fake_agent(&self, script_body: &str) {
@@ -1918,7 +1991,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
              exit 0\n",
         );
 
-        let started = ask_follow_ups(&h.handle, &h.thread_id).await.unwrap();
+        let started = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap();
         assert_eq!(started.mode, RunMode::Answer);
         assert_eq!(started.thread_id, h.thread_id);
         assert_eq!(
@@ -1965,26 +2038,26 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         let h = harness("ask-guards");
 
         // No artifact yet → NoArtifact (and no run row).
-        let err = ask_follow_ups(&h.handle, &h.thread_id).await.unwrap_err();
+        let err = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap_err();
         assert!(matches!(err, FlowError::NoArtifact), "{err:?}");
 
         // Artifact but no open comments → NoOpenComments.
         h.save_artifact(1);
-        let err = ask_follow_ups(&h.handle, &h.thread_id).await.unwrap_err();
+        let err = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap_err();
         assert!(matches!(err, FlowError::NoOpenComments), "{err:?}");
 
         // FR-4.9: while a run is active, both flows are rejected with the
         // engine's structured AlreadyRunning.
         h.add_comment("q1");
         h.install_fake_agent("#!/bin/sh\nsleep 30\n");
-        let started = ask_follow_ups(&h.handle, &h.thread_id).await.unwrap();
+        let started = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap();
 
-        let err = ask_follow_ups(&h.handle, &h.thread_id).await.unwrap_err();
+        let err = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap_err();
         assert!(
             matches!(err, FlowError::Run(RunError::AlreadyRunning { .. })),
             "{err:?}"
         );
-        let err = apply_to_artifact(&h.handle, &h.thread_id, vec![])
+        let err = apply_to_artifact(&h.handle, &h.thread_id, vec![], None)
             .await
             .unwrap_err();
         assert!(
@@ -2014,7 +2087,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
 
         // Guard released: a new ask starts cleanly (and is cancelled to clean up).
         h.install_fake_agent("#!/bin/sh\nexit 0\n");
-        let again = ask_follow_ups(&h.handle, &h.thread_id).await.unwrap();
+        let again = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap();
         let run_id = again.run_id.clone();
         assert!(wait_until(|| h.run_row(&run_id).0 == "completed", 15_000).await);
     }
@@ -2041,7 +2114,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
              exit 0\n",
         );
 
-        let started = ask_single_comment(&h.handle, &h.thread_id, &root)
+        let started = ask_single_comment(&h.handle, &h.thread_id, &root, None)
             .await
             .unwrap();
         assert_eq!(started.mode, RunMode::Answer);
@@ -2094,7 +2167,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
 
         // No artifact yet → NoArtifact (checked before the target is looked up,
         // so the id need not exist).
-        let err = ask_single_comment(&h.handle, &h.thread_id, "any-comment")
+        let err = ask_single_comment(&h.handle, &h.thread_id, "any-comment", None)
             .await
             .unwrap_err();
         assert!(matches!(err, FlowError::NoArtifact), "{err:?}");
@@ -2102,7 +2175,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         h.save_artifact(1);
 
         // Unknown id → CommentNotFound.
-        let err = ask_single_comment(&h.handle, &h.thread_id, "ghost")
+        let err = ask_single_comment(&h.handle, &h.thread_id, "ghost", None)
             .await
             .unwrap_err();
         assert!(matches!(err, FlowError::CommentNotFound(_)), "{err:?}");
@@ -2110,7 +2183,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         // A reply target → TargetIsReply (Ask now targets a root; reply to it).
         let root = h.add_comment("root q");
         let reply = h.add_reply(&root, "reply q"); // root open → no re-open; reply open
-        let err = ask_single_comment(&h.handle, &h.thread_id, &reply)
+        let err = ask_single_comment(&h.handle, &h.thread_id, &reply, None)
             .await
             .unwrap_err();
         assert!(matches!(err, FlowError::TargetIsReply(_)), "{err:?}");
@@ -2118,7 +2191,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         // A non-open (answered) root → CommentNotOpen.
         let answered_root = h.add_comment("answered root");
         h.set_comment_status(&answered_root, CommentStatus::Answered);
-        let err = ask_single_comment(&h.handle, &h.thread_id, &answered_root)
+        let err = ask_single_comment(&h.handle, &h.thread_id, &answered_root, None)
             .await
             .unwrap_err();
         assert!(matches!(err, FlowError::CommentNotOpen(_)), "{err:?}");
@@ -2126,19 +2199,19 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         // FR-4.9: with a run active on this thread, a second Ask now — and a
         // batch — are rejected with the engine's structured AlreadyRunning.
         h.install_fake_agent("#!/bin/sh\nsleep 30\n");
-        let started = ask_single_comment(&h.handle, &h.thread_id, &root)
+        let started = ask_single_comment(&h.handle, &h.thread_id, &root, None)
             .await
             .unwrap();
         assert_eq!(started.target_comment_ids, vec![root.clone()]);
 
-        let err = ask_single_comment(&h.handle, &h.thread_id, &root)
+        let err = ask_single_comment(&h.handle, &h.thread_id, &root, None)
             .await
             .unwrap_err();
         assert!(
             matches!(err, FlowError::Run(RunError::AlreadyRunning { .. })),
             "{err:?}"
         );
-        let err = ask_follow_ups(&h.handle, &h.thread_id).await.unwrap_err();
+        let err = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap_err();
         assert!(
             matches!(err, FlowError::Run(RunError::AlreadyRunning { .. })),
             "{err:?}"
@@ -2182,7 +2255,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         let root_c = h.add_comment("root C (open)");
 
         // An explicit reply id is rejected outright (applying a reply is invalid).
-        let err = apply_to_artifact(&h.handle, &h.thread_id, vec![reply_b.clone()])
+        let err = apply_to_artifact(&h.handle, &h.thread_id, vec![reply_b.clone()], None)
             .await
             .unwrap_err();
         assert!(matches!(err, FlowError::TargetIsReply(_)), "{err:?}");
@@ -2191,7 +2264,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         // root flipped back by its answered reply), never the answered reply
         // and never the still-open root C.
         h.install_fake_agent("#!/bin/sh\nexit 0\n");
-        let started = apply_to_artifact(&h.handle, &h.thread_id, vec![])
+        let started = apply_to_artifact(&h.handle, &h.thread_id, vec![], None)
             .await
             .unwrap();
         assert_eq!(
@@ -2223,7 +2296,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
              exit 0\n",
         );
 
-        let started = apply_to_artifact(&h.handle, &h.thread_id, vec![]).await.unwrap();
+        let started = apply_to_artifact(&h.handle, &h.thread_id, vec![], None).await.unwrap();
         assert_eq!(started.mode, RunMode::Apply);
         assert_eq!(
             started.target_comment_ids,
@@ -2279,7 +2352,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         h.set_comment_status(&id, CommentStatus::Answered);
 
         h.install_fake_agent("#!/bin/sh\nexit 3\n");
-        let started = apply_to_artifact(&h.handle, &h.thread_id, vec![id]).await.unwrap();
+        let started = apply_to_artifact(&h.handle, &h.thread_id, vec![id], None).await.unwrap();
 
         let run_id = started.run_id.clone();
         assert!(wait_until(|| h.run_row(&run_id).0 == "failed", 15_000).await);
@@ -2301,26 +2374,26 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         h.set_comment_status(&applied_id, CommentStatus::Applied);
 
         // Empty ids with nothing answered → NoTargetComments.
-        let err = apply_to_artifact(&h.handle, &h.thread_id, vec![])
+        let err = apply_to_artifact(&h.handle, &h.thread_id, vec![], None)
             .await
             .unwrap_err();
         assert!(matches!(err, FlowError::NoTargetComments), "{err:?}");
 
         // Unknown id → CommentNotFound.
-        let err = apply_to_artifact(&h.handle, &h.thread_id, vec!["ghost".to_owned()])
+        let err = apply_to_artifact(&h.handle, &h.thread_id, vec!["ghost".to_owned()], None)
             .await
             .unwrap_err();
         assert!(matches!(err, FlowError::CommentNotFound(_)), "{err:?}");
 
         // Already-applied id → AlreadyApplied.
-        let err = apply_to_artifact(&h.handle, &h.thread_id, vec![applied_id])
+        let err = apply_to_artifact(&h.handle, &h.thread_id, vec![applied_id], None)
             .await
             .unwrap_err();
         assert!(matches!(err, FlowError::AlreadyApplied(_)), "{err:?}");
 
         // An explicit OPEN id is legal (open → applied one-shot).
         h.install_fake_agent("#!/bin/sh\nexit 0\n");
-        let started = apply_to_artifact(&h.handle, &h.thread_id, vec![open_id.clone()])
+        let started = apply_to_artifact(&h.handle, &h.thread_id, vec![open_id.clone()], None)
             .await
             .unwrap();
         assert_eq!(started.target_comment_ids, vec![open_id]);
@@ -2348,7 +2421,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
              exit 0\n",
         );
 
-        let started = ask_from_app(&h.handle, &h.project_id, Some("OAuth"), "Explain OAuth.")
+        let started = ask_from_app(&h.handle, &h.project_id, Some("OAuth"), "Explain OAuth.", None)
             .await
             .unwrap();
         assert_ne!(started.thread_id, h.thread_id, "a fresh thread is created");
@@ -2400,7 +2473,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         // Sleep so a save can land mid-run before the process exits 0.
         h.install_fake_agent("#!/bin/sh\nsleep 1\nexit 0\n");
 
-        let started = ask_from_app(&h.handle, &h.project_id, None, "Explain the flow")
+        let started = ask_from_app(&h.handle, &h.project_id, None, "Explain the flow", None)
             .await
             .unwrap();
         assert_eq!(h.thread_status_of(&started.thread_id), "generating");
@@ -2430,7 +2503,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
     async fn ask_crash_errors_thread() {
         let h = harness("ask-crash");
         h.install_fake_agent("#!/bin/sh\nexit 3\n");
-        let started = ask_from_app(&h.handle, &h.project_id, None, "Explain crash handling")
+        let started = ask_from_app(&h.handle, &h.project_id, None, "Explain crash handling", None)
             .await
             .unwrap();
         let run_id = started.run_id.clone();
@@ -2442,7 +2515,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
     async fn ask_timeout_errors_thread() {
         let h = harness("ask-timeout");
         h.install_fake_agent_timeout("#!/bin/sh\nsleep 30\n", 1);
-        let started = ask_from_app(&h.handle, &h.project_id, None, "Explain timeouts")
+        let started = ask_from_app(&h.handle, &h.project_id, None, "Explain timeouts", None)
             .await
             .unwrap();
         let run_id = started.run_id.clone();
@@ -2455,7 +2528,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         let h = harness("ask-retry");
         // First ask: exit 0 without saving → error.
         h.install_fake_agent("#!/bin/sh\nexit 0\n");
-        let first = ask_from_app(&h.handle, &h.project_id, Some("Retry me"), "Explain retries")
+        let first = ask_from_app(&h.handle, &h.project_id, Some("Retry me"), "Explain retries", None)
             .await
             .unwrap();
         let thread_id = first.thread_id.clone();
@@ -2498,18 +2571,62 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
     }
 
     #[tokio::test]
+    async fn retry_reuses_persisted_override() {
+        // epic conceptify-e7m: an ask started with a model override persists it
+        // on the run row; retry re-reads and re-applies the SAME override
+        // (proven by the retry run's resolved model column), without the
+        // frontend re-passing it.
+        let h = harness("ask-retry-override");
+        h.install_fake_agent("#!/bin/sh\nexit 0\n");
+
+        let over = RunOverride {
+            adapter: None,
+            model: Some("custom-ask-model".to_owned()),
+        };
+        let first = ask_from_app(
+            &h.handle,
+            &h.project_id,
+            Some("Override retry"),
+            "Explain overrides",
+            Some(over),
+        )
+        .await
+        .unwrap();
+        let thread_id = first.thread_id.clone();
+        assert!(wait_until(|| h.thread_status_of(&thread_id) == "error", 15_000).await);
+
+        // The original run recorded the resolved override model + the intent.
+        let (agent, model, over_json) = h.run_selection(&first.run_id);
+        assert_eq!(agent, "fake");
+        assert_eq!(model, "custom-ask-model");
+        assert_eq!(over_json.as_deref(), Some(r#"{"model":"custom-ask-model"}"#));
+
+        // Retry takes NO override argument — it reuses the persisted one.
+        h.install_fake_agent("#!/bin/sh\nexit 3\n");
+        let retry = retry_ask(&h.handle, &thread_id).await.unwrap();
+        assert_ne!(retry.run_id, first.run_id);
+        assert!(wait_until(|| h.run_row(&retry.run_id).0 == "failed", 15_000).await);
+
+        // The retry run resolved the SAME override model + re-persisted it.
+        let (r_agent, r_model, r_over) = h.run_selection(&retry.run_id);
+        assert_eq!(r_agent, "fake");
+        assert_eq!(r_model, "custom-ask-model", "retry reused the original override model");
+        assert_eq!(r_over.as_deref(), Some(r#"{"model":"custom-ask-model"}"#));
+    }
+
+    #[tokio::test]
     async fn ask_guards_empty_question_and_unknown_targets() {
         let h = harness("ask-guards2");
         h.install_fake_agent("#!/bin/sh\nexit 0\n");
 
         // Empty/whitespace question → EmptyQuestion (no thread created).
-        let err = ask_from_app(&h.handle, &h.project_id, None, "   ")
+        let err = ask_from_app(&h.handle, &h.project_id, None, "   ", None)
             .await
             .unwrap_err();
         assert!(matches!(err, FlowError::EmptyQuestion), "{err:?}");
 
         // Unknown project → ProjectNotFound (no thread created).
-        let err = ask_from_app(&h.handle, "no-such-project", None, "q")
+        let err = ask_from_app(&h.handle, "no-such-project", None, "q", None)
             .await
             .unwrap_err();
         assert!(matches!(err, FlowError::ProjectNotFound(_)), "{err:?}");

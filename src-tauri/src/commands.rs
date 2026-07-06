@@ -988,6 +988,53 @@ pub fn reset_agent_settings(
     Ok(defaults)
 }
 
+/// Per-purpose configured models (the fallback used when a run carries no model
+/// override), UI-friendly. Mirrors `settings::PurposeModels` in camelCase.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModelsDto {
+    pub follow_up: String,
+    pub artifact_update: String,
+    pub in_app_ask: String,
+}
+
+/// A UI-friendly view of the run-selection options a per-ask override picker
+/// (bead conceptify-e7m.4) needs (epic conceptify-e7m): the configured adapter
+/// KEYS (not the full command/args templates `get_agent_settings` returns), the
+/// default adapter, and the per-purpose default models. Distinct from the
+/// live model *catalog* (bead e7m.6): this is the settings-derived fallback
+/// baseline. Additive — `get_agent_settings` still returns the full blob.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentOptionsDto {
+    /// Configured adapter keys (sorted; `adapters` is a BTreeMap), e.g.
+    /// `["claude"]` — the escape-hatch adapter list.
+    pub adapters: Vec<String>,
+    /// The adapter used when a run carries no `{adapter}` override.
+    pub default_adapter: String,
+    /// The per-purpose default models (the `{model}`-override fallback).
+    pub models: AgentModelsDto,
+}
+
+/// Expose the available adapters + per-purpose default models to the frontend
+/// in a UI-friendly shape (epic conceptify-e7m, for the point-of-ask override
+/// picker). Reads the same merged settings as `get_agent_settings` but projects
+/// only what a picker needs. Never mutates settings.
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_agent_options(db: State<DbHandle>) -> Result<AgentOptionsDto, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let s = crate::settings::get_settings(&conn).map_err(|e| e.to_string())?;
+    Ok(AgentOptionsDto {
+        adapters: s.adapters.keys().cloned().collect(),
+        default_adapter: s.default_adapter,
+        models: AgentModelsDto {
+            follow_up: s.models.follow_up,
+            artifact_update: s.models.artifact_update,
+            in_app_ask: s.models.in_app_ask,
+        },
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Follow-up flows (PRD FR-4.6/4.7/4.8/4.9) — beads b12.4/b12.5/b12.6.
 //
@@ -1031,8 +1078,9 @@ impl From<crate::flows::FlowStarted> for RunStartedDto {
 pub async fn ask_follow_ups(
     app: tauri::AppHandle,
     thread_id: String,
+    run_override: Option<crate::settings::RunOverride>,
 ) -> Result<RunStartedDto, String> {
-    crate::flows::ask_follow_ups(&app, &thread_id)
+    crate::flows::ask_follow_ups(&app, &thread_id, run_override)
         .await
         .map(RunStartedDto::from)
         .map_err(|e| e.to_string())
@@ -1047,8 +1095,9 @@ pub async fn apply_to_artifact(
     app: tauri::AppHandle,
     thread_id: String,
     comment_ids: Vec<String>,
+    run_override: Option<crate::settings::RunOverride>,
 ) -> Result<RunStartedDto, String> {
-    crate::flows::apply_to_artifact(&app, &thread_id, comment_ids)
+    crate::flows::apply_to_artifact(&app, &thread_id, comment_ids, run_override)
         .await
         .map(RunStartedDto::from)
         .map_err(|e| e.to_string())
@@ -1161,8 +1210,9 @@ pub async fn ask_from_app(
     project_id: String,
     title: Option<String>,
     question: String,
+    run_override: Option<crate::settings::RunOverride>,
 ) -> Result<AskStartedDto, String> {
-    crate::flows::ask_from_app(&app, &project_id, title.as_deref(), &question)
+    crate::flows::ask_from_app(&app, &project_id, title.as_deref(), &question, run_override)
         .await
         .map(AskStartedDto::from)
         .map_err(|e| e.to_string())
@@ -1227,8 +1277,9 @@ pub async fn ask_single_comment(
     app: tauri::AppHandle,
     thread_id: String,
     root_comment_id: String,
+    run_override: Option<crate::settings::RunOverride>,
 ) -> Result<RunStartedDto, String> {
-    crate::flows::ask_single_comment(&app, &thread_id, &root_comment_id)
+    crate::flows::ask_single_comment(&app, &thread_id, &root_comment_id, run_override)
         .await
         .map(RunStartedDto::from)
         .map_err(|e| e.to_string())
