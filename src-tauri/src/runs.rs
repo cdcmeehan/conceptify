@@ -545,6 +545,13 @@ async fn start_reserved<R: Runtime>(
         crate::catalog::provider_of,
         loaded.openrouter_key.as_deref(),
     )?;
+    // Fill the flow prompt's per-adapter scope note now that routing has decided
+    // WHICH agent runs (bead conceptify-w9e). The behavioral rules the note
+    // states are adapter-independent; only the mechanism description varies, and
+    // it must match the adapter actually executing — so it is filled from this
+    // single routing decision, never re-derived (no divergence). A prompt with
+    // no sentinel (engine-level tests) passes through unchanged.
+    let prompt = crate::flows::apply_scope_note(&req.prompt, &route.adapter);
     let routed_selection = RunOverride {
         adapter: Some(route.adapter.clone()),
         model: Some(route.model.clone()),
@@ -552,7 +559,7 @@ async fn start_reserved<R: Runtime>(
     let invocation = loaded.settings.resolve_with_override(
         purpose,
         Path::new(&loaded.root_path),
-        &req.prompt,
+        &prompt,
         Some(&routed_selection),
     )?;
     let program = {
@@ -646,7 +653,7 @@ async fn start_reserved<R: Runtime>(
             program.display(),
             invocation.cwd,
             timeout.as_secs(),
-            req.prompt.chars().count(),
+            prompt.chars().count(),
         ),
     );
 

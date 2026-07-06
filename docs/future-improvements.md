@@ -55,3 +55,20 @@ alive. Requires the headless agent to emit partial answers (or the run
 `stream-json` events to carry assistant text deltas that the run-progress
 pipeline forwards to a per-comment buffer). Polish, not structure — do after
 the conversational-interrogation epic lands.
+
+## 5. Structured codex run-progress parsing
+
+The `codex` adapter ships plain stdout passthrough: `codex exec` writes its
+human-readable transcript to **stderr** and only the final message to stdout,
+so `classify_line` degrades codex stdout to `kind: "output"` events and the
+frontend shows the elapsed clock + log tail instead of claude-style progress
+kinds (tool-use, thinking, …). This was deferred from bead `conceptify-w9e`
+part 2 because codex's `--json` JSONL event schema is experimental and
+unversioned on codex-cli 0.142.0 — parsing it now would couple the run engine
+to a shape that will churn, and raw JSONL in the run log would make the
+FR-4.8/FR-5.3 failure log-tail unreadable. When that schema stabilizes, add an
+adapter-aware parse mode in `runs.rs` (claude `stream-json` vs codex JSONL)
+keyed off the routed adapter, so codex runs surface real progress kinds while
+the log stays human-readable. See the `codex` adapter block in settings.rs
+`default_adapters()` for the verified 0.142.0 stream shape and the reasons
+`--json` was rejected for v1.

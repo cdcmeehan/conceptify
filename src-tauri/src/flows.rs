@@ -1158,6 +1158,57 @@ fn comments_json(comments: &[Comment]) -> String {
     serde_json::to_string_pretty(&arr).expect("comment JSON always serializes")
 }
 
+/// Internal sentinel the flow prompt builders emit in place of the per-adapter
+/// tool-scope description; [`apply_scope_note`] swaps it for the ROUTED
+/// adapter's mechanism note once routing has decided which agent runs (bead
+/// `conceptify-w9e`, design choice (b)). Fenced with U+2063 (INVISIBLE
+/// SEPARATOR) so it can never collide with reader-supplied prompt content
+/// (comment bodies, titles, questions) interpolated into the same prompt — a
+/// collision could at worst duplicate the note, never a security issue (the
+/// prompt is advisory; real scoping is the adapter's CLI flags), but the fence
+/// rules it out anyway. Contains no `{}`, so it passes through `format!` and the
+/// invocation resolver's injection-safe `{prompt}` expansion untouched, and no
+/// NUL, so it survives `execve` argv.
+pub(crate) const SCOPE_MECHANISM_PLACEHOLDER: &str = "\u{2063}cfy:scope-mechanism\u{2063}";
+
+/// The per-adapter description of HOW a flow's tool scope is enforced. The
+/// BEHAVIORAL rules are identical for every adapter — no web research, no
+/// mutating git, never edit the target repo; every flow writes only to its
+/// scratch/temp copy — and only the mechanism *claim* varies, so the note stays
+/// truthful for whichever agent actually runs (verified behavior recorded in
+/// settings.rs `default_adapters()`):
+///
+/// - `claude` — the claude CLI's own tool rules enforce it: `WebFetch`/
+///   `WebSearch` denied, `Bash(git …:*)` mutating-git denies, and `Edit`/
+///   `Write` fenced out of the project root. (Byte-identical to the pre-w9e
+///   prompt text.)
+/// - `codex` — a kernel (Seatbelt) `workspace-write` sandbox confines WRITES to
+///   the project dir + `/tmp` + `$TMPDIR` and denies everything else (incl.
+///   `$HOME`), but it does NOT block web access, mutating git, or writes inside
+///   the repo (all verified on codex-cli 0.142.0), so those three stay
+///   instruction-enforced — "the sandbox denies X; additionally do not Y".
+/// - anything else (a per-run adapter override or a user-configured G6 adapter,
+///   routed `manual`) — no mechanism is known, so fall back to instruction-only
+///   phrasing that makes no claim about tools being disabled or sandboxed.
+fn scope_mechanism(adapter: &str) -> &'static str {
+    match adapter {
+        "claude" => "Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root",
+        "codex" => "Your toolset runs in a workspace-write sandbox: the kernel lets you write inside the project directory, /tmp, and $TMPDIR and denies everything outside them (including $HOME). It does not block web access, mutating git, or writes inside the project itself, so keep these as firm rules regardless: do no web research, run no git commands that mutate the repo, and do not edit the target repo",
+        _ => "Keep your work within these rules whatever your tools allow: do no web research, run no git commands that mutate the repo, and do not edit files inside the project root",
+    }
+}
+
+/// Substitute the per-adapter scope note into an assembled flow prompt. The run
+/// engine (`runs::start_reserved`) calls this with the ROUTED adapter, right
+/// after routing decides it — so the note the agent reads always matches the
+/// adapter that actually runs (one routing decision, filled into the prompt it
+/// produced; no divergence — bead `conceptify-w9e` design choice (b)). A no-op
+/// for any prompt without the sentinel (e.g. engine-level test prompts), so
+/// non-flow callers are unaffected.
+pub(crate) fn apply_scope_note(prompt: &str, adapter: &str) -> String {
+    prompt.replace(SCOPE_MECHANISM_PLACEHOLDER, scope_mechanism(adapter))
+}
+
 /// The FR-4.6 answer-mode prompt (epic conceptify-6xi exchange-history form).
 /// Each targeted root renders as an exchange transcript (root + prior answer +
 /// ordered replies); the agent addresses the LATEST unanswered message and
@@ -1197,9 +1248,10 @@ Each exchange below is one conversation under a root comment: the reader's origi
 ## Hard rules
 - Do NOT modify or save the artifact: never run `conceptify save-artifact`, and never pass `--applied` to resolve-comment. Answering and applying-to-the-artifact are deliberately separate steps; this run only answers.
 - Use the conceptify CLI only as specified above.
-- Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root — read the project freely, but write only under your scratch directory.
+- {scope_mechanism} — read the project freely, but write only under your scratch directory.
 - If the file ~/.claude/skills/conceptify/references/follow-ups.md exists, read it before answering — it holds the house rules for follow-up answers.
 "#,
+        scope_mechanism = SCOPE_MECHANISM_PLACEHOLDER,
         project_root = ctx.project_root,
         title = ctx.title,
         thread_id = ctx.thread_id,
@@ -1252,9 +1304,10 @@ Why this order: `--applied` freezes each comment at the artifact version it was 
 - Every resolve-comment --applied call comes BEFORE the single save-artifact call, never after.
 - Exactly one save-artifact per run, as the final CLI call.
 - If you cannot complete the edits, do NOT run save-artifact and do NOT mark comments applied — an honest failure beats publishing a broken version.
-- Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root — read the project freely, but write only under your working directory copy.
+- {scope_mechanism} — read the project freely, but write only under your working directory copy.
 - If the file ~/.claude/skills/conceptify/references/follow-ups.md exists, read it first — it holds the house rules for follow-up and apply runs.
 "#,
+        scope_mechanism = SCOPE_MECHANISM_PLACEHOLDER,
         project_root = ctx.project_root,
         title = ctx.title,
         thread_id = ctx.thread_id,
@@ -1283,8 +1336,10 @@ pub(crate) struct AskPromptContext<'a> {
 /// ALREADY created (skip `ensure-project`/`create-thread`); author into a temp
 /// file (never the repo); publish exactly once via `save-artifact --thread` as
 /// the final CLI call. Carries the same toolset-scope hint as the follow-up
-/// prompts (repo read-only, temp dirs writable, web/mutating-git denied — see
-/// settings.rs `default_adapters()` / docs/api.md permission scoping).
+/// prompts — the [`SCOPE_MECHANISM_PLACEHOLDER`] the run engine fills with the
+/// routed adapter's mechanism note ([`apply_scope_note`]); behavior forbidden is
+/// identical (no web research, no mutating git, no repo writes — see settings.rs
+/// `default_adapters()` / docs/api.md permission scoping).
 pub(crate) fn build_ask_prompt(ctx: &AskPromptContext) -> String {
     format!(
         r#"You are Conceptify's in-app author, running headless inside the project this artifact will explain.
@@ -1309,8 +1364,9 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
 ## Hard rules
 - The project and thread already exist: never run `conceptify ensure-project` or `conceptify create-thread`. Publish only into thread {thread_id}.
 - Exactly one save-artifact per run, as the final CLI call. If you cannot produce a valid artifact, do NOT run save-artifact — an honest failure beats publishing a broken one.
-- Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root — read the project freely, but write only under your temp working directory.
+- {scope_mechanism} — read the project freely, but write only under your temp working directory.
 "#,
+        scope_mechanism = SCOPE_MECHANISM_PLACEHOLDER,
         project_root = ctx.project_root,
         title = ctx.title,
         thread_id = ctx.thread_id,
@@ -1401,7 +1457,9 @@ mod tests {
             exchange(fixture_comment("c-anchored", true, CommentStatus::Open)),
             exchange(fixture_comment("c-direct", false, CommentStatus::Open)),
         ];
-        let prompt = build_answer_prompt(&fixture_answer_ctx(&exchanges));
+        // The claude mechanism is byte-identical to the pre-w9e prompt: proves
+        // both the assembly and that the claude scope note is unchanged.
+        let prompt = apply_scope_note(&build_answer_prompt(&fixture_answer_ctx(&exchanges)), "claude");
 
         let expected = r#"You are Conceptify's follow-up answerer, running headless inside the project this artifact explains.
 
@@ -1486,7 +1544,7 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
             root,
             replies: vec![reply],
         }];
-        let prompt = build_answer_prompt(&fixture_answer_ctx(&exchanges));
+        let prompt = apply_scope_note(&build_answer_prompt(&fixture_answer_ctx(&exchanges)), "claude");
 
         let expected = r#"You are Conceptify's follow-up answerer, running headless inside the project this artifact explains.
 
@@ -1530,7 +1588,7 @@ Answer now: resolve comment r-1 (the latest unanswered message in this exchange)
     #[test]
     fn apply_prompt_exact_for_fixture() {
         let comments = vec![fixture_comment("c-answered", true, CommentStatus::Answered)];
-        let prompt = build_apply_prompt(&fixture_prompt_ctx(&comments));
+        let prompt = apply_scope_note(&build_apply_prompt(&fixture_prompt_ctx(&comments)), "claude");
 
         let expected = r#"You are Conceptify's artifact updater, running headless inside the project this artifact explains.
 
@@ -1595,13 +1653,16 @@ Why this order: `--applied` freezes each comment at the artifact version it was 
 
     #[test]
     fn ask_prompt_exact_for_fixture() {
-        let prompt = build_ask_prompt(&AskPromptContext {
-            thread_id: "thread-1",
-            slug: "how-does-oauth-work",
-            title: "How does OAuth work?",
-            question: "Explain the OAuth 2.0 authorization code flow.",
-            project_root: "/Users/chris/code/myrepo",
-        });
+        let prompt = apply_scope_note(
+            &build_ask_prompt(&AskPromptContext {
+                thread_id: "thread-1",
+                slug: "how-does-oauth-work",
+                title: "How does OAuth work?",
+                question: "Explain the OAuth 2.0 authorization code flow.",
+                project_root: "/Users/chris/code/myrepo",
+            }),
+            "claude",
+        );
 
         let expected = r#"You are Conceptify's in-app author, running headless inside the project this artifact will explain.
 
@@ -1628,6 +1689,121 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
 - Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root — read the project freely, but write only under your temp working directory.
 "#;
         assert_eq!(prompt, expected);
+    }
+
+    #[test]
+    fn answer_prompt_exact_codex() {
+        // Same two-exchange fixture as `answer_prompt_exact_for_fixture`; ONLY
+        // the scope line differs — the codex mechanism note verbatim. The
+        // behavior it forbids (no web research, no mutating git, no repo edits)
+        // is identical; only the mechanism CLAIM changes, and it matches the
+        // verified codex-cli 0.142.0 posture recorded in settings.rs
+        // default_adapters(). This is the per-adapter exact-string counterpart.
+        let exchanges = vec![
+            exchange(fixture_comment("c-anchored", true, CommentStatus::Open)),
+            exchange(fixture_comment("c-direct", false, CommentStatus::Open)),
+        ];
+        let prompt = apply_scope_note(&build_answer_prompt(&fixture_answer_ctx(&exchanges)), "codex");
+
+        let expected = r#"You are Conceptify's follow-up answerer, running headless inside the project this artifact explains.
+
+A reader left comments (follow-up questions) on an explanation artifact, and may have replied to the answers they got. Answer each exchange below through the `conceptify` CLI (it is on your PATH), responding to the latest unanswered message in the conversation. The artifact itself must not be modified in this mode.
+
+## Context
+- Project root (your working directory): /Users/chris/code/myrepo
+- Thread: "How does OAuth work?" (thread id: thread-1)
+- The question the artifact answers: Explain the OAuth 2.0 authorization code flow.
+- Artifact file (read-only in this mode): /Users/chris/Documents/conceptify/artifacts/p1/threads/oauth/artifact.v1.html (version 1)
+
+## Exchanges to answer
+Each exchange below is one conversation under a root comment: the reader's original comment with its `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole), any answer already given, then any follow-up replies in order. Every message is labelled with its own comment id and `[status]`; the last line of each exchange names the single message to answer now.
+
+### Exchange 1 — root comment c-anchored
+- anchor: {"cfy_id":"sec-flow","end":9,"quote":{"exact":"token","prefix":"the ","suffix":" is"},"start":4,"type":"text","v":1}
+- reader (root c-anchored) [open]: why c-anchored?
+Answer now: resolve comment c-anchored (the latest unanswered message in this exchange).
+
+### Exchange 2 — root comment c-direct
+- anchor: none (a direct question about the whole artifact)
+- reader (root c-direct) [open]: why c-direct?
+Answer now: resolve comment c-direct (the latest unanswered message in this exchange).
+
+## How to answer — exact contract
+1. Read the artifact file, then whatever project sources you need to ground each answer in the real code.
+2. Create a scratch directory for answer files: ANSWERS=$(mktemp -d)
+3. For EACH exchange above, individually — answer ONLY its latest unanswered message:
+   - Write your answer to its own file, e.g. "$ANSWERS/<message-id>.html" — an HTML fragment or markdown, concise and specific (a short paragraph or two; small code snippets welcome; no <html>/<head>/<body> wrapper).
+   - Then run: conceptify resolve-comment --id <message-id> --answer-file "$ANSWERS/<message-id>.html"
+   where <message-id> is the comment id named on that exchange's "Answer now" line — the reply's id when the latest message is a reply, the root's id for a fresh root comment.
+   This marks that message answered and shows the answer in the app immediately — resolve each exchange as soon as its answer is ready, so answers land one by one.
+4. Answer every exchange. Build on the answers already shown in an exchange — never repeat one that was already given. Never combine several exchanges into one resolve-comment call, and never skip one.
+
+## Hard rules
+- Do NOT modify or save the artifact: never run `conceptify save-artifact`, and never pass `--applied` to resolve-comment. Answering and applying-to-the-artifact are deliberately separate steps; this run only answers.
+- Use the conceptify CLI only as specified above.
+- Your toolset runs in a workspace-write sandbox: the kernel lets you write inside the project directory, /tmp, and $TMPDIR and denies everything outside them (including $HOME). It does not block web access, mutating git, or writes inside the project itself, so keep these as firm rules regardless: do no web research, run no git commands that mutate the repo, and do not edit the target repo — read the project freely, but write only under your scratch directory.
+- If the file ~/.claude/skills/conceptify/references/follow-ups.md exists, read it before answering — it holds the house rules for follow-up answers.
+"#;
+        assert_eq!(prompt, expected);
+    }
+
+    #[test]
+    fn scope_note_lines_exact_for_every_adapter_and_flow() {
+        // Every flow prompt carries a per-write-location scope line; the ROUTED
+        // adapter selects the mechanism clause verbatim while the behavioral
+        // rules stay fixed. Exact-string per (adapter, flow) across all three
+        // write-locations — nothing loosened, and the sentinel must never
+        // survive substitution.
+        const CLAUDE: &str = "Your toolset is scoped: web tools are disabled, git commands that mutate the repo are denied, and your Edit/Write tools cannot touch files inside the project root";
+        const CODEX: &str = "Your toolset runs in a workspace-write sandbox: the kernel lets you write inside the project directory, /tmp, and $TMPDIR and denies everything outside them (including $HOME). It does not block web access, mutating git, or writes inside the project itself, so keep these as firm rules regardless: do no web research, run no git commands that mutate the repo, and do not edit the target repo";
+        const FALLBACK: &str = "Keep your work within these rules whatever your tools allow: do no web research, run no git commands that mutate the repo, and do not edit files inside the project root";
+
+        let comments = vec![fixture_comment("c-answered", true, CommentStatus::Answered)];
+        let exchanges = vec![exchange(fixture_comment("c-1", true, CommentStatus::Open))];
+        let bases = [
+            (
+                "your scratch directory",
+                build_answer_prompt(&fixture_answer_ctx(&exchanges)),
+            ),
+            (
+                "your working directory copy",
+                build_apply_prompt(&fixture_prompt_ctx(&comments)),
+            ),
+            (
+                "your temp working directory",
+                build_ask_prompt(&AskPromptContext {
+                    thread_id: "thread-1",
+                    slug: "how-does-oauth-work",
+                    title: "How does OAuth work?",
+                    question: "Explain the OAuth 2.0 authorization code flow.",
+                    project_root: "/Users/chris/code/myrepo",
+                }),
+            ),
+        ];
+
+        for (write_loc, base) in &bases {
+            assert!(
+                base.contains(SCOPE_MECHANISM_PLACEHOLDER),
+                "the builder emits the sentinel, not a baked mechanism"
+            );
+            // A custom/unknown adapter (per-run override or a G6-configured
+            // harness, routed `manual`) gets the instruction-only fallback.
+            for (adapter, mechanism) in [("claude", CLAUDE), ("codex", CODEX), ("my-agent", FALLBACK)] {
+                let out = apply_scope_note(base, adapter);
+                let expected_line = format!(
+                    "- {mechanism} — read the project freely, but write only under {write_loc}."
+                );
+                assert!(out.contains(&expected_line), "{adapter} / {write_loc}:\n{out}");
+                assert!(
+                    !out.contains(SCOPE_MECHANISM_PLACEHOLDER),
+                    "sentinel gone for {adapter}"
+                );
+            }
+            // The fallback makes NO mechanism claim — neither built-in's wording.
+            let fb = apply_scope_note(base, "my-agent");
+            assert!(!fb.contains("workspace-write sandbox"), "no codex claim:\n{fb}");
+            assert!(!fb.contains("web tools are disabled"), "no claude claim:\n{fb}");
+        }
     }
 
     #[test]
@@ -2016,6 +2192,12 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         assert!(prompt.contains("resolve-comment"), "{prompt}");
         assert!(prompt.contains("references/follow-ups.md"), "{prompt}");
         assert!(!prompt.contains("save-artifact --thread"), "{prompt}");
+        // The per-adapter scope note was substituted BEFORE spawn (bead
+        // conceptify-w9e): the raw sentinel never reaches the agent, and this
+        // fake adapter (a custom default → routed `manual`) gets the
+        // instruction-only fallback note, not claude's "web tools are disabled".
+        assert!(!prompt.contains(SCOPE_MECHANISM_PLACEHOLDER), "sentinel substituted: {prompt}");
+        assert!(prompt.contains("do no web research"), "fallback scope note reached agent: {prompt}");
 
         // The child PATH starts with the CLI stub's directory, and `conceptify`
         // actually resolves in the child's environment (the §5.1 fix).
