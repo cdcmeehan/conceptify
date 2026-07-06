@@ -166,14 +166,57 @@
 
   // -------------------------------------------------------------------------
   // (a) Text-selection reporting
+  //
+  // Selection is reported on GESTURE COMPLETION, never mid-drag: while a
+  // pointer is pressed the shell must not see a 'selection' (its action
+  // popover would otherwise pop up while the user is still dragging — bead
+  // conceptify-vu1.1). Two settle paths cover the two ways a selection ends:
+  //
+  //   - Pointer selections (mouse/trackpad/pen): every selectionchange is
+  //     suppressed while a pointer is down; on release (pointerup, or
+  //     pointercancel if the OS/gesture takes over) the final selection is
+  //     posted exactly once. pointerdown/up (not mousedown/up) so trackpad
+  //     and pen gestures count too.
+  //   - Keyboard selections (shift+arrows, Cmd+A) have no pointerup, so a
+  //     debounced settle path posts once the selection stops changing.
+  //
+  // 'selection_cleared' semantics are unchanged: reportSelection() emits it
+  // whenever the selection resolves to nothing after having been non-empty
+  // (so a drag that ends collapsed clears, and never posts a 'selection').
   // -------------------------------------------------------------------------
 
+  var SETTLE_MS = 300; // keyboard-selection settle debounce (no pointer down)
   var selectionTimer = 0;
   var hadSelection = false;
+  // Boolean, not a pointer counter: a missed pointerup (e.g. release outside
+  // the frame) self-heals on the next gesture rather than wedging suppression.
+  var pointerDown = false;
+
+  document.addEventListener("pointerdown", function () {
+    // A fresh pointer gesture supersedes any pending keyboard settle.
+    pointerDown = true;
+    clearTimeout(selectionTimer);
+  });
+
+  // pointerup fires before the 'click' handler below, so element_click's
+  // 'sel && !sel.isCollapsed' guard still sees the just-finalized selection.
+  document.addEventListener("pointerup", endPointerGesture);
+  document.addEventListener("pointercancel", endPointerGesture);
+
+  function endPointerGesture() {
+    if (!pointerDown) return; // stray release without a tracked press
+    pointerDown = false;
+    clearTimeout(selectionTimer);
+    // Report the finalized selection once. A collapsed selection resolves to
+    // range === null in reportSelection(), so a click or a drag that ends
+    // collapsed posts no 'selection' (only selection_cleared if one was live).
+    reportSelection();
+  }
 
   document.addEventListener("selectionchange", function () {
     clearTimeout(selectionTimer);
-    selectionTimer = setTimeout(reportSelection, 180);
+    if (pointerDown) return; // mid-gesture: wait for release to report
+    selectionTimer = setTimeout(reportSelection, SETTLE_MS);
   });
 
   function reportSelection() {

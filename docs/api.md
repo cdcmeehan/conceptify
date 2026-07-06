@@ -1369,7 +1369,7 @@ shell→artifact *commands* (its `event.source` is its own window, not
 | `type` | Payload | Meaning |
 |---|---|---|
 | `ready` | — | The bridge booted. Sent once per **document load** — including every iframe reload (version switch, live refresh), which wipes all decorations. Consumers must (re)apply highlights on every `ready`; `bridge.ts` queues commands sent before the first `ready` of an attachment. |
-| `selection` | `anchor` (a `text` anchor), `rect` (selection bounding rect) | A non-empty text selection settled (debounced ~180 ms). `cfy_id`/`start`/`end` are present when the selection has a `data-cfy-id` ancestor; `quote` always is. |
+| `selection` | `anchor` (a `text` anchor), `rect` (selection bounding rect) | A non-empty text selection reported on **gesture completion**, never mid-drag: pointer selections post once on release (`pointerup`/`pointercancel`); keyboard selections (shift+arrows, Cmd+A), which have no release, post after a ~300 ms settle debounce. `cfy_id`/`start`/`end` are present when the selection has a `data-cfy-id` ancestor; `quote` always is. |
 | `selection_cleared` | — | The previously reported selection collapsed/vanished (dismiss the popover). |
 | `element_click` | `anchor` (an `element` anchor), `rect` (element bounding rect) | Click on a `data-cfy-id`-bearing element (nearest such ancestor of the click target). Suppressed for clicks that end a text selection and for clicks on interactive elements (`a[href]`, `button`, form controls, `summary`, `label`, `[contenteditable]`). |
 
