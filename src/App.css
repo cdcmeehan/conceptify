@@ -252,6 +252,43 @@ select {
     animation: cfy-pop 140ms ease-out;
   }
 
+  /* Selection action toolbar (bead vu1.2, stage 1): a compact horizontal bar
+     of actions that hovers above a fresh text selection and swaps for the
+     .cfy-popover composer when "Comment" is chosen. Same raised surface,
+     hairline and elevation as the popover so the two stages read as one
+     object; intrinsic-width (unlike the fixed-width composer). Shares the
+     cfy-pop fade/scale-in (transform + opacity only; suppressed under
+     prefers-reduced-motion by the global guard). */
+  .cfy-toolbar {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.125rem;
+    padding: 0.1875rem;
+    background: var(--cfy-raised);
+    border: 1px solid var(--cfy-line);
+    border-radius: var(--radius-card);
+    box-shadow: var(--cfy-shadow-pop);
+    animation: cfy-pop 140ms ease-out;
+  }
+  /* Hairline divider between toolbar actions. */
+  .cfy-toolbar-sep {
+    align-self: stretch;
+    width: 1px;
+    margin: 0.25rem 0.0625rem;
+    background: var(--cfy-line);
+  }
+  /* Transient toolbar status text (e.g. "Copied", copy-failure). */
+  .cfy-toolbar-status {
+    padding: 0.3125rem 0.625rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--cfy-muted);
+  }
+  .cfy-toolbar-status[data-tone="danger"] {
+    color: var(--cfy-danger);
+  }
+
   /* Text control. */
   .cfy-input {
     width: 100%;
