@@ -7,6 +7,12 @@ mod comments;
 mod context;
 mod db;
 mod flows;
+// Live-checkpoint IPC bridge (test-only, #[ignore]d + env-gated): drives the
+// real command/flow/run stack headlessly for end-to-end verification against
+// the real frontend in a plain browser. See src/live_bridge.rs +
+// tools/live-harness.mjs. Built for bead conceptify-e7m.5.
+#[cfg(test)]
+mod live_bridge;
 mod projects;
 mod routing;
 mod runs;

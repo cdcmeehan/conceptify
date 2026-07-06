@@ -363,6 +363,13 @@ export interface LatestRun {
   run_id: string;
   mode: RunMode;
   status: RunStatus;
+  /** Resolved model the run actually used (epic e7m retry-surface display). */
+  model: string;
+  /** Route tag recorded on the row; `null` on pre-routing rows. */
+  route: "anthropic" | "openai" | "openrouter" | "manual" | null;
+  /** True iff a per-run override was recorded — Retry re-applies it verbatim;
+   *  false means Retry re-derives the current settings defaults. */
+  overridden: boolean;
 }
 
 export function getLatestRun(threadId: string): Promise<LatestRun | null> {

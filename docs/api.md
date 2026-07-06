@@ -168,10 +168,16 @@ The in-app ask flow (FR-5.1/5.2/5.3, bead 959.1/959.2) adds three more:
   **Takes no `run_override`** — it reuses the ORIGINAL run's persisted override
   (see below), so a retried generation runs with the same adapter/model choice
   the user made, robustly across app restarts.
-- `get_latest_run { thread_id }` → `{ run_id, mode, status }` or `null` — the
-  most recent run row for a thread (any mode/status). The FR-5.3 error state
-  uses it to resolve the failed generation run's id for `get_run_log_tail`;
-  unlike `get_active_run` (live runs only) it works after an app restart.
+- `get_latest_run { thread_id }` → `{ run_id, mode, status, model, route,
+  overridden }` or `null` — the most recent run row for a thread (any
+  mode/status). The FR-5.3 error state uses it to resolve the failed
+  generation run's id for `get_run_log_tail`; unlike `get_active_run` (live
+  runs only) it works after an app restart. `model` and `route` (`anthropic |
+  openai | openrouter | manual`, `null` on pre-routing rows) are the failed
+  run's resolved selection, shown on the error state; `overridden: true`
+  means a per-run override was recorded — Retry re-applies it verbatim —
+  while `false` means Retry re-derives the *current* settings defaults, so
+  the UI only promises reuse when an override actually exists.
 
 **Per-run override (`run_override?`, epic conceptify-e7m):** every run-starting
 flow command (`ask_follow_ups`, `ask_single_comment`, `apply_to_artifact`,

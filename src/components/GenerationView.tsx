@@ -145,6 +145,20 @@ export function GenerationError({ threadId }: { threadId: string }) {
         ? "Generation was cancelled."
         : "Generation failed — no artifact was produced.";
 
+  // Epic e7m (checkpoint e7m.5): show what the failed run used, and — when a
+  // per-run override was recorded — that Retry will reuse it. An override-free
+  // run retries with the *current* settings defaults, so no promise is shown.
+  const routeLabel =
+    latest?.route === "anthropic"
+      ? "via claude CLI"
+      : latest?.route === "openai"
+        ? "via codex CLI"
+        : latest?.route === "openrouter"
+          ? "via OpenRouter"
+          : latest?.route === "manual"
+            ? "via manual adapter"
+            : null;
+
   function onShowLog() {
     if (latest == null) return;
     setLoadingTail(true);
@@ -168,6 +182,13 @@ export function GenerationError({ threadId }: { threadId: string }) {
   return (
     <section class="rounded-card border border-danger/30 bg-danger-bg p-5">
       <p class="text-[13px] font-medium text-danger">{message}</p>
+      {latest != null && (
+        <p class="mt-1 text-xs text-muted">
+          Model: <span class="select-text font-mono">{latest.model}</span>
+          {routeLabel != null && <> · {routeLabel}</>}
+          {latest.overridden && <> · Retry reuses this override</>}
+        </p>
+      )}
       <div class="mt-3 flex flex-wrap items-center gap-2">
         <button
           type="button"

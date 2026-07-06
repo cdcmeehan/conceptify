@@ -953,8 +953,8 @@ pub fn get_agent_settings(db: State<DbHandle>) -> Result<crate::settings::AgentS
 /// an existing adapter) happens in the domain layer before the write, so a
 /// broken config is rejected rather than stored.
 #[tauri::command(rename_all = "snake_case")]
-pub fn set_agent_settings(
-    app: tauri::AppHandle,
+pub fn set_agent_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     db: State<DbHandle>,
     settings: crate::settings::AgentSettings,
 ) -> Result<(), String> {
@@ -974,8 +974,8 @@ pub fn set_agent_settings(
 /// can repaint without a second round-trip. Restores the true zero-config
 /// baseline rather than writing a "defaults" blob.
 #[tauri::command(rename_all = "snake_case")]
-pub fn reset_agent_settings(
-    app: tauri::AppHandle,
+pub fn reset_agent_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     db: State<DbHandle>,
 ) -> Result<crate::settings::AgentSettings, String> {
     let defaults = {
@@ -1052,8 +1052,8 @@ pub fn get_agent_options(db: State<DbHandle>) -> Result<AgentOptionsDto, String>
 /// `settings::OPENROUTER_KEY_SETTINGS_KEY`'s docs), so `reset_agent_settings`
 /// leaves it intact. Emits `settings-changed` so option readers refresh.
 #[tauri::command(rename_all = "snake_case")]
-pub fn set_openrouter_api_key(
-    app: tauri::AppHandle,
+pub fn set_openrouter_api_key<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     db: State<DbHandle>,
     key: Option<String>,
 ) -> Result<(), String> {
@@ -1107,8 +1107,8 @@ impl From<crate::flows::FlowStarted> for RunStartedDto {
 /// artifact is never modified in this mode). One run per thread (FR-4.9): a
 /// second start while one is active fails with a clear error.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn ask_follow_ups(
-    app: tauri::AppHandle,
+pub async fn ask_follow_ups<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     thread_id: String,
     run_override: Option<crate::settings::RunOverride>,
 ) -> Result<RunStartedDto, String> {
@@ -1123,8 +1123,8 @@ pub async fn ask_follow_ups(
 /// `save-artifact` after marking the targets `applied` (ordering contract in
 /// flows.rs). The thread shows `updating` for the duration.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn apply_to_artifact(
-    app: tauri::AppHandle,
+pub async fn apply_to_artifact<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     thread_id: String,
     comment_ids: Vec<String>,
     run_override: Option<crate::settings::RunOverride>,
@@ -1237,8 +1237,8 @@ impl From<crate::flows::AskStarted> for AskStartedDto {
 /// optional (derived from the question when blank). Rejects (user-facing string)
 /// on an empty question, an unknown project, or a missing CLI/agent binary.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn ask_from_app(
-    app: tauri::AppHandle,
+pub async fn ask_from_app<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     project_id: String,
     title: Option<String>,
     question: String,
@@ -1254,7 +1254,10 @@ pub async fn ask_from_app(
 /// thread and move it back to `generating`. Backs the thread-view "Retry"
 /// button on the generation-error state.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn retry_ask(app: tauri::AppHandle, thread_id: String) -> Result<AskStartedDto, String> {
+pub async fn retry_ask<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    thread_id: String,
+) -> Result<AskStartedDto, String> {
     crate::flows::retry_ask(&app, &thread_id)
         .await
         .map(AskStartedDto::from)
@@ -1270,6 +1273,14 @@ pub struct LatestRunDto {
     pub run_id: String,
     pub mode: String,
     pub status: String,
+    /// Resolved model the run actually used (epic e7m: retry-surface display).
+    pub model: String,
+    /// Route tag recorded on the row (`anthropic|openai|openrouter|manual`);
+    /// `null` on pre-routing rows.
+    pub route: Option<String>,
+    /// True iff a per-run override was recorded — Retry re-applies it
+    /// verbatim; when false, Retry re-derives the current defaults.
+    pub overridden: bool,
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1283,6 +1294,9 @@ pub fn get_latest_run(
         run_id: r.run_id,
         mode: r.mode,
         status: r.status,
+        model: r.model,
+        route: r.route,
+        overridden: r.overridden,
     }))
 }
 
@@ -1305,8 +1319,8 @@ pub fn get_latest_run(
 /// the target is a reply (reply to its root instead); the target root is not
 /// open; run already active (FR-4.9); missing agent/CLI.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn ask_single_comment(
-    app: tauri::AppHandle,
+pub async fn ask_single_comment<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     thread_id: String,
     root_comment_id: String,
     run_override: Option<crate::settings::RunOverride>,
@@ -1352,8 +1366,8 @@ pub fn get_model_catalog(
 /// cache/snapshot rather than failing. Emits `catalog-refreshed` so live views
 /// repaint.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn refresh_model_catalog(
-    app: tauri::AppHandle,
+pub async fn refresh_model_catalog<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
 ) -> Result<conceptify_types::CatalogResponse, String> {
     let (cat, source) = crate::catalog::refresh_now().await;
     let enabled = {

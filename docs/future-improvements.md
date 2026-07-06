@@ -15,17 +15,7 @@ where possible). Worth building *before* content piles up. (PRD Phase 2 lists
 this; index maintenance hooks belong in `save-artifact` and the comment
 mutation paths.)
 
-## 2. Model/depth picker at the point of asking — **picked up: epic `conceptify-e7m`**
-
-Per-purpose models exist in settings (`followUp` / `artifactUpdate` /
-`inAppAsk`) but are invisible in the moment. Add a small picker on the ask
-composer, "Ask follow-ups", and "Apply to artifact" actions — e.g. *quick*
-(haiku), *standard* (sonnet), *deep* (opus/fable) — overriding the per-purpose
-default for that one run. Cheap: the adapter template already takes `{model}`
-per invocation; the flow commands just need an optional model override
-parameter plumbed through to `settings.resolve()`.
-
-## 2b. Local / self-hosted models via a LiteLLM proxy
+## 2. Local / self-hosted models via a LiteLLM proxy
 
 Provider-routed execution (bead `conceptify-e7m.7`) covers anthropic-native,
 openai-native, and everything-else-via-OpenRouter. Local or self-hosted models

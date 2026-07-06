@@ -102,6 +102,44 @@ data-theme), status color families, shared control primitives, serif display
 moments, empty states + skeletons, focus-visible rings, Escape handlers,
 AA-verified contrast in both themes, reduced-motion guards.
 
+## 2026-07-06 — Selection UX overhaul + model selection epic
+
+**Skill detail-level ask (`conceptify-vsg`).** Interactive invocations now ask
+once — Quick & simple / Balanced (default) / Very detailed — mapping to
+COMPACT/auto/DEEP sizing AND the authoring model (Quick/Deep delegate
+authoring to a subagent with a model override; generated-by stays honest).
+Explicit depth wording skips the question; headless runs never ask. Proven
+live: a "quick, simple" ask produced a compact haiku-authored artifact.
+
+**Selection & highlight UX (epic `conceptify-vu1`).** Bridge now reports text
+selections only on gesture completion (pointerup/pointercancel; ~300 ms settle
+for keyboard selections) — no more popover mid-drag. Two-stage popover: a
+compact toolbar (Comment · Copy) hovers above the selection on release;
+Comment opens the composer in place, Copy writes the exact selected text.
+Highlights re-tinted terracotta and theme-aware (translucent fill + opaque
+underline accent; element outline + soft ring; styled ::selection) — clearly
+visible over prose, callouts, code blocks and tables in both themes. Live
+checkpoint passed all nine scenarios and caught two integration defects
+(post-save toolbar re-pop; Escape from iframe focus), both fixed.
+
+**Model selection (epic `conceptify-e7m`).** The user picks a model; the
+system derives the route: anthropic → claude CLI, openai → codex CLI
+(built-in verified adapter — workspace-write sandbox with explicit network
+enable), anything else → claude CLI pointed at OpenRouter via per-run env
+(key stored write-only outside the settings blob; secrets proven absent from
+logs/rows). Model catalog fetched on restart (LiteLLM + OpenRouter, 614 chat
+models / 52 providers), disk-cached with TTL + bundled offline snapshot.
+Settings: searchable grouped model pickers per purpose, provider suite
+toggles, OpenRouter key UI, catalog freshness/refresh. Every ask trigger
+(composer, batch follow-ups, apply, per-comment Ask now) gained a quiet
+per-run override pill; retry reuses a real override but re-derives current
+defaults otherwise, and the failure state says which model/route it will
+use. Per-adapter scope notes keep prompts mechanism-accurate
+(`conceptify-w9e`; structured codex progress parked). Live checkpoint: real
+claude + codex runs through the UI, offline catalog boot, fake-key
+clean-401 proof at the OpenRouter auth boundary — a genuine OpenRouter run
+awaits a real API key in Settings.
+
 ## Next up
 
 Parked ideas: `docs/future-improvements.md` (⌘K + FTS search, model picker

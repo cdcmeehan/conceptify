@@ -126,11 +126,21 @@ pub struct AskStarted {
 /// state on the thread view: it needs the failed generation run's id to load
 /// the log tail and offer Retry, even after an app restart when no live run is
 /// tracked in memory.
+///
+/// Also carries the run's resolved selection for the retry surface (epic
+/// `conceptify-e7m`, checkpoint e7m.5): `model` + `route` are what the failed
+/// run actually used (route is `None` on pre-routing rows), and `overridden`
+/// says whether a per-run override was recorded — when true, Retry re-applies
+/// that override verbatim; when false, Retry re-derives the *current* defaults
+/// (see [`load_latest_run_override`]), so the UI must not promise the old model.
 #[derive(Debug, Clone)]
 pub struct LatestRun {
     pub run_id: String,
     pub mode: String,
     pub status: String,
+    pub model: String,
+    pub route: Option<String>,
+    pub overridden: bool,
 }
 
 /// A live run's identity for the FR-4.8 UI (`get_active_run` command): the
@@ -938,14 +948,25 @@ pub fn latest_run_for_thread(
     thread_id: &str,
 ) -> Result<Option<LatestRun>, rusqlite::Error> {
     conn.query_row(
-        "SELECT id, mode, status FROM follow_up_runs
+        "SELECT id, mode, status, model, route, override_json FROM follow_up_runs
          WHERE thread_id = ?1 ORDER BY started_at DESC, id DESC LIMIT 1",
         [thread_id],
         |r| {
+            // `overridden` mirrors load_latest_run_override's rule exactly
+            // (parseable AND non-empty), so the flag is true iff Retry will
+            // actually reuse a recorded override.
+            let override_json: Option<String> = r.get(5)?;
+            let overridden = override_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<RunOverride>(json).ok())
+                .is_some_and(|o| !o.is_empty());
             Ok(LatestRun {
                 run_id: r.get(0)?,
                 mode: r.get(1)?,
                 status: r.get(2)?,
+                model: r.get(3)?,
+                route: r.get(4)?,
+                overridden,
             })
         },
     )
@@ -2736,12 +2757,14 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
             .await
         );
 
-        // latest_run_for_thread now points at the retry run.
+        // latest_run_for_thread now points at the retry run; an override-free
+        // run reports `overridden: false` on the retry surface (e7m.5).
         let latest = {
             let conn = h.db.lock().unwrap();
             latest_run_for_thread(&conn, &thread_id).unwrap().unwrap()
         };
         assert_eq!(latest.run_id, retry.run_id);
+        assert!(!latest.overridden);
 
         // The retry's agent saves → ready; completing doesn't regress it.
         h.save_artifact_for(&thread_id, 1);
@@ -2794,6 +2817,18 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
         assert_eq!(r_agent, "fake");
         assert_eq!(r_model, "custom-ask-model", "retry reused the original override model");
         assert_eq!(r_over.as_deref(), Some(r#"{"model":"custom-ask-model"}"#));
+
+        // The retry surface (get_latest_run → LatestRun) exposes the resolved
+        // selection + override flag for display (e7m.5): the fake custom
+        // default_adapter is the routing bypass, so the route tag is `manual`.
+        let latest = {
+            let conn = h.db.lock().unwrap();
+            latest_run_for_thread(&conn, &thread_id).unwrap().unwrap()
+        };
+        assert_eq!(latest.run_id, retry.run_id);
+        assert_eq!(latest.model, "custom-ask-model");
+        assert_eq!(latest.route.as_deref(), Some("manual"));
+        assert!(latest.overridden, "recorded override surfaces on the retry display");
     }
 
     #[tokio::test]
