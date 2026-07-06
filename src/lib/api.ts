@@ -371,6 +371,12 @@ export interface AgentSettings {
   /** Base dir for auto-created project folders; `null`/empty = default
    *  `~/Documents/conceptify/projects` (FR-7.3). */
   autoProjectBaseDir: string | null;
+  /** Provider families whose models appear in the catalog pickers (epic
+   *  conceptify-e7m, bead e7m.6). Serialized from a Rust `BTreeSet<String>`
+   *  (sorted array). Serde-defaults to `["anthropic", "openai"]` when absent, so
+   *  a settings blob written before this field existed still deserializes; we
+   *  always send it back so the Settings suite toggles persist. */
+  enabledProviders: string[];
 }
 
 /** Read the agent settings (stored overrides merged over code defaults, or pure
@@ -386,7 +392,95 @@ export function setAgentSettings(settings: AgentSettings): Promise<void> {
 }
 
 /** Reset to code defaults (FR-7.4): deletes the stored override and returns the
- *  now-default settings. */
+ *  now-default settings. The OpenRouter key lives in its own settings row and is
+ *  deliberately NOT cleared by a reset (bead e7m.7). */
 export function resetAgentSettings(): Promise<AgentSettings> {
   return invoke<AgentSettings>("reset_agent_settings");
+}
+
+// ---------------------------------------------------------------------------
+// Model catalog + routing options (epic conceptify-e7m — beads e7m.6/e7m.7).
+//
+// The live, provider-grouped model catalog the Settings pickers (e7m.3) and the
+// point-of-ask override (e7m.4) build on, plus the routing-adjacent options
+// (adapter keys, per-purpose default models, whether an OpenRouter key is set).
+// These mirror the Rust `conceptify_types::Catalog*` (camelCase serde) and the
+// `AgentOptionsDto` (commands.rs) exactly — casing matches the Rust `#[serde]`
+// attributes, so no runtime remapping is needed.
+// ---------------------------------------------------------------------------
+
+/** One normalized catalog model. `id` is the execution id (a bare native id for
+ *  the claude/codex routes, an OpenRouter slug for the OpenRouter route);
+ *  `provider` is the family used by the suite toggles; `openrouterRunnable` is
+ *  true when OpenRouter lists this exact id. Mirrors `CatalogModel`. */
+export interface CatalogModel {
+  id: string;
+  provider: string;
+  displayName: string;
+  /** Max input context window in tokens, when the source reports one
+   *  (`skip_serializing_if` on the Rust side means it may be absent). */
+  contextWindow?: number | null;
+  openrouterRunnable: boolean;
+}
+
+/** One provider family with its whole-catalog model count and enabled flag —
+ *  powers the settings suite toggles. Mirrors `CatalogProvider`. */
+export interface CatalogProvider {
+  provider: string;
+  modelCount: number;
+  enabled: boolean;
+}
+
+/** The catalog filtered to the enabled provider suites, plus every provider with
+ *  counts, when it was fetched, and where the served copy came from. Mirrors
+ *  `CatalogResponse`. */
+export interface CatalogResponse {
+  /** RFC3339 timestamp the served catalog was fetched from the network. */
+  fetchedAt: string;
+  /** `live` (fetched this call), `cache` (disk cache), or `snapshot` (bundled
+   *  offline fallback). */
+  source: string;
+  /** Chat-capable models whose provider is enabled, sorted by provider then id. */
+  models: CatalogModel[];
+  /** Every provider in the full catalog, with counts + enabled flag. */
+  providers: CatalogProvider[];
+}
+
+/** The current catalog filtered to the enabled provider suites (no network —
+ *  reads the warm disk cache / bundled snapshot). Always succeeds. */
+export function getModelCatalog(): Promise<CatalogResponse> {
+  return invoke<CatalogResponse>("get_model_catalog");
+}
+
+/** Force a live re-fetch of the catalog and update the disk cache (the Settings
+ *  "Refresh" action). Failure-silent server-side: a network error degrades to
+ *  the cache/snapshot and still resolves (the returned `source` reveals which),
+ *  so callers never show an error dialog. */
+export function refreshModelCatalog(): Promise<CatalogResponse> {
+  return invoke<CatalogResponse>("refresh_model_catalog");
+}
+
+/** UI-friendly view of the run-selection options (epic conceptify-e7m): the
+ *  configured adapter KEYS, the default adapter, the per-purpose default models,
+ *  and whether an OpenRouter key is stored. Mirrors `AgentOptionsDto`. */
+export interface AgentOptions {
+  adapters: string[];
+  defaultAdapter: string;
+  models: PurposeModels;
+  /** Whether an OpenRouter API key is stored (bead e7m.7) — the only
+   *  key-derived fact that ever reaches the frontend. */
+  openRouterKeySet: boolean;
+}
+
+export function getAgentOptions(): Promise<AgentOptions> {
+  return invoke<AgentOptions>("get_agent_options");
+}
+
+/** Store (`key`) or clear (`null`/blank) the OpenRouter API key (bead e7m.7).
+ *  Write-only by design: no command ever returns the key — the frontend learns
+ *  only `openRouterKeySet` from {@link getAgentOptions}. Stored outside the
+ *  agent-settings blob, so {@link resetAgentSettings} leaves it intact. The
+ *  backend rejects an empty/whitespace-only key. */
+export function setOpenRouterApiKey(key: string | null): Promise<void> {
+  return invoke<void>("set_openrouter_api_key", { key });
 }
