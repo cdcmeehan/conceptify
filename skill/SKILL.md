@@ -36,7 +36,7 @@ Read these before authoring — they are the contract, not background:
   block.
 - **`references/self-review.md`** — the pre-save visual self-review loop
   (headless render + screenshot inspection recipe + review checklist).
-  Read it before step 5; it is the FR-6.3 gate on every artifact.
+  Read it before step 6; it is the FR-6.3 gate on every artifact.
 - **`references/follow-ups.md`** — the house rules for headless follow-up
   runs (answering reader comments via `resolve-comment`, and apply-mode
   updates that publish a new artifact version). Read it when a run's prompt
@@ -91,27 +91,24 @@ Output: `{"threadId":"<uuid>","slug":"<thread-slug>"}`. Create the thread
 intended UX. Keep the `--question` string: it must reappear verbatim in
 the artifact's `<meta name="cfy:question">`.
 
-### 4. Author the artifact
+### 4. Choose the detail level
 
-The bulk of the work. Write the file to a temp path (e.g. under
-`$TMPDIR`), **never into the target repo** — the app copies it into its
-own central storage on save.
-
-**Size the effort first.** Before you research, classify the question so
-the artifact matches its weight — this is the difference between a
-two-minute answer and an eight-minute diagram tour for a one-line
-question. Three tiers:
+**First, size the question.** Before anything else, classify it — this is
+the difference between a two-minute answer and an eight-minute diagram tour
+for a one-line question. This classification does double duty: it is the
+artifact's target depth *and* the recommendation you show the user. Three
+tiers:
 
 - **COMPACT** — a single concept, a bit of syntax, a definition, a "what
   does X mean / do" question. Target **300–800 words**. Diagrams **only**
   if structure genuinely beats prose — usually **none**, occasionally one
   small bespoke SVG; Shiki-highlighted code blocks are fine and often
   carry the answer. No task-list ceremony, no multi-diagram tour, and a
-  **lightweight** pre-save review (see step 5). A compact artifact should
+  **lightweight** pre-save review (see step 6). A compact artifact should
   be authored, reviewed, and saved in a couple of minutes.
 - **STANDARD** — a subsystem, a flow, a "how does X work". The default
-  treatment described in the rest of this section: ~1,000–2,500 words with
-  2–5 visuals.
+  treatment (the structure and quality guidance in step 5): ~1,000–2,500
+  words with 2–5 visuals.
 - **DEEP** — an architecture tour or a multi-system walkthrough. The full
   treatment: more diagrams, longer, several code walkthroughs.
 
@@ -119,7 +116,108 @@ question. Three tiers:
 question. Under-building is cheap — the reader can comment to interrogate
 any point deeper, which is the whole point of the product loop;
 over-building a small question into a slow, diagram-heavy artifact is the
-failure this step exists to prevent.
+failure this step exists to prevent. This bias *is* the auto-classification;
+it stands whenever the user doesn't override it below.
+
+**Then decide who picks the depth — the user, or your auto-classification.**
+
+**Interactive sessions ask once.** When a human is at the keyboard (a
+normal Claude Code session where the user typed "explain X in conceptify")
+**and** the invocation does not already state a depth preference, ask —
+once, before authoring — using the **AskUserQuestion** tool. One question,
+three options, Balanced recommended:
+
+- Header: `Detail level`. Question text surfaces your auto-classification
+  as a hint, e.g. *"How much detail? (For this one I'd suggest **Balanced**
+  — it reads as a STANDARD question.)"* — substitute the tier you classified.
+- Options **in this order** — AskUserQuestion has no "default" field, so you
+  recommend by putting Balanced **first** and saying so in its description:
+  1. **Balanced** — *"Recommended. My suggested depth
+     (<COMPACT|STANDARD|DEEP> for this question) at balanced effort."*
+  2. **Quick & simple** — *"A short, to-the-point artifact. Fast."*
+  3. **Very detailed** — *"A thorough, diagram-rich deep dive. Slower."*
+
+Map the answer to a **sizing tier** and an **authoring model**:
+
+| Choice | Sizing | Authoring model |
+|---|---|---|
+| **Quick & simple** | **COMPACT** (overrides a higher auto-class) | fast / haiku-class |
+| **Balanced** (default) | the **auto-classified** tier above (bias-to-COMPACT stands) | the session model |
+| **Very detailed** | **DEEP** | top / opus- or fable-class |
+
+If the user dismisses the question without choosing, treat it as **Balanced**.
+
+**Explicit depth in the invocation → skip the question.** If the request
+already states how much detail it wants, honor it and do **not** ask:
+- "quick", "quick answer", "just briefly", "simple", "tl;dr", "short",
+  "one-liner" → **Quick & simple**.
+- "in depth", "in detail", "very detailed", "thorough", "deep dive",
+  "comprehensive", "full walkthrough" → **Very detailed**.
+- no depth signal, interactive session → ask (above).
+
+**Headless / non-interactive runs never ask.** If no human is present to
+answer — every path in `references/follow-ups.md` (answer mode, apply mode,
+in-app asks) and any run launched by the app or another agent — **do not
+call AskUserQuestion and do not delegate**: author at the **auto-classified**
+tier on the **session model**, exactly as this flow did before this step
+existed. The detail-level question is an interactive-only affordance; a
+headless run must stay prompt-free end to end (it has no one to prompt). If
+you are ever unsure whether a human is present, assume headless and skip.
+
+**Influencing the model (Quick / Very detailed).** An interactive session
+cannot switch its own model mid-run, so to honor the *fast-model* and
+*top-model* halves of Quick and Very detailed, **delegate the authoring
+step (step 5) to a subagent launched on the target model** — Claude Code's
+Task/Agent tool takes a `model` override (`haiku`, `sonnet`, `opus`,
+`fable`) plus `subagent_type: "general-purpose"` (full toolset). Delegate
+**only when it actually changes the model**:
+
+- **Quick & simple** → unless you are already a fast model, launch a
+  `general-purpose` subagent with `model: "haiku"` to author. If you are
+  already light, just author COMPACT yourself.
+- **Balanced** → never delegate; author yourself on the session model.
+- **Very detailed** → unless you are already top-tier, launch a
+  `general-purpose` subagent with `model: "opus"` (or `"fable"`). If you
+  are already top-tier, just author DEEP yourself.
+
+Depth is applied in **every** case; delegation only changes *which model*
+authors, so skipping it (because the session model already matches) still
+produces the right-sized artifact.
+
+The subagent starts fresh — its prompt must carry everything it needs:
+- the **fixed sizing tier** (COMPACT or DEEP) and an explicit instruction to
+  **author at that tier and NOT ask any detail-level question** (it is not
+  interactive — this both keeps headless prompt-free and prevents recursion);
+- that it should follow `~/.claude/skills/conceptify/SKILL.md` **from step 5
+  (Author) through step 7 (Save)** — research, author, run the full step-6
+  self-review, then `save-artifact` itself;
+- the ids already created in steps 2–3: the **projectId**, the **threadId**
+  (it saves version 1 into this *existing* thread — it must **not** create a
+  new one), the **verbatim question** string (for `cfy:question`), and the
+  **repo path** (its working directory and `ensure-project --dir`);
+- the exact **`cfy:generated-by`** value to stamp — `claude-code/<model>`
+  for the model you launched it on (e.g. `claude-code/haiku`). A subagent
+  does not reliably know its own model, so you must tell it; this is what
+  makes the meta reflect the *actual* authoring model.
+
+The delegated artifact goes through the **same pipeline** — the step-6
+self-review gate and `save-artifact` validation apply unchanged; delegation
+weakens nothing. When the subagent returns, confirm it saved (the thread now
+shows the artifact) before reporting to the user.
+
+**If delegation is impractical or would degrade quality**, fall back to
+**depth-only** influence: author the chosen tier yourself on the session
+model, and stamp `cfy:generated-by` with your *actual* model — never claim a
+model you did not run on. Say in your reply that you fell back and why.
+
+### 5. Author the artifact
+
+The bulk of the work. Write the file to a temp path (e.g. under
+`$TMPDIR`), **never into the target repo** — the app copies it into its
+own central storage on save. Author to the **sizing tier settled in step 4**
+(COMPACT / STANDARD / DEEP) — its word/visual budget governs everything
+below. (When step 4 delegated authoring to a subagent, that subagent runs
+steps 5–7 on the chosen model, following exactly these instructions.)
 
 **Research first.** Read the actual code before writing a word. The
 artifact must be true of *this* codebase: real file paths, real type and
@@ -145,7 +243,7 @@ of how such systems usually work.
 **Quality dos and don'ts:**
 
 - Aim for genuine understanding, not a README. The word/visual budget
-  follows the sizing tier above: a STANDARD question runs ~1,000–2,500
+  follows the sizing tier from step 4: a STANDARD question runs ~1,000–2,500
   words plus 2–5 visuals; a COMPACT one runs 300–800 words with few or no
   diagrams. Depth over breadth; cut anything that doesn't serve the
   question. Never pad — and never inflate a compact answer to hit the
@@ -170,7 +268,9 @@ reminder, not a substitute):
 - [ ] `<!doctype html>`, `<meta charset="utf-8">` first in `<head>`,
       viewport meta, non-empty `<title>`.
 - [ ] `cfy:question` (verbatim from step 3), `cfy:version` (`1` for a new
-      thread), `cfy:generated-by` (`claude-code/<model>`) metas.
+      thread), `cfy:generated-by` (`claude-code/<model>` — the model that
+      *actually* authored this artifact; when step 4 delegated authoring,
+      it is the delegate's model, not the session's) metas.
 - [ ] First `<style>` = `design-system.css` contents verbatim; second
       `<style>` = adapter CSS from rendering.md + artifact-specific rules.
 - [ ] `data-cfy-id` on every `h1`–`h4`, every figure, and every
@@ -197,7 +297,7 @@ reminder, not a substitute):
   from-state** — no opacity-0 fade-ins, no draw-ins from invisible
   strokes. Transform-only reveals (like the scaffold's `.cfy-reveal`).
 
-### 5. Pre-save review
+### 6. Pre-save review
 
 Two passes, both required. Do not save until both are clean.
 
@@ -230,7 +330,7 @@ The exact copy-pasteable `agent-browser` recipe (with the mechanical
 horizontal-overflow check) and the full checklist live in
 **`references/self-review.md`** — follow it.
 
-### 6. Save and verify
+### 7. Save and verify
 
 ```bash
 conceptify save-artifact --thread <threadId> --file <path>.html

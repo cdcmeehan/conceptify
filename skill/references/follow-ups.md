@@ -10,6 +10,13 @@ limits. **Where this file and your prompt ever seem to disagree, the
 prompt wins** — it is the exact per-run contract, and the app tests it
 verbatim.
 
+Every run described here is **non-interactive**: there is no human at the
+keyboard. Never prompt, and never ask SKILL.md step 4's detail-level
+question (Quick / Balanced / Very detailed) — that affordance is
+interactive-only and does not apply to any follow-up, apply, or in-app-ask
+run. These runs modify an existing artifact from their prompt's contract;
+they do not enter the step-4 authoring flow at all.
+
 Contents: [How a run works](#how-a-follow-up-run-works) ·
 [Reading anchors](#reading-anchors) · [Answer mode](#answer-mode) ·
 [Apply mode](#apply-mode) · [Toolset limits](#toolset-limits) ·
