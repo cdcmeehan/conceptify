@@ -15,7 +15,7 @@ where possible). Worth building *before* content piles up. (PRD Phase 2 lists
 this; index maintenance hooks belong in `save-artifact` and the comment
 mutation paths.)
 
-## 2. Model/depth picker at the point of asking
+## 2. Model/depth picker at the point of asking — **picked up: epic `conceptify-e7m`**
 
 Per-purpose models exist in settings (`followUp` / `artifactUpdate` /
 `inAppAsk`) but are invisible in the moment. Add a small picker on the ask
