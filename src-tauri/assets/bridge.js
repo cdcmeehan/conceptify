@@ -319,12 +319,54 @@
     ":where([data-cfy-id]:hover) { outline: 1px dashed rgba(128,128,128,0.6); outline-offset: 2px; }",
     // Nicer, theme-following color where color-mix is supported (Safari 16.2+).
     ":where([data-cfy-id]:hover) { outline: 1px dashed color-mix(in srgb, currentColor 35%, transparent); }",
-    // Highlight decorations for existing comment anchors (shell-commanded).
-    ":where(span[data-cfy-hl='text']) { background-color: rgba(255, 196, 0, 0.28); border-radius: 2px; }",
-    ":where([data-cfy-hl='element']) { outline: 2px solid rgba(255, 170, 0, 0.55); outline-offset: 3px; }",
-    // Scroll-to-anchor attention pulse (opacity: works for HTML and SVG).
+
+    // ---- Saved comment highlights (bead conceptify-vu1.3) ------------------
+    // Warm terracotta family (coheres with the shell/artifact accent) tuned
+    // for VISIBILITY first. Still zero-specificity :where() so the artifact's
+    // own CSS wins. These are the LIGHT-theme values; the prefers-color-scheme
+    // block at the very end re-tints them for dark (it must stay last so its
+    // equal-specificity rules win the cascade in dark mode).
+    //
+    // Text: a translucent fill gives the at-a-glance highlighter read on
+    // prose, and an OPAQUE bottom-border accent keeps the mark visible where
+    // the fill is swallowed by a tinted ground (Shiki code blocks, callouts,
+    // tables). The fill stays translucent so the underlying ink/syntax colour
+    // shows through and highlighted text keeps ~AA legibility in both themes.
+    // (border-bottom on an inline box paints per wrapped line and does not
+    // change line-box height, so it is layout-neutral / non-destructive.)
+    ":where(span[data-cfy-hl='text']) { background-color: rgba(232, 126, 52, 0.32); border-bottom: 2px solid rgba(138, 63, 28, 0.95); border-radius: 2px; }",
+    // Element: two cheap, transform/opacity-free layers — a solid accent
+    // outline offset off the box, plus a soft translucent ring (box-shadow,
+    // which follows the element's own border-radius) so the mark separates
+    // from any artifact border it sits beside instead of doubling it up.
+    ":where([data-cfy-hl='element']) { outline: 2px solid rgba(163, 77, 36, 0.9); outline-offset: 3px; box-shadow: 0 0 0 6px rgba(232, 126, 52, 0.2); }",
+
+    // Live drag selection. ::selection is a pseudo-ELEMENT, so it cannot be
+    // wrapped in :where() (pseudo-elements are invalid there) — this is the one
+    // deliberate exception to this file's zero-specificity rule. We keep it as
+    // minimal as possible (a bare, element-less ::selection = specificity
+    // 0-0-1) and inject it last, so it colours the drag in artifacts that ship
+    // no ::selection of their own, while an author who wants their own can
+    // still win with any element-qualified rule (e.g. `body ::selection`).
+    // Colour is the same terracotta family as the saved highlight, a shade
+    // stronger so the active drag pops.
+    "::selection { background-color: rgba(232, 126, 52, 0.42); }",
+
+    // Scroll-to-anchor attention pulse. Opacity works for HTML *and* SVG and
+    // is colour-agnostic, so it stays coherent with the new tints — the pulsed
+    // target already carries the terracotta highlight above.
     "@keyframes cfy-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }",
     ":where([data-cfy-pulse]) { animation: cfy-pulse 0.6s ease-in-out 2; }",
+
+    // Dark re-tint (prefers-color-scheme resolves inside the artifact iframe —
+    // artifacts are dual-theme by contract). Lighter terracotta, slightly less
+    // fill (protects light syntax text over vitesse-dark), brighter accents for
+    // punch on the warm-charcoal ground. LAST so these win in dark mode.
+    "@media (prefers-color-scheme: dark) {" +
+      " :where(span[data-cfy-hl='text']) { background-color: rgba(224, 152, 99, 0.26); border-bottom-color: rgba(232, 169, 124, 0.95); }" +
+      " :where([data-cfy-hl='element']) { outline-color: rgba(224, 152, 99, 0.95); box-shadow: 0 0 0 6px rgba(224, 152, 99, 0.24); }" +
+      " ::selection { background-color: rgba(224, 152, 99, 0.4); }" +
+      " }",
   ].join("\n");
   (document.head || document.documentElement).appendChild(style);
 
