@@ -7,12 +7,16 @@
 
 import { useState } from "preact/hooks";
 import { appStore } from "../store/appStore";
+import { ModelOverridePicker, runOverrideOf } from "./ModelOverridePicker";
 
 export function NewThreadComposer({ onClose }: { onClose: () => void }) {
   const [title, setTitle] = useState("");
   const [question, setQuestion] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Per-invocation model override (bead e7m.4): null = the settings default for
+  // the in-app-ask purpose. Sent as run_override only when it differs.
+  const [modelOverride, setModelOverride] = useState<string | null>(null);
 
   const canSubmit = question.trim().length > 0 && !submitting;
 
@@ -22,7 +26,11 @@ export function NewThreadComposer({ onClose }: { onClose: () => void }) {
     setSubmitting(true);
     setError(null);
     try {
-      await appStore.askFromApp(title.trim() === "" ? null : title.trim(), question.trim());
+      await appStore.askFromApp(
+        title.trim() === "" ? null : title.trim(),
+        question.trim(),
+        runOverrideOf(modelOverride),
+      );
       onClose();
     } catch (err) {
       setError(String(err));
@@ -67,18 +75,28 @@ export function NewThreadComposer({ onClose }: { onClose: () => void }) {
       {error != null && (
         <p class="break-words text-xs text-danger">{error}</p>
       )}
-      <div class="flex items-center justify-end gap-1.5">
-        <button
-          type="button"
-          onClick={onClose}
+      <div class="flex items-center justify-between gap-2">
+        <ModelOverridePicker
+          purpose="inAppAsk"
+          value={modelOverride}
+          onChange={setModelOverride}
           disabled={submitting}
-          class="cfy-btn cfy-btn-ghost"
-        >
-          Cancel
-        </button>
-        <button type="submit" disabled={!canSubmit} class="cfy-btn cfy-btn-primary px-3">
-          {submitting ? "Starting…" : "Ask"}
-        </button>
+          menuAlign="left"
+          ariaLabel="Model for this question"
+        />
+        <div class="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={submitting}
+            class="cfy-btn cfy-btn-ghost"
+          >
+            Cancel
+          </button>
+          <button type="submit" disabled={!canSubmit} class="cfy-btn cfy-btn-primary px-3">
+            {submitting ? "Starting…" : "Ask"}
+          </button>
+        </div>
       </div>
     </form>
   );

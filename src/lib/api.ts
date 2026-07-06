@@ -185,6 +185,24 @@ export function openArtifactInBrowser(threadId: string): Promise<string> {
  *  artifact). */
 export type RunMode = "answer" | "apply" | "ask";
 
+/**
+ * Per-invocation model/adapter override for a single run (epic conceptify-e7m,
+ * beads e7m.1/e7m.4). camelCase to match the Rust `RunOverride` serde
+ * (`settings.rs`). The point-of-ask picker only ever sets `model` — the adapter
+ * is DERIVED from the model's provider by routing.rs; `adapter` stays available
+ * as the backend's advanced escape hatch (bypasses routing) but no UI sets it.
+ *
+ * Passed as the flow commands' `run_override` argument. It must be sent ONLY
+ * when it differs from the settings default: omitting it (or passing `null`)
+ * leaves the spawned run override-free, so the run row keeps tracking settings
+ * and a later retry re-derives the CURRENT defaults (bead e7m.1). The picker's
+ * {@link runOverrideOf} helper enforces "null unless it truly differs".
+ */
+export interface RunOverride {
+  adapter?: string;
+  model?: string;
+}
+
 /** Terminal + initial run states (docs/api.md "Run events"). `failed` and
  *  `timeout` are the same error class for UI purposes; the distinction only
  *  changes the message. */
@@ -210,8 +228,16 @@ export interface RunStarted {
  * Rejects (with a user-facing message) when the thread has no artifact, no open
  * comments, or already has an active run (FR-4.9).
  */
-export function askFollowUps(threadId: string): Promise<RunStarted> {
-  return invoke<RunStarted>("ask_follow_ups", { thread_id: threadId });
+export function askFollowUps(
+  threadId: string,
+  runOverride?: RunOverride | null,
+): Promise<RunStarted> {
+  return invoke<RunStarted>("ask_follow_ups", {
+    thread_id: threadId,
+    // `null` deserializes to `Option::None` in Rust — identical to omitting it,
+    // i.e. current behavior. Only a real override reaches the run row.
+    run_override: runOverride ?? null,
+  });
 }
 
 /**
@@ -225,10 +251,15 @@ export function askFollowUps(threadId: string): Promise<RunStarted> {
  * the target is a reply, the target root isn't open, a run is already active
  * (FR-4.9), or the agent/CLI is missing.
  */
-export function askSingleComment(threadId: string, rootCommentId: string): Promise<RunStarted> {
+export function askSingleComment(
+  threadId: string,
+  rootCommentId: string,
+  runOverride?: RunOverride | null,
+): Promise<RunStarted> {
   return invoke<RunStarted>("ask_single_comment", {
     thread_id: threadId,
     root_comment_id: rootCommentId,
+    run_override: runOverride ?? null,
   });
 }
 
@@ -238,10 +269,15 @@ export function askSingleComment(threadId: string, rootCommentId: string): Promi
  * viewer refreshes live via `artifact-updated` and the comments transition to
  * `applied`. The thread shows `updating` while the run is in flight.
  */
-export function applyToArtifact(threadId: string, commentIds: string[]): Promise<RunStarted> {
+export function applyToArtifact(
+  threadId: string,
+  commentIds: string[],
+  runOverride?: RunOverride | null,
+): Promise<RunStarted> {
   return invoke<RunStarted>("apply_to_artifact", {
     thread_id: threadId,
     comment_ids: commentIds,
+    run_override: runOverride ?? null,
   });
 }
 
@@ -304,11 +340,13 @@ export function askFromApp(
   projectId: string,
   title: string | null,
   question: string,
+  runOverride?: RunOverride | null,
 ): Promise<AskStarted> {
   return invoke<AskStarted>("ask_from_app", {
     project_id: projectId,
     title: title ?? null,
     question,
+    run_override: runOverride ?? null,
   });
 }
 

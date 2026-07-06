@@ -49,6 +49,7 @@ import { artifactBridge } from "../lib/bridge";
 import type { ActiveRunState, CommentChain, RunFailureState } from "../store/appStore";
 import { appStore, groupComments } from "../store/appStore";
 import { CommentComposer } from "./CommentComposer";
+import { ModelOverridePicker, runOverrideOf } from "./ModelOverridePicker";
 
 type Filter = "all" | CommentStatus;
 
@@ -120,6 +121,11 @@ export function CommentsSidebar({
   // the FR-4.9 guard.
   const [actionError, setActionError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  // Per-invocation model overrides for the two batch actions (bead e7m.4). Each
+  // is null until the user overrides; sent as run_override only when non-null.
+  // Per-comment "Ask now" carries its own override, scoped to its ChainItem.
+  const [followUpOverride, setFollowUpOverride] = useState<string | null>(null);
+  const [applyOverride, setApplyOverride] = useState<string | null>(null);
 
   // Threaded view (epic conceptify-6xi): group the flat list into root chains.
   // Filters + counts operate on ROOT status only — a reply always renders with
@@ -189,15 +195,19 @@ export function CommentsSidebar({
   }
 
   function onAskFollowUps() {
-    void startRunAction(() => appStore.askFollowUps(threadId));
+    void startRunAction(() => appStore.askFollowUps(threadId, runOverrideOf(followUpOverride)));
   }
 
-  function onAskNow(rootId: string) {
-    void startRunAction(() => appStore.askSingleComment(threadId, rootId));
+  function onAskNow(rootId: string, override: string | null) {
+    void startRunAction(() =>
+      appStore.askSingleComment(threadId, rootId, runOverrideOf(override)),
+    );
   }
 
-  function onApplyComments(commentIds: string[]) {
-    void startRunAction(() => appStore.applyToArtifact(threadId, commentIds));
+  function onApplyComments(commentIds: string[], override: string | null) {
+    void startRunAction(() =>
+      appStore.applyToArtifact(threadId, commentIds, runOverrideOf(override)),
+    );
   }
 
   function scrollTo(comment: Comment) {
@@ -267,42 +277,65 @@ export function CommentsSidebar({
         {headerRun != null ? (
           <RunStatusBlock run={headerRun} comments={comments} />
         ) : (
-          <div class="flex flex-wrap gap-1.5">
-            <button
-              type="button"
-              onClick={onAskFollowUps}
-              disabled={!canAsk}
-              title={
-                !runIdle
-                  ? "A run is already in progress"
-                  : viewerVersion == null
-                    ? "Available once the thread has an artifact"
-                    : counts.open === 0
-                      ? "No open comments to answer"
-                      : "Answer every open comment in the sidebar (the artifact is not modified)"
-              }
-              class="cfy-btn cfy-btn-primary flex-1 py-1.5"
-            >
-              Ask follow-ups
-              {counts.open > 0 && (
-                <span class="tabular-nums opacity-80">({counts.open})</span>
-              )}
-            </button>
-            {counts.answered > 0 && (
+          // Each batch action pairs its button with a compact model-override
+          // pill (bead e7m.4). Stacked so the pill has room to show the
+          // effective model + route without crowding the button label.
+          <div class="flex flex-col gap-1.5">
+            <div class="flex items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => onApplyComments([])}
-                disabled={!canApply}
+                onClick={onAskFollowUps}
+                disabled={!canAsk}
                 title={
                   !runIdle
                     ? "A run is already in progress"
-                    : "Apply every answered comment to the artifact (saves a new version)"
+                    : viewerVersion == null
+                      ? "Available once the thread has an artifact"
+                      : counts.open === 0
+                        ? "No open comments to answer"
+                        : "Answer every open comment in the sidebar (the artifact is not modified)"
                 }
-                class="cfy-btn cfy-btn-accent flex-1 py-1.5"
+                class="cfy-btn cfy-btn-primary flex-1 py-1.5"
               >
-                Apply all answered
-                <span class="tabular-nums opacity-80">({counts.answered})</span>
+                Ask follow-ups
+                {counts.open > 0 && (
+                  <span class="tabular-nums opacity-80">({counts.open})</span>
+                )}
               </button>
+              <ModelOverridePicker
+                purpose="followUp"
+                value={followUpOverride}
+                onChange={setFollowUpOverride}
+                disabled={!canAsk}
+                menuAlign="right"
+                ariaLabel="Model for follow-up answers"
+              />
+            </div>
+            {counts.answered > 0 && (
+              <div class="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onApplyComments([], applyOverride)}
+                  disabled={!canApply}
+                  title={
+                    !runIdle
+                      ? "A run is already in progress"
+                      : "Apply every answered comment to the artifact (saves a new version)"
+                  }
+                  class="cfy-btn cfy-btn-accent flex-1 py-1.5"
+                >
+                  Apply all answered
+                  <span class="tabular-nums opacity-80">({counts.answered})</span>
+                </button>
+                <ModelOverridePicker
+                  purpose="artifactUpdate"
+                  value={applyOverride}
+                  onChange={setApplyOverride}
+                  disabled={!canApply}
+                  menuAlign="right"
+                  ariaLabel="Model for artifact updates"
+                />
+              </div>
             )}
           </div>
         )}
@@ -345,8 +378,8 @@ export function CommentsSidebar({
                 viewerVersion={viewerVersion}
                 onScroll={scrollTo}
                 runIdle={runIdle}
-                onApply={(comment) => onApplyComments([comment.id])}
-                onAskNow={() => onAskNow(chain.root.id)}
+                onApply={(comment) => onApplyComments([comment.id], null)}
+                onAskNow={(override) => onAskNow(chain.root.id, override)}
                 inlineRun={inlineRunRootId === chain.root.id ? sidebarRun : null}
                 failedHighlight={failureRootId === chain.root.id}
               />
@@ -403,8 +436,9 @@ function ChainItem({
    *  disabled with a tooltip — so the FR-4.9 lockout is visible, not silent. */
   runIdle: boolean;
   onApply: (c: Comment) => void;
-  /** Fire an FR-4.6-style "Ask now" answer run for this (open) root. */
-  onAskNow: () => void;
+  /** Fire an FR-4.6-style "Ask now" answer run for this (open) root, with the
+   *  row's per-invocation model override (null = the settings default). */
+  onAskNow: (override: string | null) => void;
   /** The single-comment answer run currently targeting THIS root, or `null`.
    *  When set, the action slot is replaced by a compact inline run state. */
   inlineRun: ActiveRunState | null;
@@ -414,6 +448,12 @@ function ChainItem({
 }) {
   const { root, replies } = chain;
   const [replyOpen, setReplyOpen] = useState(false);
+  // Per-invocation model override for THIS root's "Ask now" (bead e7m.4). Kept
+  // local to the row and never persisted. `menuOpen` tracks the pill's popover
+  // so the card can relax its `overflow-hidden` (which would otherwise clip the
+  // dropdown) while it is open.
+  const [askNowOverride, setAskNowOverride] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const excerpt = anchorExcerpt(root.anchor);
   const status = STATUS_META[root.status] ?? STATUS_META.open;
@@ -454,7 +494,7 @@ function ChainItem({
 
   return (
     <li
-      class={`cfy-card overflow-hidden ${
+      class={`cfy-card group ${menuOpen ? "overflow-visible" : "overflow-hidden"} ${
         failedHighlight ? "border-danger/50" : ""
       }`}
     >
@@ -541,19 +581,40 @@ function ChainItem({
             </button>
           )}
           {showAskNow && (
-            <button
-              type="button"
-              onClick={onAskNow}
-              disabled={!runIdle}
-              title={
-                !runIdle
-                  ? "A run is already in progress"
-                  : "Answer just this comment now (the artifact is not modified)"
-              }
-              class="cfy-btn cfy-btn-secondary px-2 py-1 text-[11px]"
-            >
-              Ask now
-            </button>
+            <div class="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => onAskNow(askNowOverride)}
+                disabled={!runIdle}
+                title={
+                  !runIdle
+                    ? "A run is already in progress"
+                    : "Answer just this comment now (the artifact is not modified)"
+                }
+                class="cfy-btn cfy-btn-secondary px-2 py-1 text-[11px]"
+              >
+                Ask now
+              </button>
+              {/* Especially quiet (bead e7m.4): the override pill stays hidden
+                  until the row is hovered/focused, or once an override is set. */}
+              <div
+                class={`transition-opacity ${
+                  askNowOverride != null || menuOpen
+                    ? "opacity-100"
+                    : "opacity-0 group-hover:opacity-100 focus-within:opacity-100"
+                }`}
+              >
+                <ModelOverridePicker
+                  purpose="followUp"
+                  value={askNowOverride}
+                  onChange={setAskNowOverride}
+                  onOpenChange={setMenuOpen}
+                  disabled={!runIdle}
+                  menuAlign="right"
+                  ariaLabel="Model for this answer"
+                />
+              </div>
+            </div>
           )}
           {showReply && !replyOpen && (
             <button

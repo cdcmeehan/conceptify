@@ -17,6 +17,7 @@
 // it; Escape closes the popover only (it does not bubble to a parent overlay's
 // Escape-to-close). Safari/WKWebView-safe: no Chromium-only APIs.
 
+import type { ComponentChildren } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { CatalogModel } from "../lib/api";
 import { formatContextWindow, providerLabel } from "../lib/models";
@@ -24,6 +25,22 @@ import { formatContextWindow, providerLabel } from "../lib/models";
 interface ProviderGroup {
   provider: string;
   items: { model: CatalogModel; disabledReason: string | null }[];
+}
+
+/** What the default trigger renders, exposed to a custom {@link ModelComboboxProps.renderTrigger}
+ *  so the point-of-ask pill (bead e7m.4) can supply its own compact affordance
+ *  while reusing this component's popover/search/keyboard logic verbatim. */
+export interface ModelComboboxTriggerProps {
+  /** Whether the popover is open. */
+  open: boolean;
+  /** Toggle the popover (a no-op while `disabled`). */
+  toggle: () => void;
+  /** The catalog model matching `value`, or `null` for a custom/absent id. */
+  selected: CatalogModel | null;
+  /** The raw current value (may be a custom id or `""`). */
+  value: string;
+  /** Whether the control is disabled. */
+  disabled: boolean;
 }
 
 export interface ModelComboboxProps {
@@ -42,6 +59,17 @@ export interface ModelComboboxProps {
   placeholder?: string;
   /** Accessible label for the trigger (the visible <label> also associates). */
   ariaLabel?: string;
+  /** Replace the default full-width field trigger with a custom one (bead
+   *  e7m.4's compact pill). The popover, search, filtering and keyboard nav are
+   *  unchanged — only the trigger's appearance differs. */
+  renderTrigger?: (props: ModelComboboxTriggerProps) => ComponentChildren;
+  /** Positioning/width classes for the popover. Defaults to stretching to the
+   *  trigger width (`left-0 right-0`); the pill variant passes a fixed width and
+   *  an alignment so a narrow trigger still gets a comfortable menu. */
+  popoverClass?: string;
+  /** Notified whenever the popover opens/closes. Lets a clipping ancestor (the
+   *  comment card's `overflow-hidden`) relax while the menu is open. */
+  onOpenChange?: (open: boolean) => void;
 }
 
 export function ModelCombobox({
@@ -52,6 +80,9 @@ export function ModelCombobox({
   disabled = false,
   placeholder = "Select a model…",
   ariaLabel,
+  renderTrigger,
+  popoverClass,
+  onOpenChange,
 }: ModelComboboxProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -124,6 +155,14 @@ export function ModelCombobox({
     if (open) inputRef.current?.focus();
   }, [open]);
 
+  // Notify the host of open/close transitions without re-firing when only the
+  // callback identity changes (a ref keeps the effect keyed on `open` alone).
+  const onOpenChangeRef = useRef(onOpenChange);
+  onOpenChangeRef.current = onOpenChange;
+  useEffect(() => {
+    onOpenChangeRef.current?.(open);
+  }, [open]);
+
   // Close on outside click.
   useEffect(() => {
     if (!open) return;
@@ -190,54 +229,60 @@ export function ModelCombobox({
   const triggerLabel = selected ? selected.displayName : value !== "" ? value : placeholder;
   const isPlaceholder = selected == null && value === "";
 
+  const toggle = () => {
+    if (disabled) return;
+    setOpen((o) => !o);
+    setQuery("");
+  };
+
   let renderIndex = showCustom ? 1 : 0; // model options start after the custom row
 
   return (
     <div ref={rootRef} class="relative">
-      <button
-        type="button"
-        disabled={disabled}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-label={ariaLabel}
-        onClick={() => {
-          if (disabled) return;
-          setOpen((o) => !o);
-          setQuery("");
-        }}
-        class="cfy-input flex items-center justify-between gap-2 px-2.5 py-1.5 text-left text-sm disabled:opacity-55"
-      >
-        <span class={`min-w-0 flex-1 truncate ${isPlaceholder ? "text-muted" : "text-ink"}`}>
-          {triggerLabel}
-        </span>
-        <span class="flex shrink-0 items-center gap-1.5">
-          {selected != null ? (
-            <span class="cfy-chip bg-info-bg text-info">{providerLabel(selected.provider)}</span>
-          ) : value !== "" ? (
-            <span class="cfy-chip bg-warn-bg text-warn">custom</span>
-          ) : null}
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 12 12"
-            aria-hidden="true"
-            class="shrink-0 text-muted"
-          >
-            <path
-              d="M2.5 4.5L6 8l3.5-3.5"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
-        </span>
-      </button>
+      {renderTrigger ? (
+        renderTrigger({ open, toggle, selected, value, disabled })
+      ) : (
+        <button
+          type="button"
+          disabled={disabled}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          aria-label={ariaLabel}
+          onClick={toggle}
+          class="cfy-input flex items-center justify-between gap-2 px-2.5 py-1.5 text-left text-sm disabled:opacity-55"
+        >
+          <span class={`min-w-0 flex-1 truncate ${isPlaceholder ? "text-muted" : "text-ink"}`}>
+            {triggerLabel}
+          </span>
+          <span class="flex shrink-0 items-center gap-1.5">
+            {selected != null ? (
+              <span class="cfy-chip bg-info-bg text-info">{providerLabel(selected.provider)}</span>
+            ) : value !== "" ? (
+              <span class="cfy-chip bg-warn-bg text-warn">custom</span>
+            ) : null}
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 12 12"
+              aria-hidden="true"
+              class="shrink-0 text-muted"
+            >
+              <path
+                d="M2.5 4.5L6 8l3.5-3.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </span>
+        </button>
+      )}
 
       {open && (
         <div
-          class="cfy-popover absolute left-0 right-0 z-40 mt-1 flex max-h-80 flex-col overflow-hidden"
+          class={`cfy-popover absolute z-40 mt-1 flex max-h-80 flex-col overflow-hidden ${popoverClass ?? "left-0 right-0"}`}
           role="dialog"
         >
           <div class="border-b border-line p-1.5">

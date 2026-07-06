@@ -19,7 +19,7 @@
 
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../lib/api";
-import type { ArtifactVersion, Comment, Project, RunMode, Thread } from "../lib/api";
+import type { ArtifactVersion, Comment, Project, RunMode, RunOverride, Thread } from "../lib/api";
 
 /** Which artifact version the viewer shows: a concrete number (read-only
  *  history view) or `"latest"` (tracks new saves live, FR-2.4). */
@@ -446,8 +446,8 @@ class AppStore {
    * the run (with its target ids, the basis for per-comment progress) and
    * clears any previous failure panel.
    */
-  async askFollowUps(threadId: string): Promise<void> {
-    const started = await api.askFollowUps(threadId);
+  async askFollowUps(threadId: string, runOverride?: RunOverride | null): Promise<void> {
+    const started = await api.askFollowUps(threadId, runOverride);
     if (this.state.selectedThreadId !== started.thread_id) return;
     this.set({
       activeRun: {
@@ -471,8 +471,12 @@ class AppStore {
    * root's chain instead of the header batch block) and clears any prior
    * failure panel.
    */
-  async askSingleComment(threadId: string, rootCommentId: string): Promise<void> {
-    const started = await api.askSingleComment(threadId, rootCommentId);
+  async askSingleComment(
+    threadId: string,
+    rootCommentId: string,
+    runOverride?: RunOverride | null,
+  ): Promise<void> {
+    const started = await api.askSingleComment(threadId, rootCommentId, runOverride);
     if (this.state.selectedThreadId !== started.thread_id) return;
     this.set({
       activeRun: {
@@ -492,8 +496,12 @@ class AppStore {
    * all answered). Same throw/record contract as `askFollowUps`. The thread's
    * `updating` status chip arrives via the `thread-updated` event.
    */
-  async applyToArtifact(threadId: string, commentIds: string[]): Promise<void> {
-    const started = await api.applyToArtifact(threadId, commentIds);
+  async applyToArtifact(
+    threadId: string,
+    commentIds: string[],
+    runOverride?: RunOverride | null,
+  ): Promise<void> {
+    const started = await api.applyToArtifact(threadId, commentIds, runOverride);
     if (this.state.selectedThreadId !== started.thread_id) return;
     this.set({
       activeRun: {
@@ -515,11 +523,15 @@ class AppStore {
    * on an empty question / unknown project / missing agent. On success the new
    * thread is selected and its `ask` run tracked so progress lands immediately.
    */
-  async askFromApp(title: string | null, question: string): Promise<void> {
+  async askFromApp(
+    title: string | null,
+    question: string,
+    runOverride?: RunOverride | null,
+  ): Promise<void> {
     const projectId = this.state.selectedProjectId;
     if (projectId == null) throw new Error("select a project first");
 
-    const started = await api.askFromApp(projectId, title, question);
+    const started = await api.askFromApp(projectId, title, question, runOverride);
     // Make the new thread appear, then select it. `selectThread` clears viewer
     // state (incl. activeRun), so record the ask run AFTER selecting.
     await this.refetchThreads(projectId);
