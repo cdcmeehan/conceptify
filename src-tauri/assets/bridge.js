@@ -191,6 +191,12 @@
   // Boolean, not a pointer counter: a missed pointerup (e.g. release outside
   // the frame) self-heals on the next gesture rather than wedging suppression.
   var pointerDown = false;
+  // True while set_highlights mutates the DOM (wrap/unwrap/normalize fire
+  // selectionchange for a live selection even though the user did nothing).
+  // Without this guard, saving a comment re-reports the still-live selection
+  // ~SETTLE_MS later and the shell pops its toolbar right back up over the
+  // just-saved highlight (bead conceptify-vu1.4).
+  var selfMutation = false;
 
   document.addEventListener("pointerdown", function () {
     // A fresh pointer gesture supersedes any pending keyboard settle.
@@ -214,9 +220,32 @@
   }
 
   document.addEventListener("selectionchange", function () {
+    // Ignore selectionchange caused by our own highlight mutations — return
+    // BEFORE touching the timer so a genuinely pending user settle survives.
+    if (selfMutation) return;
     clearTimeout(selectionTimer);
     if (pointerDown) return; // mid-gesture: wait for release to report
     selectionTimer = setTimeout(reportSelection, SETTLE_MS);
+  });
+
+  // Escape cancels the selection (and with it the shell's action popover, via
+  // the ordinary selection_cleared path). Necessary because after a drag the
+  // artifact iframe holds keyboard focus, so the shell's own Escape handler
+  // never sees the key; the bridge translates it into the one thing it owns:
+  // clearing the live selection. The shell's dirty guard still applies — a
+  // composer with typed content ignores selection_cleared (and while typing,
+  // focus is in the shell textarea, so this handler doesn't run at all).
+  document.addEventListener("keydown", function (ev) {
+    try {
+      if (ev.key !== "Escape") return;
+      var sel = document.getSelection();
+      if (!sel || sel.isCollapsed) return;
+      sel.removeAllRanges();
+      clearTimeout(selectionTimer);
+      reportSelection(); // posts selection_cleared immediately (no settle lag)
+    } catch (e) {
+      /* never break the artifact */
+    }
   });
 
   function reportSelection() {
@@ -629,7 +658,20 @@
     if (!d || typeof d !== "object" || d.cfy !== 1 || typeof d.type !== "string") return;
     try {
       if (d.type === "set_highlights") {
-        setHighlights(Array.isArray(d.highlights) ? d.highlights : []);
+        // Suppress the selectionchange our own wrap/unwrap mutations fire for
+        // a live selection (see selfMutation above). selectionchange is queued
+        // as a task when the selection is perturbed (during the mutation), so
+        // it runs before this timeout clears the flag; 50ms of slack covers
+        // engines that coalesce/defer the event. Pointer-release reporting is
+        // NOT gated by this flag, so a user mid-drag loses nothing.
+        selfMutation = true;
+        try {
+          setHighlights(Array.isArray(d.highlights) ? d.highlights : []);
+        } finally {
+          setTimeout(function () {
+            selfMutation = false;
+          }, 50);
+        }
       } else if (d.type === "scroll_to_anchor") {
         scrollToAnchor(d);
       }
