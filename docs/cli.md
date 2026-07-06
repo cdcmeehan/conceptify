@@ -86,7 +86,8 @@ Checks all prerequisites needed for Conceptify to function properly (PRD FR-6.5)
 3. **d2 present**: Checks if `d2` is installed (hint: `brew install d2`).
 4. **dot present**: Checks if `dot` (graphviz) is installed (hint: `brew install graphviz`).
 5. **node present**: Checks if `node` is installed and version >= 20 (needed for Shiki; hint: `brew install node`).
-6. **Agent binary resolvable**: Checks if `claude` is found via login-shell lookup (`zsh -lc 'which claude'`) per PRD §5.1 (hint: install Claude Code; note that settings can override the binary path later).
+6. **Agent binary resolvable**: Checks if `claude` is found via login-shell lookup (`zsh -lc 'which claude'`) per PRD §5.1 (hint: install Claude Code; note that settings can override the binary path later). `claude` is the default adapter, so its absence **fails** doctor.
+7. **Codex binary resolvable** (informational): Checks if `codex` is found via the same login-shell lookup. Codex is an optional agent (only needed to route runs to OpenAI models — epic `conceptify-e7m`), so this check reports `ok: true` either way and never affects doctor's exit code; when missing, the detail says so and a hint is printed (`brew install codex` or `npm install -g @openai/codex`).
 
 **Output (stdout):**
 
@@ -127,8 +128,14 @@ Checks all prerequisites needed for Conceptify to function properly (PRD FR-6.5)
     {
       "name": "agent-binary-resolvable",
       "ok": true,
-      "detail": "claude is resolvable at /usr/local/bin/claude",
+      "detail": "claude (default agent) is resolvable at /usr/local/bin/claude",
       "hint": null
+    },
+    {
+      "name": "codex-binary-resolvable",
+      "ok": true,
+      "detail": "codex not found (optional — only needed to run OpenAI models)",
+      "hint": "Install codex: brew install codex (or: npm install -g @openai/codex)"
     }
   ]
 }

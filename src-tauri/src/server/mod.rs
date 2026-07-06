@@ -13,6 +13,7 @@
 
 mod artifacts_routes;
 mod auth;
+mod catalog_routes;
 mod comments_routes;
 mod net;
 mod open_routes;

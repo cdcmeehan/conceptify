@@ -420,3 +420,63 @@ pub struct UpdateCommentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_state: Option<String>,
 }
+
+// Model catalog API types (epic conceptify-e7m, bead e7m.6)
+//
+// The live, auto-refreshing model catalog the model-selection UI (settings
+// dropdowns e7m.3, point-of-ask picker e7m.4) and execution routing (e7m.7)
+// build on. Sourced from LiteLLM's model_prices_and_context_window.json and
+// OpenRouter's public /api/v1/models, normalized in `src-tauri/src/catalog.rs`.
+// Shared here so the CLI/frontend consume the same shape. All camelCase.
+
+/// One normalized model in the catalog. `id` is the **execution id**: the value
+/// handed to the agent — a bare native id (`claude-sonnet-5`, `gpt-5`) for the
+/// claude/codex routes, or an OpenRouter model slug (`google/gemini-3-pro`) for
+/// the OpenRouter route. `provider` is the model **family** used for the
+/// provider-suite toggles (`anthropic`, `openai`, `google`, `mistralai`, ...),
+/// derived from the source — never a backend-routing name like `bedrock`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogModel {
+    pub id: String,
+    pub provider: String,
+    /// Human-readable label for pickers (OpenRouter's `name`, else the id).
+    pub display_name: String,
+    /// Max input context window in tokens, when the source reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// True when this exact id is listed by OpenRouter's public `/models` — i.e.
+    /// runnable via the OpenRouter route. Bead e7m.7 consumes this to pick the
+    /// execution route (anthropic->claude CLI, openai->codex CLI, else->OpenRouter).
+    pub openrouter_runnable: bool,
+}
+
+/// One provider family with its total model count and whether it is currently
+/// enabled. Powers the settings suite toggles: `model_count` is over the WHOLE
+/// catalog (so a disabled family still shows e.g. "google (29)").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogProvider {
+    pub provider: String,
+    pub model_count: usize,
+    pub enabled: bool,
+}
+
+/// Response for `GET /api/v1/catalog/models`, its `POST .../refresh` sibling, and
+/// the matching Tauri commands: the models filtered to the enabled providers,
+/// the full provider list with counts, when the catalog was fetched, and where
+/// the served copy came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogResponse {
+    /// RFC3339 timestamp the served catalog was fetched from the network (the
+    /// bundled snapshot carries its build-time stamp).
+    pub fetched_at: String,
+    /// Where the served catalog came from: `live` (fetched this call), `cache`
+    /// (disk cache), or `snapshot` (bundled offline fallback).
+    pub source: String,
+    /// Chat-capable models whose provider is enabled, sorted by provider then id.
+    pub models: Vec<CatalogModel>,
+    /// Every provider in the full catalog, with counts + enabled flag.
+    pub providers: Vec<CatalogProvider>,
+}

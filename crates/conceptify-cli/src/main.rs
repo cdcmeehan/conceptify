@@ -34,7 +34,7 @@ Usage: conceptify <command> [args...]
 
 Commands:
   status                                              app/API health, version, port
-  doctor                                              check prerequisites (app, CLI, d2, dot, node, agent)
+  doctor                                              check prerequisites (app, CLI, d2, dot, node, agents)
   ensure-project --dir <path> [--name <name>]         find-or-create a project by directory
   create-thread  --project <id> --title <t> --question <q>   create a thread
   open           --thread <id> | --project <id>       focus the app on a project/thread
@@ -971,26 +971,54 @@ fn check_node_present() -> Check {
     }
 }
 
-/// Check if the agent binary (`claude`) is resolvable via a login shell.
-fn check_agent_binary_resolvable() -> Check {
-    // Use a login shell to ensure PATH is fully loaded (PRD §5.1).
+/// Resolve a binary via a login shell (`zsh -lc 'which <name>'`), so the check
+/// sees the user's full PATH the way the app's own lookup does (PRD §5.1).
+fn login_shell_which(name: &str) -> Option<String> {
     match Command::new("zsh")
         .arg("-lc")
-        .arg("which claude")
+        .arg(format!("which {}", name))
         .output()
     {
         Ok(output) if output.status.success() => {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Check::pass(
-                "agent-binary-resolvable",
-                format!("claude is resolvable at {}", path),
-            )
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
         }
-        _ => Check::fail(
+        _ => None,
+    }
+}
+
+/// Check if the default agent binary (`claude`) is resolvable via a login
+/// shell. This one FAILS doctor when missing — `claude` is the default adapter
+/// every zero-config run uses.
+fn check_agent_binary_resolvable() -> Check {
+    match login_shell_which("claude") {
+        Some(path) => Check::pass(
+            "agent-binary-resolvable",
+            format!("claude (default agent) is resolvable at {}", path),
+        ),
+        None => Check::fail(
             "agent-binary-resolvable",
             "claude not found via login shell (zsh -lc 'which claude')",
             "Install Claude Code (note: settings can override the binary path later)",
         ),
+    }
+}
+
+/// Check if the optional `codex` agent binary is resolvable (bead
+/// conceptify-e7m.2). Codex is only needed to route runs to OpenAI models, so
+/// its absence is reported as information — `ok` stays `true` either way and
+/// doctor's exit code is unaffected while `claude` remains the default agent.
+fn check_codex_binary_resolvable() -> Check {
+    match login_shell_which("codex") {
+        Some(path) => Check::pass(
+            "codex-binary-resolvable",
+            format!("codex (optional agent, OpenAI routes) is resolvable at {}", path),
+        ),
+        None => Check {
+            name: "codex-binary-resolvable".to_string(),
+            ok: true, // optional: absence must never fail doctor
+            detail: "codex not found (optional — only needed to run OpenAI models)".to_string(),
+            hint: Some("Install codex: brew install codex (or: npm install -g @openai/codex)".to_string()),
+        },
     }
 }
 
@@ -1014,17 +1042,20 @@ fn cmd_doctor() -> ExitCode {
         check_dot_present(),
         check_node_present(),
         check_agent_binary_resolvable(),
+        check_codex_binary_resolvable(),
     ];
 
-    // Print human-readable results to stderr.
+    // Print human-readable results to stderr. A hint is shown whenever one is
+    // present — informational passes (e.g. the optional codex agent missing)
+    // carry hints too, not just failures.
     for check in &checks {
         if check.ok {
             eprintln!("[✓] {}: {}", check.name, check.detail);
         } else {
             eprintln!("[✗] {}: {}", check.name, check.detail);
-            if let Some(hint) = &check.hint {
-                eprintln!("    Hint: {}", hint);
-            }
+        }
+        if let Some(hint) = &check.hint {
+            eprintln!("    Hint: {}", hint);
         }
     }
 
@@ -1203,7 +1234,7 @@ mod tests {
     fn check_pass_creates_correct_state() {
         let check = Check::pass("foo", "bar");
         assert_eq!(check.name, "foo");
-        assert_eq!(check.ok, true);
+        assert!(check.ok);
         assert_eq!(check.detail, "bar");
         assert!(check.hint.is_none());
     }
@@ -1212,7 +1243,7 @@ mod tests {
     fn check_fail_creates_correct_state() {
         let check = Check::fail("foo", "bar", "baz");
         assert_eq!(check.name, "foo");
-        assert_eq!(check.ok, false);
+        assert!(!check.ok);
         assert_eq!(check.detail, "bar");
         assert_eq!(check.hint, Some("baz".to_string()));
     }
@@ -1363,6 +1394,16 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["id"], "c-1");
         assert_eq!(arr[0]["anchor"]["cfy_id"], "sec-walkthrough");
+    }
+
+    #[test]
+    fn codex_check_is_informational_never_failing() {
+        // bead conceptify-e7m.2: codex is an OPTIONAL agent — whether or not
+        // it is installed on the machine running this test, the check must
+        // report ok=true so doctor's exit code never depends on it.
+        let check = check_codex_binary_resolvable();
+        assert!(check.ok, "codex absence must not fail doctor: {:?}", check);
+        assert_eq!(check.name, "codex-binary-resolvable");
     }
 
     #[test]

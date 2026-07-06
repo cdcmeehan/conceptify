@@ -9,10 +9,12 @@
 //! # Why an adapter template (G6)
 //!
 //! Every headless agent run (follow-ups, in-app asks, artifact updates) goes
-//! through a settings-defined command template so nothing is hardcoded — Phase 1
-//! ships and tests only the `claude` adapter, but a second adapter (e.g. Codex)
-//! can be added *purely via config* with no code change. Per-purpose model
-//! config satisfies "don't burn a frontier model on a small sidebar answer."
+//! through a settings-defined command template so nothing is hardcoded — the
+//! built-ins are `claude` (the default) and `codex` (bead `conceptify-e7m.2`;
+//! selected per-run via [`RunOverride`] or, later, provider routing —
+//! bead `conceptify-e7m.7`), and further adapters can still be added *purely
+//! via config* with no code change. Per-purpose model config satisfies "don't
+//! burn a frontier model on a small sidebar answer."
 //!
 //! # Storage & defaults philosophy (FR-7.4)
 //!
@@ -38,6 +40,14 @@
 //!                "--allowedTools", "Bash", "Edit", "Write", "Read", "Glob", "Grep",
 //!                "--disallowedTools", /* web + mutating-git + project-root writes,
 //!                                        see default_adapters() */ "..."],
+//!       "cwd": "{project_root}"
+//!     },
+//!     "codex": {
+//!       "command": "codex",
+//!       "args": ["exec", "--model", "{model}", "--sandbox", "workspace-write",
+//!                "-c", "sandbox_workspace_write.network_access=true",
+//!                "--skip-git-repo-check", "--ephemeral", "--ignore-user-config",
+//!                "--color", "never", "--", "{prompt}"],
 //!       "cwd": "{project_root}"
 //!     }
 //!   },
@@ -176,6 +186,89 @@ const SETTINGS_KEY: &str = "agent_settings";
 /// `Bash(git commit:*)` contains a space, so comma-joining is riskier); the
 /// two list flags sit *after* the positional `{prompt}` so they can never
 /// swallow it.
+///
+/// # The `codex` adapter (bead `conceptify-e7m.2`)
+///
+/// Every flag below was verified live against **codex-cli 0.142.0**
+/// (`codex --help` / `codex exec --help` + headless probes on this machine),
+/// never assumed from prior knowledge:
+///
+/// - `exec` — the non-interactive mode; its approval policy is implicitly
+///   `never` (`-a/--ask-for-approval` is not an `exec` flag, and the exec
+///   banner prints `approval: never`), so sandbox denials are returned to the
+///   model instead of hanging a headless run waiting for a human.
+/// - `--sandbox workspace-write` — the scoping core, and the OQ3 equivalent.
+///   Verified: writable roots are the working dir (`{project_root}`), `/tmp`
+///   and `$TMPDIR` (banner: `sandbox: workspace-write [workdir, /tmp,
+///   $TMPDIR]`; a `$HOME` write was denied, `mktemp -d` scratch writes
+///   succeeded). That is *kernel-enforced* (Seatbelt) filesystem containment —
+///   in that one dimension stronger than the claude template, whose allowed
+///   `Bash` can technically write anywhere and whose repo protection is
+///   tool-rule hygiene. The repo itself is writable here (claude denies
+///   `Edit`/`Write` on `{project_root}`): accepted as the bead's
+///   "repo-writable" level — every flow's prompt still forbids repo writes,
+///   and versioned artifacts/comments live outside the repo entirely.
+/// - `-c sandbox_workspace_write.network_access=true` — **required**.
+///   Verified: with the Seatbelt properly applied, `workspace-write` denies
+///   ALL network egress by default — loopback connects are refused, DNS
+///   fails, even local socket *binds* get `EPERM` — which would break every
+///   flow (the `conceptify` CLI reports back over `127.0.0.1`). With this
+///   key set, loopback and external egress both work (verified live). The
+///   resulting open-network posture matches the claude template's effective
+///   posture (its dedicated `WebFetch`/`WebSearch` tools are denied but its
+///   allowed `Bash` can `curl` freely); codex's native `web_search` tool is
+///   opt-in via `--search`, which we do not pass — parity with the claude
+///   `WebFetch`/`WebSearch` denies. A loopback-only mode does not exist on
+///   0.142.0 (`experimental_network.*` is unstable and out of scope, §9).
+///
+///   **Measurement hazard (recorded so it is never re-litigated):** codex's
+///   Seatbelt cannot nest inside another sandbox. Probes launched from an
+///   already-sandboxed shell (e.g. a coding agent's) observe a DEGRADED codex
+///   sandbox and wrongly conclude the network is open and the key unenforced
+///   — this bead's first probe round did exactly that. All flags here were
+///   re-verified from an unsandboxed parent, which is how the real app
+///   spawns agents.
+/// - **Mutating git** — codex 0.142.0 has no per-command deny (verified:
+///   `git commit` succeeds under `workspace-write`; execpolicy `.rules` files
+///   are user/project-scoped and inappropriate to ship into target repos), so
+///   unlike the claude template's `Bash(git …:*)` denies this stays
+///   **prompt-enforced only**. Recorded as the residual scoping difference.
+/// - `--skip-git-repo-check` — `exec` refuses to run outside a git repo
+///   without it; Conceptify project roots are not guaranteed to be repos and
+///   the claude adapter imposes no such restriction.
+/// - `--ephemeral` — headless runs must not pile session files into
+///   `~/.codex/sessions`; the full transcript already lands in the run log.
+/// - `--ignore-user-config` — the analog of claude's `--strict-mcp-config`,
+///   necessarily broader: the user's `~/.codex/config.toml` would otherwise
+///   spawn personal MCP servers, plugins, and `notify` hooks (observed live: a
+///   GUI notifier binary fired per turn) into every headless run. Auth is
+///   unaffected (it comes from `CODEX_HOME`; verified live) and CLI `-c`
+///   overrides still apply on top.
+/// - `--color never` — run logs must never contain ANSI escapes; piped stdout
+///   would disable color anyway (`auto`), this pins it deterministically.
+/// - `--` before `{prompt}` — `exec` has subcommands (`resume`, `review`) and
+///   takes the prompt positionally; the separator guarantees the prompt is
+///   never parsed as a flag or subcommand whatever its first token is.
+///
+/// **Output parsing decision (recorded per the bead):** plain stdout
+/// passthrough — deliberately NOT `--json`. Verified stream shape: `codex
+/// exec` writes the human-readable transcript (banner, `exec`/`codex`
+/// blocks, token counts) to **stderr** and only the agent's final message to
+/// **stdout**. The run engine already handles that with zero code change:
+/// stderr lines land in the run log as `[err]` (full transcript preserved for
+/// FR-4.8/FR-5.3 log-tail surfacing, human-readable), stdout lines degrade in
+/// `classify_line` to `kind: "output"` run-progress events, and the frontend
+/// shows the elapsed clock + log tail without claude-style progress kinds.
+/// `--json` (JSONL events) was evaluated and rejected for v1: the event
+/// schema is experimental/unversioned on 0.142.0, and JSONL in the log would
+/// make the failure log-tail unreadable. A structured codex progress mode is
+/// filed as a follow-up bead.
+///
+/// **Merge caveat:** a stored settings blob that already contains an
+/// `adapters` map (written by an older app version) replaces this map
+/// wholesale on read — field-level serde defaults do not merge *inside* the
+/// map — so such a blob hides the new `codex` entry until the user resets or
+/// re-saves settings. Acceptable for a personal app (documented on the bead).
 fn default_adapters() -> BTreeMap<String, Adapter> {
     let mut m = BTreeMap::new();
     m.insert(
@@ -220,6 +313,29 @@ fn default_adapters() -> BTreeMap<String, Adapter> {
                 "Bash(git clean:*)".to_owned(),
                 "Edit(/{project_root}/**)".to_owned(),
                 "Write(/{project_root}/**)".to_owned(),
+            ],
+            cwd: default_cwd(),
+        },
+    );
+    m.insert(
+        "codex".to_owned(),
+        Adapter {
+            command: "codex".to_owned(),
+            args: vec![
+                "exec".to_owned(),
+                "--model".to_owned(),
+                "{model}".to_owned(),
+                "--sandbox".to_owned(),
+                "workspace-write".to_owned(),
+                "-c".to_owned(),
+                "sandbox_workspace_write.network_access=true".to_owned(),
+                "--skip-git-repo-check".to_owned(),
+                "--ephemeral".to_owned(),
+                "--ignore-user-config".to_owned(),
+                "--color".to_owned(),
+                "never".to_owned(),
+                "--".to_owned(),
+                "{prompt}".to_owned(),
             ],
             cwd: default_cwd(),
         },
@@ -271,6 +387,17 @@ fn default_in_app_ask_model() -> String {
 /// auto-created projects sit alongside their artifacts under `~/Documents/conceptify`.
 pub fn default_auto_project_base_dir() -> Option<PathBuf> {
     dirs::document_dir().map(|d| d.join("conceptify").join("projects"))
+}
+
+/// Provider suites enabled out of the box for the model catalog (epic
+/// conceptify-e7m, bead e7m.6): Anthropic + OpenAI — the two natively-routable
+/// families. Every other family (runnable via OpenRouter) is opt-in through the
+/// Settings suite toggles. Fully-qualified `BTreeSet` so this addition touches
+/// no import line.
+fn default_enabled_providers() -> std::collections::BTreeSet<String> {
+    ["anthropic".to_owned(), "openai".to_owned()]
+        .into_iter()
+        .collect()
 }
 
 // --- Data model -------------------------------------------------------------
@@ -358,7 +485,8 @@ pub enum Purpose {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSettings {
-    /// name → adapter template. Phase 1 ships only `"claude"`.
+    /// name → adapter template. Built-ins: `"claude"` (default) and `"codex"`
+    /// (bead `conceptify-e7m.2`); more can be added via config alone.
     #[serde(default = "default_adapters")]
     pub adapters: BTreeMap<String, Adapter>,
     /// Which adapter [`resolve`](AgentSettings::resolve) uses. Must be a key of
@@ -384,6 +512,12 @@ pub struct AgentSettings {
     /// so the zero-config default stays code-side (FR-7.4).
     #[serde(default)]
     pub auto_project_base_dir: Option<String>,
+    /// Enabled provider suites for the live model catalog (epic conceptify-e7m,
+    /// bead e7m.6). The catalog API returns only models whose provider is in this
+    /// set; the Settings UI (bead e7m.3) toggles membership. Defaults to
+    /// Anthropic + OpenAI. A `BTreeSet` for natural dedup + deterministic order.
+    #[serde(default = "default_enabled_providers")]
+    pub enabled_providers: std::collections::BTreeSet<String>,
 }
 
 impl Default for AgentSettings {
@@ -396,6 +530,7 @@ impl Default for AgentSettings {
             agent_binary_path: None,
             appearance: Appearance::System,
             auto_project_base_dir: None,
+            enabled_providers: default_enabled_providers(),
         }
     }
 }
@@ -939,6 +1074,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn default_codex_scoping_exact() {
+        // e7m.2: pin the whole default codex template so an accidental edit is
+        // caught. Every flag verified against codex-cli 0.142.0 live probes
+        // from an UNSANDBOXED parent (see the measurement-hazard note on
+        // default_adapters): exec is approval-never; workspace-write = workdir
+        // + /tmp + $TMPDIR writable, $HOME denied; network FULLY BLOCKED
+        // (loopback/DNS/bind) unless network_access=true — hence the -c key,
+        // without which the conceptify CLI can never report back; git commit
+        // NOT denied (prompt-enforced only); stderr carries the transcript,
+        // stdout only the final message.
+        let settings = AgentSettings::default();
+        let over = RunOverride {
+            adapter: Some("codex".to_owned()),
+            model: Some("gpt-5.4-mini".to_owned()),
+        };
+        let inv = settings
+            .resolve_with_override(
+                Purpose::FollowUp,
+                Path::new("/tmp/proj"),
+                "q",
+                Some(&over),
+            )
+            .unwrap();
+        assert_eq!(inv.program, "codex");
+        assert_eq!(inv.cwd, "/tmp/proj");
+        assert_eq!(
+            inv.args,
+            vec![
+                "exec",
+                "--model",
+                "gpt-5.4-mini",
+                "--sandbox",
+                "workspace-write",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--ignore-user-config",
+                "--color",
+                "never",
+                "--",
+                "q",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_template_keeps_adversarial_prompt_as_one_trailing_arg() {
+        // The codex template ends `-- {prompt}`: the prompt must arrive verbatim
+        // as the single final argv element, after the `--` separator, so no
+        // prompt content (flag-like, subcommand-like, placeholder-like) can
+        // alter the parsed command structure.
+        let evil = "--model hacked\nresume --last; rm -rf / {project_root}";
+        let settings = AgentSettings::default();
+        let over = RunOverride {
+            adapter: Some("codex".to_owned()),
+            model: None,
+        };
+        let inv = settings
+            .resolve_with_override(Purpose::FollowUp, Path::new("/tmp/proj"), evil, Some(&over))
+            .unwrap();
+        assert_eq!(inv.args.len(), 14);
+        assert_eq!(inv.args[inv.args.len() - 2], "--");
+        assert_eq!(inv.args[inv.args.len() - 1], evil);
+        // Per-purpose model still selected normally (no model override).
+        assert_eq!(inv.args[2], "claude-haiku-4-5");
+    }
+
     // --- Defaults / storage -------------------------------------------------
 
     #[test]
@@ -948,6 +1152,9 @@ mod tests {
         assert_eq!(s, AgentSettings::default());
         assert_eq!(s.default_adapter, "claude");
         assert!(s.adapters.contains_key("claude"));
+        // codex ships as a built-in adapter (e7m.2) — but never as the default.
+        assert!(s.adapters.contains_key("codex"));
+        assert_eq!(s.adapters.len(), 2);
         assert_eq!(s.models.follow_up, "claude-haiku-4-5");
         assert_eq!(s.models.artifact_update, "claude-sonnet-5");
         assert_eq!(s.models.in_app_ask, "claude-sonnet-5");
@@ -1098,16 +1305,17 @@ mod tests {
     }
 
     #[test]
-    fn second_adapter_via_config_only() {
-        // Prove a new adapter needs no code change: add "codex", point
-        // defaultAdapter at it, and resolution uses its command/args template.
+    fn extra_adapter_via_config_only() {
+        // Prove a new adapter needs no code change: add a custom one (a key
+        // that is NOT a built-in, so this exercises pure config extension),
+        // point defaultAdapter at it, and resolution uses its template.
         let mut settings = AgentSettings::default();
         settings.adapters.insert(
-            "codex".to_owned(),
+            "my-agent".to_owned(),
             Adapter {
-                command: "codex".to_owned(),
+                command: "my-agent".to_owned(),
                 args: vec![
-                    "exec".to_owned(),
+                    "run".to_owned(),
                     "--model".to_owned(),
                     "{model}".to_owned(),
                     "{prompt}".to_owned(),
@@ -1115,15 +1323,15 @@ mod tests {
                 cwd: "{project_root}".to_owned(),
             },
         );
-        settings.default_adapter = "codex".to_owned();
+        settings.default_adapter = "my-agent".to_owned();
         settings.models.follow_up = "gpt-x".to_owned();
         assert!(settings.validate().is_ok());
 
         let inv = settings
             .resolve(Purpose::FollowUp, Path::new("/tmp/proj"), "prompt text")
             .unwrap();
-        assert_eq!(inv.program, "codex");
-        assert_eq!(inv.args, vec!["exec", "--model", "gpt-x", "prompt text"]);
+        assert_eq!(inv.program, "my-agent");
+        assert_eq!(inv.args, vec!["run", "--model", "gpt-x", "prompt text"]);
         assert_eq!(inv.cwd, "/tmp/proj");
     }
 
@@ -1153,16 +1361,10 @@ mod tests {
     #[test]
     fn override_adapter_wins_over_default_adapter() {
         // A `{adapter}`-only override swaps the whole template (the escape
-        // hatch) while keeping the per-purpose model.
-        let mut settings = AgentSettings::default();
-        settings.adapters.insert(
-            "codex".to_owned(),
-            Adapter {
-                command: "codex".to_owned(),
-                args: vec!["exec".to_owned(), "--model".to_owned(), "{model}".to_owned()],
-                cwd: "{project_root}".to_owned(),
-            },
-        );
+        // hatch) while keeping the per-purpose model. Uses the BUILT-IN codex
+        // adapter, so this doubles as the override→codex selection path the
+        // run engine takes (e7m.2/e7m.7).
+        let settings = AgentSettings::default();
         let over = RunOverride {
             adapter: Some("codex".to_owned()),
             model: None,
@@ -1172,7 +1374,8 @@ mod tests {
             .unwrap();
         assert_eq!(inv.program, "codex");
         // model still the InAppAsk per-purpose default (no model override).
-        assert_eq!(inv.args, vec!["exec", "--model", "claude-sonnet-5"]);
+        assert_eq!(inv.args[1], "--model");
+        assert_eq!(inv.args[2], "claude-sonnet-5");
         assert_eq!(
             settings.selection_for(Purpose::InAppAsk, Some(&over)).unwrap(),
             ("codex".to_owned(), "claude-sonnet-5".to_owned())
@@ -1181,15 +1384,7 @@ mod tests {
 
     #[test]
     fn override_adapter_and_model_together() {
-        let mut settings = AgentSettings::default();
-        settings.adapters.insert(
-            "codex".to_owned(),
-            Adapter {
-                command: "codex".to_owned(),
-                args: vec!["exec".to_owned(), "--model".to_owned(), "{model}".to_owned()],
-                cwd: "{project_root}".to_owned(),
-            },
-        );
+        let settings = AgentSettings::default();
         let over = RunOverride {
             adapter: Some("codex".to_owned()),
             model: Some("gpt-5".to_owned()),
@@ -1197,7 +1392,8 @@ mod tests {
         let inv = settings
             .resolve_with_override(Purpose::FollowUp, Path::new("/tmp/proj"), "q", Some(&over))
             .unwrap();
-        assert_eq!(inv.args, vec!["exec", "--model", "gpt-5"]);
+        assert_eq!(inv.program, "codex");
+        assert_eq!(inv.args[2], "gpt-5");
     }
 
     #[test]
@@ -1366,5 +1562,350 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    // --- LIVE proof: real codex headless run (bead conceptify-e7m.2) --------
+
+    /// End-to-end live proof of the built-in `codex` adapter defaults: a REAL
+    /// `codex exec` run (real binary, real auth, real model) answers a trivial
+    /// follow-up through the REAL `conceptify` CLI against an isolated temp DB
+    /// — comment ends `answered` in the DB, run row ends `completed`.
+    ///
+    /// Isolation: nothing here touches the user's real app DB or the running
+    /// Conceptify instance. The `conceptify` CLI child discovers the API via
+    /// `$HOME/Library/Application Support/conceptify/{port,token}`, so the run
+    /// env sets `HOME` to a scratch dir holding files that point at an
+    /// in-test axum server (fronting `comments::update_comment` on the temp
+    /// DB) on an ephemeral port; `CODEX_HOME` is pinned to the real
+    /// `~/.codex` so codex keeps its auth despite the fake `HOME`.
+    ///
+    /// The invocation is the SHIPPED template: `AgentSettings::default()` +
+    /// `RunOverride { adapter: codex }` — no test-only args. The prompt is the
+    /// real flow prompt (`flows::build_answer_prompt`), not a fork.
+    ///
+    /// Residual isolation caveat (accepted): if the `conceptify` CLI child ever
+    /// fails to reach the in-test server, its launch-and-wait fallback runs
+    /// `open -a Conceptify` — harmless error when no app bundle is installed
+    /// (observed live), and even against a running real app the PATCH would
+    /// 404 (this test's comment ids don't exist there), so no real data can
+    /// change. Multi-thread runtime + the pre-spawn self-probe below exist to
+    /// keep the in-test server responsive so that path is never taken.
+    ///
+    /// Ignored by default (needs codex installed + authenticated, network, and
+    /// a built CLI). Run manually **from a plain, unsandboxed terminal**:
+    /// codex's Seatbelt cannot nest inside another sandbox, so launching this
+    /// from an already-sandboxed shell (e.g. a coding agent's) degrades
+    /// codex's sandbox and produces misleading results (see the
+    /// measurement-hazard note on `default_adapters`).
+    /// ```sh
+    /// cargo build -p conceptify-cli
+    /// cargo test -p conceptify settings::tests::live_codex -- --ignored --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "live: needs codex CLI installed+authenticated and target/debug/conceptify built"]
+    async fn live_codex_answers_follow_up_end_to_end() {
+        use crate::comments::{CommentStatus, CommentThread};
+        use crate::runs::{self, RunMode, RunRegistry, RunStatus, StartRun};
+
+        // -- Preconditions (fail loudly: this test is opt-in).
+        let codex = resolve_agent_binary("codex", None)
+            .expect("codex CLI not resolvable via login shell — install/authenticate codex");
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cli = std::env::var("CONCEPTIFY_CLI")
+            .map(PathBuf::from)
+            .ok()
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                ["debug", "release"]
+                    .iter()
+                    .map(|profile| manifest.join("../target").join(profile).join("conceptify"))
+                    .find(|p| p.is_file())
+            })
+            .expect("conceptify CLI binary not found — run `cargo build -p conceptify-cli` first");
+        let real_home = dirs::home_dir().expect("home dir");
+        assert!(
+            real_home.join(".codex/auth.json").is_file(),
+            "~/.codex/auth.json missing — codex is not authenticated"
+        );
+        eprintln!("[live] codex = {}", codex.display());
+        eprintln!("[live] cli   = {}", cli.display());
+
+        // -- Isolated world: scratch project repo, fake HOME, temp DB.
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(format!("conceptify-live-codex-{unique}"));
+        let project_root = base.join("repo");
+        let fake_home = base.join("home");
+        let support = fake_home.join("Library/Application Support/conceptify");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&support).unwrap();
+        std::fs::write(
+            project_root.join("README.md"),
+            "# Demo project\n\nThe local HTTP API listens on TCP port 4477 (loopback only).\n",
+        )
+        .unwrap();
+
+        let db_path = base.join("app.db");
+        let db = crate::db::init_at(&db_path).expect("temp db init");
+        let project_id = format!("proj-live-{unique}");
+        let question = "According to README.md in this project, which TCP port does the local HTTP API listen on? Answer in one short sentence.";
+        let (thread_id, comment) = {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO projects (id, name, root_path) VALUES (?1, 'Live', ?2)",
+                rusqlite::params![project_id, project_root.to_string_lossy()],
+            )
+            .unwrap();
+            let thread =
+                crate::threads::create_thread(&conn, &project_id, "Live Codex", "port question")
+                    .unwrap();
+            crate::artifacts::save_artifact(
+                &conn,
+                &crate::artifacts::test_artifacts_root(),
+                &thread.id,
+                br#"<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Live</title>
+<meta name="cfy:question" content="port question">
+<meta name="cfy:version" content="1">
+<meta name="cfy:generated-by" content="claude-code/test">
+</head><body><h1 data-cfy-id="sec-api">The API listens locally.</h1></body></html>"#,
+            )
+            .unwrap();
+            let ctx = crate::comments::create_comment(&conn, &thread.id, 1, None, question).unwrap();
+            (thread.id, ctx.comment)
+        };
+        let (artifact_path, artifact_version) = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT file_path, version FROM artifacts WHERE thread_id = ?1
+                 ORDER BY version DESC LIMIT 1",
+                [&thread_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .unwrap()
+        };
+
+        // -- In-test API server: /health + PATCH /api/v1/comments/{id}, exactly
+        //    the surface `conceptify resolve-comment` needs, fronting the REAL
+        //    domain logic (comments::update_comment) on the temp DB. The real
+        //    router isn't reachable from here (private module), and spawning it
+        //    would clobber the real app's port/token files — this stays fully
+        //    isolated instead.
+        let token = format!("live-test-token-{unique}");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        #[derive(Clone)]
+        struct LiveState {
+            db: crate::db::DbHandle,
+            token: String,
+        }
+        async fn patch_comment(
+            axum::extract::State(state): axum::extract::State<LiveState>,
+            axum::extract::Path(id): axum::extract::Path<String>,
+            headers: axum::http::HeaderMap,
+            axum::Json(req): axum::Json<conceptify_types::UpdateCommentRequest>,
+        ) -> Result<axum::Json<serde_json::Value>, axum::http::StatusCode> {
+            let auth = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if auth != format!("Bearer {}", state.token) {
+                return Err(axum::http::StatusCode::UNAUTHORIZED);
+            }
+            let status = match req.status.as_deref() {
+                None => None,
+                Some(s) => Some(
+                    crate::comments::CommentStatus::parse(s)
+                        .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
+                ),
+            };
+            let ctx = {
+                let conn = state.db.lock().unwrap();
+                crate::comments::update_comment(&conn, &id, status, req.answer_html.as_deref(), None)
+                    .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?
+            };
+            let c = &ctx.comment;
+            // Shape matches conceptify_types::CommentResponse (snake_case).
+            Ok(axum::Json(serde_json::json!({
+                "id": c.id,
+                "thread_id": c.thread_id,
+                "parent_id": ctx.parent_id,
+                "artifact_version": c.artifact_version,
+                "anchor": c.anchor,
+                "body": c.body,
+                "status": c.status.as_str(),
+                "answer_html": c.answer_html,
+                "anchor_state": c.anchor_state.as_str(),
+                "created_at": c.created_at,
+                "resolved_at": c.resolved_at,
+            })))
+        }
+        let router = axum::Router::new()
+            .route(
+                "/health",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({
+                        "service": "conceptify",
+                        "status": "ok",
+                        "version": "live-test",
+                    }))
+                }),
+            )
+            .route("/api/v1/comments/{id}", axum::routing::patch(patch_comment))
+            .with_state(LiveState {
+                db: db.clone(),
+                token: token.clone(),
+            });
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        std::fs::write(support.join("port"), port.to_string()).unwrap();
+        std::fs::write(support.join("token"), &token).unwrap();
+
+        // Sanity self-probe: the in-test API must answer /health BEFORE codex
+        // is spawned — a dead/starved server would otherwise send the CLI into
+        // its launch-the-app fallback (see the isolation caveat above).
+        {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let mut healthy = false;
+            for _ in 0..50 {
+                if let Ok(mut s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                    let _ = s
+                        .write_all(
+                            b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    let mut buf = String::new();
+                    let _ = s.read_to_string(&mut buf).await;
+                    if buf.contains(r#""status":"ok""#) {
+                        healthy = true;
+                        break;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            assert!(healthy, "in-test API server did not come up on 127.0.0.1:{port}");
+        }
+
+        // -- The real flow prompt (no fork), single-exchange answer mode.
+        let prompt = crate::flows::build_answer_prompt(&crate::flows::AnswerPromptContext {
+            thread_id: &thread_id,
+            title: "Live Codex",
+            question: "port question",
+            project_root: &project_root.to_string_lossy(),
+            artifact_path: &artifact_path,
+            artifact_version,
+            exchanges: std::slice::from_ref(&CommentThread {
+                root: comment.clone(),
+                replies: vec![],
+            }),
+        });
+
+        // -- Run env: CLI dir on PATH (what flows::child_env does), fake HOME
+        //    for the CLI's port/token discovery, real CODEX_HOME for auth.
+        let cli_dir = cli.parent().unwrap().to_string_lossy().into_owned();
+        let path_value = format!(
+            "{cli_dir}:{}",
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
+        );
+        let env = vec![
+            ("PATH".to_owned(), path_value),
+            ("HOME".to_owned(), fake_home.to_string_lossy().into_owned()),
+            (
+                "CODEX_HOME".to_owned(),
+                real_home.join(".codex").to_string_lossy().into_owned(),
+            ),
+        ];
+
+        // -- Spawn through the real engine with the SHIPPED codex defaults.
+        let app = tauri::test::mock_builder()
+            .manage(db.clone())
+            .manage(RunRegistry::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let handle = app.handle().clone();
+        let started = runs::start_run(
+            &handle,
+            StartRun {
+                thread_id: thread_id.clone(),
+                mode: RunMode::Answer,
+                prompt,
+                env,
+                run_override: Some(RunOverride {
+                    adapter: Some("codex".to_owned()),
+                    model: Some("gpt-5.4-mini".to_owned()),
+                }),
+            },
+        )
+        .await
+        .expect("start codex run");
+        eprintln!("[live] run {} started on thread {thread_id}", started.run_id);
+
+        let fin = tokio::time::timeout(std::time::Duration::from_secs(600), started.finished)
+            .await
+            .expect("codex run did not finish within 600s")
+            .expect("finished channel dropped");
+        let log = std::fs::read_to_string(&fin.log_path).unwrap_or_default();
+        let tail: String = {
+            let lines: Vec<&str> = log.lines().collect();
+            lines[lines.len().saturating_sub(40)..].join("\n")
+        };
+        assert_eq!(
+            fin.status,
+            RunStatus::Completed,
+            "codex run ended {:?} (exit {:?}); log tail:\n{tail}",
+            fin.status,
+            fin.exit_code
+        );
+
+        // -- The comment was answered IN THE DB through the real CLI + real
+        //    domain logic, and the run row is terminal-success.
+        let (c_status, c_answer, run_status, run_agent, run_model) = {
+            let conn = db.lock().unwrap();
+            let (cs, ca): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT status, answer_html FROM comments WHERE id = ?1",
+                    [&comment.id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            let (rs, ra, rm): (String, String, String) = conn
+                .query_row(
+                    "SELECT status, agent, model FROM follow_up_runs WHERE id = ?1",
+                    [&started.run_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            (cs, ca, rs, ra, rm)
+        };
+        assert_eq!(run_status, "completed");
+        assert_eq!(run_agent, "codex");
+        assert_eq!(run_model, "gpt-5.4-mini");
+        assert_eq!(
+            c_status,
+            CommentStatus::Answered.as_str(),
+            "comment not answered; log tail:\n{tail}"
+        );
+        let answer = c_answer.expect("answer_html stored");
+        assert!(
+            answer.contains("4477"),
+            "answer should ground on the README's port; got: {answer}"
+        );
+        eprintln!("[live] SUCCESS — answer: {answer}");
+
+        // -- Cleanup (only on success; failures keep the evidence around).
+        drop(db);
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(
+            crate::artifacts::test_artifacts_root().join(&project_id),
+        );
     }
 }

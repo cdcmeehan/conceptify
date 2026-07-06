@@ -1284,3 +1284,55 @@ pub async fn ask_single_comment(
         .map(RunStartedDto::from)
         .map_err(|e| e.to_string())
 }
+
+// ---------------------------------------------------------------------------
+// Model catalog (epic conceptify-e7m, bead e7m.6).
+//
+// Thin command wrappers over `crate::catalog`. `get_model_catalog` serves the
+// cached/snapshot catalog filtered to the enabled provider suites (no network);
+// `refresh_model_catalog` forces a live re-fetch. Both project the catalog
+// through the shared `enabled_providers` setting. The Settings UI (bead e7m.3)
+// and the point-of-ask picker (e7m.4) are the callers. Appended at EOF to avoid
+// colliding with concurrent edits higher in this file.
+// ---------------------------------------------------------------------------
+
+/// The current model catalog filtered to the enabled provider suites, plus the
+/// full provider list with counts (for the settings toggles). Reads the disk
+/// cache (or bundled snapshot) — never the network — so it is instant and always
+/// succeeds. The background startup refresh (see `lib.rs`) keeps the cache warm.
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_model_catalog(
+    db: State<DbHandle>,
+) -> Result<conceptify_types::CatalogResponse, String> {
+    let enabled = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        crate::settings::get_settings(&conn)
+            .map_err(|e| e.to_string())?
+            .enabled_providers
+    };
+    let (cat, source) = crate::catalog::load_for_serving();
+    Ok(crate::catalog::build_response(&cat, source, &enabled))
+}
+
+/// Force a live re-fetch of the model catalog (the Settings "refresh now"
+/// action), update the on-disk cache, and return the fresh catalog filtered to
+/// the enabled providers. Failure-silent: a network error degrades to the
+/// cache/snapshot rather than failing. Emits `catalog-refreshed` so live views
+/// repaint.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn refresh_model_catalog(
+    app: tauri::AppHandle,
+) -> Result<conceptify_types::CatalogResponse, String> {
+    let (cat, source) = crate::catalog::refresh_now().await;
+    let enabled = {
+        use tauri::Manager;
+        let db = app.state::<DbHandle>();
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        crate::settings::get_settings(&conn)
+            .map_err(|e| e.to_string())?
+            .enabled_providers
+    };
+    use tauri::Emitter;
+    let _ = app.emit("catalog-refreshed", &());
+    Ok(crate::catalog::build_response(&cat, source, &enabled))
+}

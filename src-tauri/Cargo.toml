@@ -45,6 +45,11 @@ thiserror = "2"
 conceptify-types = { path = "../crates/conceptify-types" }
 scraper = "0.27.0"
 ego-tree = "0.11.0"
+# Model-catalog fetch (bead conceptify-e7m.6): async HTTPS GET of the LiteLLM +
+# OpenRouter sources. rustls with default-features off avoids pulling
+# native-tls/OpenSSL, keeping the build lean; reqwest is already in the tree
+# transitively (via tauri), so this only turns on a TLS backend.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"

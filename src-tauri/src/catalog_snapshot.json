@@ -1,0 +1,18 @@
+{
+  "fetchedAt": "2026-07-05T00:00:00Z",
+  "models": [
+    { "id": "claude-sonnet-5", "provider": "anthropic", "displayName": "claude-sonnet-5", "contextWindow": 200000, "openrouterRunnable": false },
+    { "id": "claude-haiku-4-5", "provider": "anthropic", "displayName": "claude-haiku-4-5", "contextWindow": 200000, "openrouterRunnable": false },
+    { "id": "claude-opus-4-1", "provider": "anthropic", "displayName": "claude-opus-4-1", "contextWindow": 200000, "openrouterRunnable": false },
+    { "id": "claude-3-7-sonnet-latest", "provider": "anthropic", "displayName": "claude-3-7-sonnet-latest", "contextWindow": 200000, "openrouterRunnable": false },
+    { "id": "gpt-5", "provider": "openai", "displayName": "gpt-5", "contextWindow": 272000, "openrouterRunnable": false },
+    { "id": "gpt-4o", "provider": "openai", "displayName": "gpt-4o", "contextWindow": 128000, "openrouterRunnable": false },
+    { "id": "o3", "provider": "openai", "displayName": "o3", "contextWindow": 200000, "openrouterRunnable": false },
+    { "id": "o4-mini", "provider": "openai", "displayName": "o4-mini", "contextWindow": 200000, "openrouterRunnable": false },
+    { "id": "google/gemini-2.5-pro", "provider": "google", "displayName": "Google: Gemini 2.5 Pro", "contextWindow": 1048576, "openrouterRunnable": true },
+    { "id": "google/gemini-2.5-flash", "provider": "google", "displayName": "Google: Gemini 2.5 Flash", "contextWindow": 1048576, "openrouterRunnable": true },
+    { "id": "mistralai/mistral-large", "provider": "mistralai", "displayName": "Mistral: Mistral Large", "contextWindow": 128000, "openrouterRunnable": true },
+    { "id": "meta-llama/llama-3.3-70b-instruct", "provider": "meta-llama", "displayName": "Meta: Llama 3.3 70B Instruct", "contextWindow": 131072, "openrouterRunnable": true },
+    { "id": "deepseek/deepseek-chat", "provider": "deepseek", "displayName": "DeepSeek: DeepSeek V3", "contextWindow": 163840, "openrouterRunnable": true }
+  ]
+}

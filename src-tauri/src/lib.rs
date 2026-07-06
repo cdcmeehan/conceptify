@@ -1,6 +1,7 @@
 mod anchoring;
 mod artifact_protocol;
 mod artifacts;
+mod catalog;
 mod commands;
 mod comments;
 mod context;
@@ -102,6 +103,8 @@ pub fn run() {
             commands::ask_from_app,
             commands::retry_ask,
             commands::get_latest_run,
+            commands::get_model_catalog,
+            commands::refresh_model_catalog,
             runs::cancel_run,
         ])
         .setup(|app| {
@@ -135,6 +138,13 @@ pub fn run() {
 
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(server::start(app_handle));
+
+            // Bead conceptify-e7m.6: warm the model catalog in the background,
+            // off the boot critical path (NFR cold start ~310ms). TTL-gated and
+            // failure-silent — it never blocks startup and never surfaces an
+            // error dialog; a fetch failure leaves the cache/snapshot in place.
+            tauri::async_runtime::spawn(catalog::refresh_on_startup());
+
             Ok(())
         })
         .on_window_event(|window, event| {

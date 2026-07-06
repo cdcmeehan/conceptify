@@ -266,11 +266,41 @@ assignments and every headless denial is a wasted flail), `--tools`
 whitelisting (brittle enumeration of built-ins), per-purpose arg overrides
 (a new adapter dimension for a prompt-forbidden, versioning-recoverable
 accident), and `sandbox-exec`/network firewalls (adversarial-grade, out of
-scope). Future adapters (Codex, …) should follow the same principle: repo
-read-only, temp dirs writable, arbitrary local commands allowed, web and
-repo-mutating commands denied. All behavior verified against claude CLI
-2.1.201 with headless probes; both prompts tell the agent its toolset is
-scoped so it does not flail against denials.
+scope). All behavior verified against claude CLI 2.1.201 with headless
+probes; the prompts tell the agent its toolset is scoped so it does not
+flail against denials.
+
+**Codex adapter scoping (bead e7m.2, verified against codex-cli 0.142.0):**
+the built-in `codex` adapter runs `codex exec` (implicitly approval-`never`
+headless; sandbox denials return to the model) with `--sandbox
+workspace-write`: kernel-enforced (Seatbelt) filesystem containment where
+only the project root, `/tmp` and `$TMPDIR` are writable — verified live
+(`$HOME` writes denied, `mktemp -d` scratch writes fine). Network under
+`workspace-write` is **fully blocked by default** — loopback connects
+refused, DNS fails, local binds `EPERM` — so the template pins
+`-c sandbox_workspace_write.network_access=true` (verified live: loopback +
+external open with it), without which the loopback `conceptify` CLI
+reporting path breaks in every flow. The resulting open network matches the
+claude template's effective posture (denied `WebFetch`/`WebSearch`, but
+allowed `Bash` can `curl`); codex's native `web_search` tool stays off
+(opt-in `--search`, not passed). Probing caveat: codex's Seatbelt cannot
+nest inside another sandbox, so probes launched from an already-sandboxed
+shell observe a degraded codex sandbox (network wrongly appears open) — all
+of the above was verified from an unsandboxed parent, which is how the app
+spawns agents. Mutating git is
+**not** per-command deniable on codex (verified: `git commit` succeeds in
+the sandbox), so it remains prompt-enforced — the one residual scoping
+difference from the claude template. Hygiene flags: `--skip-git-repo-check`
+(project roots need not be git repos), `--ephemeral` (no session files piled
+into `~/.codex`), `--ignore-user-config` (the `--strict-mcp-config` analog —
+keeps personal MCP servers/plugins/notify-hooks out of headless runs; auth
+still comes from `CODEX_HOME`), `--color never` (escape-free logs), and a
+`--` separator so the prompt can never parse as a flag/subcommand. Output
+parsing: **plain stdout passthrough** (no `--json` — its event schema is
+experimental): codex writes its transcript to stderr (run log `[err]` lines)
+and only the final message to stdout, so `run-progress` degrades to
+`kind: "output"` and the UI shows the elapsed clock + log tail. Full
+rationale in `settings.rs` `default_adapters()` docs.
 
 Read-only routes (`GET /api/v1/debug/db-check`, `GET /api/v1/projects`,
 `GET /api/v1/threads`, `GET /api/v1/threads/:id/context`, `GET /api/v1/comments`)
@@ -1259,6 +1289,98 @@ database error.
 
 ---
 
+## Catalog
+
+The live model catalog (epic conceptify-e7m, bead e7m.6): the set of selectable
+models, grouped by provider **family**, that backs the Settings model dropdowns
++ provider-suite toggles (e7m.3), the point-of-ask picker (e7m.4), and execution
+routing (e7m.7). Implementation: `src-tauri/src/catalog.rs`; shared types
+`CatalogModel` / `CatalogProvider` / `CatalogResponse` in `conceptify-types`.
+
+**Sources & normalization.** The catalog is fetched from two public sources and
+normalized to `{ id, provider, displayName, contextWindow, openrouterRunnable }`:
+
+- **LiteLLM** `model_prices_and_context_window.json` (raw GitHub) — kept: entries
+  whose `mode` is `chat`/`completion` **and** whose `litellm_provider` is a clean
+  model family (anthropic, openai, gemini→google, mistral→mistralai, xai→x-ai,
+  deepseek, cohere, ai21). Backend-routing providers (bedrock, azure,
+  fireworks_ai, …) are dropped — they are duplicative and not attributable to a
+  family. This is the source of the **native** ids (`claude-sonnet-5`, `gpt-5`).
+- **OpenRouter** `GET /api/v1/models` (no auth) — kept: entries that can emit text
+  (`architecture.output_modalities` includes `text`; pure image/audio generators
+  dropped). Every kept entry is `openrouterRunnable: true`. `provider` is the id
+  slug prefix, canonicalized (a leading `~` on "latest" aliases like
+  `~anthropic/claude-sonnet-latest` is stripped for the family; the id keeps it).
+
+The two are merged by exact `id`; an id present in OpenRouter forces
+`openrouterRunnable: true`. `id` is the **execution id** (the value passed to the
+agent): a bare native id for the claude/codex routes, or the OpenRouter slug for
+the OpenRouter route (bead e7m.7 uses `openrouterRunnable` to choose the route).
+
+**Caching / offline.** On startup a background task (off the boot critical path)
+fetches + atomically caches the *normalized* catalog under
+`~/Library/Application Support/conceptify/model_catalog.json` with a `fetchedAt`
+stamp. The startup fetch is skipped when the cache is <24h old. The fallback
+chain for both fetching and serving is **live fetch → disk cache → bundled
+snapshot** (a small offline asset of current anthropic/openai/google/mistral/…
+models). The whole path is failure-silent: errors are logged, never shown as a
+dialog, and never delay boot.
+
+**Provider filtering.** Responses return only models whose `provider` is in the
+enabled provider suites (`enabledProviders` in agent settings — default
+`["anthropic","openai"]`, toggled via the Settings UI), plus the full provider
+list with per-family counts (over the whole catalog) and each family's `enabled`
+flag, so the toggles can render "google (29)" even while disabled.
+
+### `GET /api/v1/catalog/models`
+
+Authenticated. The catalog filtered to the enabled provider suites. Reads the
+disk cache (or bundled snapshot) — never the network — so it is instant and
+always succeeds.
+
+Response `200 OK`:
+
+```json
+{
+  "fetchedAt": "2026-07-05T09:12:44.512Z",
+  "source": "cache",
+  "models": [
+    { "id": "claude-sonnet-5", "provider": "anthropic", "displayName": "claude-sonnet-5", "contextWindow": 200000, "openrouterRunnable": false },
+    { "id": "anthropic/claude-sonnet-5", "provider": "anthropic", "displayName": "Anthropic: Claude Sonnet 5", "contextWindow": 200000, "openrouterRunnable": true },
+    { "id": "gpt-5", "provider": "openai", "displayName": "gpt-5", "contextWindow": 272000, "openrouterRunnable": false }
+  ],
+  "providers": [
+    { "provider": "anthropic", "modelCount": 18, "enabled": true },
+    { "provider": "google", "modelCount": 29, "enabled": false },
+    { "provider": "openai", "modelCount": 74, "enabled": true }
+  ]
+}
+```
+
+`source` is `live` | `cache` | `snapshot`. `models` is sorted by `(provider, id)`
+and includes only enabled-provider models; `providers` always lists every family
+in the full catalog. `contextWindow` is omitted when the source reports none.
+
+Errors: `401 Unauthorized` if the bearer token is missing/wrong; `500` if the
+settings read fails.
+
+### `POST /api/v1/catalog/refresh`
+
+Authenticated. Force a live re-fetch of both sources, update the cache, and
+return the fresh catalog (same shape as `GET /catalog/models`, typically with
+`"source": "live"`). Failure-silent: a network error degrades to the
+cache/snapshot (`"source": "cache"`/`"snapshot"`) rather than erroring. Emits the
+`catalog-refreshed` event so live views repaint. No request body.
+
+Errors: `401 Unauthorized` if the bearer token is missing/wrong; `500` if the
+settings read fails.
+
+> The same two operations are exposed to the app shell as the Tauri commands
+> `get_model_catalog` and `refresh_model_catalog` (identical `CatalogResponse`
+> shape), following the command/HTTP parity the rest of the API keeps.
+
+---
+
 ## The `artifact://` scheme (in-app viewer transport)
 
 Not an HTTP endpoint: a custom Tauri URI scheme
@@ -1400,7 +1522,7 @@ shell→artifact *commands* (its `event.source` is its own window, not
 |---|---|---|
 | `ready` | — | The bridge booted. Sent once per **document load** — including every iframe reload (version switch, live refresh), which wipes all decorations. Consumers must (re)apply highlights on every `ready`; `bridge.ts` queues commands sent before the first `ready` of an attachment. |
 | `selection` | `anchor` (a `text` anchor), `rect` (selection bounding rect) | A non-empty text selection reported on **gesture completion**, never mid-drag: pointer selections post once on release (`pointerup`/`pointercancel`); keyboard selections (shift+arrows, Cmd+A), which have no release, post after a ~300 ms settle debounce. `cfy_id`/`start`/`end` are present when the selection has a `data-cfy-id` ancestor; `quote` always is. |
-| `selection_cleared` | — | The previously reported selection collapsed/vanished (dismiss the popover). |
+| `selection_cleared` | — | The previously reported selection collapsed/vanished (dismiss the popover). Also sent when the user presses Escape inside the artifact: the iframe holds keyboard focus after a drag, so the bridge translates Escape into clearing the live selection (the shell's own Escape handler can't see the key). A `set_highlights` application never re-reports the still-live selection its DOM mutations perturb (the bridge suppresses its own mutation-induced `selectionchange`). |
 | `element_click` | `anchor` (an `element` anchor), `rect` (element bounding rect) | Click on a `data-cfy-id`-bearing element (nearest such ancestor of the click target). Suppressed for clicks that end a text selection and for clicks on interactive elements (`a[href]`, `button`, form controls, `summary`, `label`, `[contenteditable]`). |
 
 ### Shell → artifact
