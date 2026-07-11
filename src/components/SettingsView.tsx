@@ -187,6 +187,13 @@ export function SettingsView() {
       appearance,
       autoProjectBaseDir: trimmedBase === "" ? null : trimmedBase,
       enabledProviders: [...enabledProviders].sort(),
+      // The scheduler consumes a generic keyed map. Until this view gains a
+      // capacity editor, round-trip it verbatim so saving appearance/models
+      // cannot reset limits configured by another surface.
+      runConcurrency: saved?.runConcurrency ?? {
+        default: 1,
+        pools: { anthropic: 2, openai: 2, openrouter: 3, manual: 1 },
+      },
     };
   }
 

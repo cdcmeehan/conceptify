@@ -511,6 +511,51 @@ pub enum Purpose {
     InAppAsk,
 }
 
+/// Configurable provider-pool capacity for the durable run scheduler
+/// (`docs/concurrency-policy.md`). The map is deliberately keyed by arbitrary
+/// strings: routing may add a provider or a local endpoint without requiring a
+/// settings-schema or UI-layout change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunConcurrency {
+    /// Capacity used when no explicit pool entry exists.
+    #[serde(default = "default_run_pool_limit")]
+    pub default: usize,
+    /// Stable provider-pool key → maximum simultaneous child processes.
+    #[serde(default = "default_run_pool_limits")]
+    pub pools: BTreeMap<String, usize>,
+}
+
+fn default_run_pool_limit() -> usize {
+    1
+}
+
+fn default_run_pool_limits() -> BTreeMap<String, usize> {
+    BTreeMap::from([
+        ("anthropic".to_owned(), 2),
+        ("openai".to_owned(), 2),
+        ("openrouter".to_owned(), 3),
+        // An explicit adapter bypass has no trustworthy upstream identity, so
+        // share one conservative pool unless the user configures otherwise.
+        ("manual".to_owned(), 1),
+    ])
+}
+
+impl Default for RunConcurrency {
+    fn default() -> Self {
+        Self {
+            default: default_run_pool_limit(),
+            pools: default_run_pool_limits(),
+        }
+    }
+}
+
+impl RunConcurrency {
+    pub fn limit_for(&self, pool: &str) -> usize {
+        self.pools.get(pool).copied().unwrap_or(self.default)
+    }
+}
+
 /// Full agent-settings model (PRD §5.5, FR-7.1–7.4). See module docs for the
 /// storage/defaults philosophy and JSON shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -549,6 +594,11 @@ pub struct AgentSettings {
     /// Anthropic + OpenAI. A `BTreeSet` for natural dedup + deterministic order.
     #[serde(default = "default_enabled_providers")]
     pub enabled_providers: std::collections::BTreeSet<String>,
+    /// Global execution capacity by provider-pool key. Generic keyed data keeps
+    /// scheduler configuration independent of the set of providers shown by
+    /// the current UI.
+    #[serde(default)]
+    pub run_concurrency: RunConcurrency,
 }
 
 impl Default for AgentSettings {
@@ -562,6 +612,7 @@ impl Default for AgentSettings {
             appearance: Appearance::System,
             auto_project_base_dir: None,
             enabled_providers: default_enabled_providers(),
+            run_concurrency: RunConcurrency::default(),
         }
     }
 }
@@ -682,6 +733,9 @@ pub enum SettingsError {
     #[error("invalid settings JSON: {0}")]
     Deserialize(#[source] serde_json::Error),
 
+    #[error("invalid run concurrency settings: {0}")]
+    InvalidRunConcurrency(String),
+
     #[error("could not resolve the default auto-project base directory; set one in Settings")]
     NoAutoProjectBaseDir,
 
@@ -696,6 +750,24 @@ impl AgentSettings {
     pub fn validate(&self) -> Result<(), SettingsError> {
         if !self.adapters.contains_key(&self.default_adapter) {
             return Err(SettingsError::UnknownAdapter(self.default_adapter.clone()));
+        }
+        if self.run_concurrency.default == 0 {
+            return Err(SettingsError::InvalidRunConcurrency(
+                "default capacity must be at least 1".to_owned(),
+            ));
+        }
+        if let Some((pool, limit)) = self
+            .run_concurrency
+            .pools
+            .iter()
+            .find(|(pool, limit)| pool.trim().is_empty() || **limit == 0)
+        {
+            let reason = if pool.trim().is_empty() {
+                "provider pool keys must not be blank".to_owned()
+            } else {
+                format!("provider pool '{pool}' capacity must be at least 1 (got {limit})")
+            };
+            return Err(SettingsError::InvalidRunConcurrency(reason));
         }
         Ok(())
     }
@@ -1295,6 +1367,9 @@ mod tests {
         assert_eq!(s.agent_binary_path, None);
         assert_eq!(s.appearance, Appearance::System);
         assert_eq!(s.auto_project_base_dir, None);
+        assert_eq!(s.run_concurrency.default, 1);
+        assert_eq!(s.run_concurrency.limit_for("anthropic"), 2);
+        assert_eq!(s.run_concurrency.limit_for("new-provider"), 1);
     }
 
     #[test]
@@ -1374,6 +1449,44 @@ mod tests {
         // Fields added after this blob shape still fill from code defaults.
         assert_eq!(s.appearance, Appearance::System);
         assert_eq!(s.auto_project_base_dir, None);
+        assert_eq!(s.run_concurrency, RunConcurrency::default());
+    }
+
+    #[test]
+    fn run_concurrency_is_generic_round_trippable_and_validated() {
+        let conn = in_memory_settings_db();
+        let mut s = AgentSettings::default();
+        s.run_concurrency.default = 2;
+        s.run_concurrency.pools.insert("local:lab".to_owned(), 4);
+        update_settings(&conn, &s).unwrap();
+
+        let read = get_settings(&conn).unwrap();
+        assert_eq!(read.run_concurrency.limit_for("local:lab"), 4);
+        assert_eq!(read.run_concurrency.limit_for("unlisted"), 2);
+
+        let mut zero_default = AgentSettings::default();
+        zero_default.run_concurrency.default = 0;
+        assert!(matches!(
+            zero_default.validate(),
+            Err(SettingsError::InvalidRunConcurrency(_))
+        ));
+
+        let mut zero_pool = AgentSettings::default();
+        zero_pool
+            .run_concurrency
+            .pools
+            .insert("anthropic".to_owned(), 0);
+        assert!(matches!(
+            zero_pool.validate(),
+            Err(SettingsError::InvalidRunConcurrency(_))
+        ));
+
+        let mut blank_pool = AgentSettings::default();
+        blank_pool.run_concurrency.pools.insert("  ".to_owned(), 1);
+        assert!(matches!(
+            blank_pool.validate(),
+            Err(SettingsError::InvalidRunConcurrency(_))
+        ));
     }
 
     #[test]

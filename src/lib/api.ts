@@ -401,6 +401,14 @@ export interface PurposeModels {
   inAppAsk: string;
 }
 
+/** Provider-pool execution limits for the durable run scheduler. Keys are
+ * intentionally open-ended so new providers/local endpoints need no wire-shape
+ * change. */
+export interface RunConcurrency {
+  default: number;
+  pools: Record<string, number>;
+}
+
 export interface AgentSettings {
   /** name → adapter template. Phase 1 ships only `"claude"`. */
   adapters: Record<string, AgentAdapter>;
@@ -422,6 +430,9 @@ export interface AgentSettings {
    *  a settings blob written before this field existed still deserializes; we
    *  always send it back so the Settings suite toggles persist. */
   enabledProviders: string[];
+  /** Preserved by the current settings form even before its dedicated editor
+   * lands; changing unrelated settings must never reset scheduler capacity. */
+  runConcurrency: RunConcurrency;
 }
 
 /** Read the agent settings (stored overrides merged over code defaults, or pure

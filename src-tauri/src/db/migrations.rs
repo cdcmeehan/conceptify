@@ -37,6 +37,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(COMMENT_PARENT_ID),
         M::up(FOLLOW_UP_RUNS_OVERRIDE),
         M::up(FOLLOW_UP_RUNS_ROUTE),
+        M::up(FOLLOW_UP_RUNS_QUEUE),
     ])
 }
 
@@ -332,6 +333,49 @@ const FOLLOW_UP_RUNS_ROUTE: &str = "
 ALTER TABLE follow_up_runs ADD COLUMN route TEXT NULL;
 ";
 
+/// Adds the durable scheduler inputs accepted in `docs/concurrency-policy.md`
+/// (bead `conceptify-k9z.2`). A queued run must be executable after an app
+/// restart, so its prompt and non-secret environment overrides live with the
+/// historical run record instead of only in an in-memory task. Route secrets
+/// are deliberately excluded: routing resolves them again from the write-only
+/// settings row when execution starts.
+///
+/// Every column is nullable for backward compatibility. Rows written before
+/// the scheduler migration are terminal history (startup reconciliation has
+/// already failed any stale `running` row) and are never admitted, so inventing
+/// queue metadata for them would be misleading. New scheduler submissions
+/// populate the full set in one INSERT and domain code treats a queued row with
+/// missing metadata as invalid/failed rather than guessing.
+///
+/// `queue_seq` is allocated while holding the app's single DB connection and is
+/// the deterministic tie-break after `queued_at`. The partial indexes back the
+/// admission scan and same-thread mutation guard without bloating lookups over
+/// terminal history.
+const FOLLOW_UP_RUNS_QUEUE: &str = "
+ALTER TABLE follow_up_runs ADD COLUMN run_class TEXT NULL;
+ALTER TABLE follow_up_runs ADD COLUMN provider_pool TEXT NULL;
+ALTER TABLE follow_up_runs ADD COLUMN prompt TEXT NULL;
+ALTER TABLE follow_up_runs ADD COLUMN env_json TEXT NULL;
+ALTER TABLE follow_up_runs ADD COLUMN base_artifact_version INTEGER NULL;
+ALTER TABLE follow_up_runs ADD COLUMN queued_at TEXT NULL;
+ALTER TABLE follow_up_runs ADD COLUMN queue_seq INTEGER NULL;
+ALTER TABLE follow_up_runs ADD COLUMN execution_started_at TEXT NULL;
+ALTER TABLE follow_up_runs ADD COLUMN not_before TEXT NULL;
+ALTER TABLE follow_up_runs ADD COLUMN retry_of_run_id TEXT NULL
+    REFERENCES follow_up_runs(id) ON DELETE SET NULL;
+ALTER TABLE follow_up_runs ADD COLUMN status_reason TEXT NULL;
+
+CREATE UNIQUE INDEX idx_follow_up_runs_queue_seq
+    ON follow_up_runs(queue_seq) WHERE queue_seq IS NOT NULL;
+CREATE INDEX idx_follow_up_runs_admission
+    ON follow_up_runs(provider_pool, status, queued_at, queue_seq)
+    WHERE status IN ('queued', 'throttled');
+CREATE INDEX idx_follow_up_runs_mutation_target
+    ON follow_up_runs(thread_id, status)
+    WHERE run_class = 'mutation'
+      AND status IN ('starting', 'running', 'cancelling');
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,7 +383,13 @@ mod tests {
 
     /// `user_version` after the full chain — the count of `M::up` entries in
     /// [`migrations`].
-    const LATEST: usize = 12;
+    const LATEST: usize = 13;
+
+    /// Position of the durable scheduler metadata migration.
+    const RUN_QUEUE: usize = 13;
+
+    /// Position of the resolved execution-route tag migration.
+    const ROUTE: usize = 12;
 
     /// Position of the `follow_up_runs.override_json` ALTER (the 11th
     /// migration), pinned explicitly — like `ASK_MODE` below — so appending
@@ -696,7 +746,7 @@ mod tests {
         let mut conn = fresh_conn();
         let m = migrations();
 
-        m.to_version(&mut conn, LATEST - 1).expect("to pre-route");
+        m.to_version(&mut conn, ROUTE - 1).expect("to pre-route");
         seed_thread(&conn);
         conn.execute(
             "INSERT INTO follow_up_runs
@@ -706,7 +756,7 @@ mod tests {
         )
         .expect("seed pre-migration run");
 
-        m.to_version(&mut conn, LATEST).expect("apply route migration");
+        m.to_version(&mut conn, ROUTE).expect("apply route migration");
 
         let route: Option<String> = conn
             .query_row(
@@ -733,5 +783,91 @@ mod tests {
             )
             .unwrap();
         assert_eq!(route.as_deref(), Some("openrouter"));
+    }
+
+    /// Migration 13 adds enough durable input to execute queued work after a
+    /// restart, while retaining pre-scheduler rows as nullable history.
+    #[test]
+    fn add_run_queue_metadata_preserves_history_and_enforces_order_keys() {
+        let mut conn = fresh_conn();
+        let m = migrations();
+
+        m.to_version(&mut conn, RUN_QUEUE - 1)
+            .expect("to pre-queue schema");
+        seed_thread(&conn);
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path, route)
+             VALUES ('r-old', 't1', 'claude', 'claude-sonnet-5', 'answer',
+                     'completed', '/old.log', 'anthropic')",
+            [],
+        )
+        .expect("seed historical run");
+
+        m.to_version(&mut conn, RUN_QUEUE)
+            .expect("apply queue metadata migration");
+
+        let old: (Option<String>, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT run_class, queue_seq, prompt
+                 FROM follow_up_runs WHERE id = 'r-old'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("historical row survives");
+        assert_eq!(old, (None, None, None));
+
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path, route,
+                  run_class, provider_pool, prompt, env_json,
+                  base_artifact_version, queued_at, queue_seq)
+             VALUES ('r-queued', 't1', 'claude', 'claude-sonnet-5', 'answer',
+                     'queued', '/queued.log', 'anthropic', 'exploration',
+                     'anthropic', 'answer this', '[[\"PATH\",\"/bin\"]]', NULL,
+                     '2026-07-11T08:00:00.000Z', 1)",
+            [],
+        )
+        .expect("insert durable queued run");
+
+        let queued: (String, String, String, i64) = conn
+            .query_row(
+                "SELECT run_class, provider_pool, prompt, queue_seq
+                 FROM follow_up_runs WHERE id = 'r-queued'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            queued,
+            (
+                "exploration".to_owned(),
+                "anthropic".to_owned(),
+                "answer this".to_owned(),
+                1,
+            )
+        );
+
+        let duplicate = conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path, queue_seq)
+             VALUES ('r-duplicate', 't1', 'claude', 'claude-sonnet-5', 'answer',
+                     'queued', '/duplicate.log', 1)",
+            [],
+        );
+        assert!(duplicate.is_err(), "queue sequence must be unique when present");
+
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name IN ('idx_follow_up_runs_queue_seq',
+                                'idx_follow_up_runs_admission',
+                                'idx_follow_up_runs_mutation_target')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 3);
     }
 }
