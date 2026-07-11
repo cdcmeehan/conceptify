@@ -129,6 +129,15 @@ cancelling running work releases capacity only after the process is reaped.
 Exploration runs may overlap on one thread. Mutations for the same thread are
 serialized and retain their captured base version for conflict checks.
 
+Mutation children inherit an opaque `CONCEPTIFY_RUN_ID`; the CLI forwards it
+as `X-Conceptify-Run-Id` only on `save-artifact`. The server resolves the
+captured base from the durable row, never from a child-supplied version. If it
+differs from current, validated HTML is retained as
+`runs/<run-id>.candidate.html`, the run becomes `conflicted`, and save returns
+`409` with `code: "STALE_BASE"`, `run_id`, `base_version`, and
+`current_version`. No artifact row/version or update event is created, and
+supervisor finalization preserves `conflicted` despite the CLI's nonzero exit.
+
 ### Flow commands (Tauri, not HTTP — FR-4.6/4.7/4.8)
 
 The follow-up flows live in `src-tauri/src/flows.rs` on top of the run engine
@@ -181,6 +190,19 @@ and are invoked by the app shell as Tauri commands (snake_case args):
   `null`. The atomic claim succeeds once for completed/failed/timeout/conflict
   rows, providing at-most-once native delivery across duplicate lifecycle
   events and restarts. It is called only after opt-in and an OS permission check.
+- `get_conflict_review { run_id }` → retained candidate metadata and a semantic
+  diff from newer current content to the candidate: project/thread,
+  agent/model/route, captured base, current version, resolution state, and the
+  same block/hunk shape as `diff_versions`. Pending conflicts cannot be
+  dismissed from activity.
+- `rebase_conflict { run_id }` → a new queued `apply` run linked through
+  `retry_of_run_id`. It captures the now-current base, preserves the source
+  model/profile, and synthesizes candidate intent onto current content. The
+  source records `rebase:<new-run-id>`.
+- `publish_conflict_candidate { run_id }` → new artifact version number. This
+  explicit, confirmed recovery publishes the retained candidate as a separate
+  next version and records `source_run_id`, original `source_base_version`, and
+  `resolution: "separate"`. It never runs automatically.
 - `get_run_log_tail { run_id, max_lines? }` →
   `{ run_id, log_path, lines }` (default last 30 lines) — FR-4.8 failure
   surfacing; `log_path` is always returned even when the file is unreadable.

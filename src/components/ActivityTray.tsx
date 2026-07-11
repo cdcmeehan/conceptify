@@ -104,7 +104,8 @@ function ActivityRow({ item }: { item: RunActivity }) {
   const meta = activityMeta(item);
   const cancellable = ACTIVE.has(item.status) && item.status !== "cancelling";
   const retryable = ATTENTION.has(item.status) && item.mode === "ask";
-  const dismissible = !ACTIVE.has(item.status);
+  const reviewable = item.status === "conflicted";
+  const dismissible = !ACTIVE.has(item.status) && item.status !== "conflicted";
   const timingStart = item.execution_started_at ?? item.queued_at;
   const timing = timingStart == null
     ? null
@@ -150,6 +151,15 @@ function ActivityRow({ item }: { item: RunActivity }) {
                 class="text-accent-ink hover:underline"
               >
                 Retry
+              </button>
+            )}
+            {reviewable && (
+              <button
+                type="button"
+                onClick={() => appStore.openConflictReview(item.run_id)}
+                class="text-accent-ink hover:underline"
+              >
+                Review conflict
               </button>
             )}
             {dismissible && (

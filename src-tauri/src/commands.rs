@@ -1204,6 +1204,133 @@ pub fn claim_system_run_notification(
     crate::runs::claim_system_notification(&mut conn, &run_id).map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+pub struct ConflictReviewDto {
+    pub run_id: String,
+    pub thread_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub thread_title: String,
+    pub agent: String,
+    pub model: String,
+    pub route: Option<String>,
+    pub base_version: Option<i64>,
+    pub current_version: i64,
+    pub resolution: String,
+    pub diff: conceptify_types::ArtifactVersionDiffResponse,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_conflict_review(db: State<DbHandle>, run_id: String) -> Result<ConflictReviewDto, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let row = conn
+        .query_row(
+            "SELECT r.thread_id, p.id, p.name, t.title, r.agent, r.model, r.route,
+                    r.base_artifact_version, r.conflict_current_version,
+                    COALESCE(r.conflict_resolution, 'pending'), r.candidate_path,
+                    a.file_path
+             FROM follow_up_runs r
+             JOIN threads t ON t.id = r.thread_id
+             JOIN projects p ON p.id = t.project_id
+             JOIN artifacts a ON a.thread_id = t.id
+                 AND a.version = r.conflict_current_version
+             WHERE r.id = ?1 AND r.status = 'conflicted'",
+            [&run_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?,
+                    r.get::<_, Option<String>>(6)?, r.get::<_, Option<i64>>(7)?,
+                    r.get::<_, i64>(8)?, r.get::<_, String>(9)?, r.get::<_, String>(10)?,
+                    r.get::<_, String>(11)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "conflict candidate not found".to_owned())?;
+    let current_html = std::fs::read_to_string(&row.11).map_err(|e| e.to_string())?;
+    let candidate_html = std::fs::read_to_string(&row.10).map_err(|e| e.to_string())?;
+    let diff = crate::artifact_diff::diff_html(&row.0, row.8, row.8 + 1, &current_html, &candidate_html);
+    Ok(ConflictReviewDto {
+        run_id,
+        thread_id: row.0,
+        project_id: row.1,
+        project_name: row.2,
+        thread_title: row.3,
+        agent: row.4,
+        model: row.5,
+        route: row.6,
+        base_version: row.7,
+        current_version: row.8,
+        resolution: row.9,
+        diff,
+    })
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn publish_conflict_candidate<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    db: State<DbHandle>,
+    run_id: String,
+) -> Result<i64, String> {
+    let root = artifacts::artifacts_root().map_err(|e| e.to_string())?;
+    let saved = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let row: (String, String) = conn
+            .query_row(
+                "SELECT thread_id, candidate_path FROM follow_up_runs
+                 WHERE id = ?1 AND status = 'conflicted'
+                   AND COALESCE(conflict_resolution, 'pending') = 'pending'",
+                [&run_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| "unresolved conflict candidate not found".to_owned())?;
+        let bytes = std::fs::read(&row.1).map_err(|e| e.to_string())?;
+        artifacts::save_artifact_for_run(
+            &conn,
+            &root,
+            &row.0,
+            &bytes,
+            Some(&run_id),
+            Some("separate"),
+        )
+        .map_err(|e| e.to_string())?
+    };
+    use tauri::Emitter;
+    let _ = app.emit(
+        "artifact-updated",
+        serde_json::json!({
+            "project_id": saved.project_id,
+            "thread_id": saved.thread_id,
+            "version": saved.version,
+        }),
+    );
+    for comment in &saved.reattached {
+        let _ = app.emit(
+            "comment-updated",
+            serde_json::json!({
+                "project_id": saved.project_id,
+                "thread_id": comment.thread_id,
+                "comment_id": comment.id,
+                "status": comment.status.as_str(),
+            }),
+        );
+    }
+    Ok(saved.version)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn rebase_conflict<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    run_id: String,
+) -> Result<RunStartedDto, String> {
+    crate::flows::rebase_conflict(&app, &run_id)
+        .await
+        .map(RunStartedDto::from)
+        .map_err(|e| e.to_string())
+}
+
 /// The tail of a run's transcript log (FR-4.8 failure surfacing). `log_path`
 /// is always returned (the full log is retained on disk for debugging); a
 /// missing/unreadable file degrades to a single explanatory line rather than

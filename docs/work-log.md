@@ -207,3 +207,14 @@ and both reapply independently after iframe reloads. Reduced-motion users get
 instant jumps without pulses. Browser QA covered real v2→v3 apply output,
 v1→v2 id-less fallback, version switching, jump, and clean exit; the rebuilt
 native `Conceptify.app` repeated the real-apply checkpoint beside live comments.
+
+**Safe concurrent mutation recovery (`conceptify-k9z.6`).** Headless saves now
+bind to their durable run and immutable captured base. A stale save returns 409,
+publishes no artifact, retains the validated candidate, and finishes as
+`conflicted` even though its CLI exits nonzero. Conflict review compares current
+and candidate side by side with agent/model/route/base provenance. Nothing
+auto-merges: the user either starts a fresh-base, lineage-linked synthesis or
+confirms a separate candidate version; recovered artifacts retain source run,
+base, and resolution metadata. Browser QA covered modified/added comparisons
+and the two-step separate-version guard; backend tests cover refusal, retention,
+terminal-state preservation, provenance, and explicit recovery.

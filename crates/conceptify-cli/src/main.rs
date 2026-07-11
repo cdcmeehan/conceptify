@@ -229,12 +229,17 @@ where
         .map_err(|e| format!("failed to read auth token (has the app run once?): {}", e))?;
     let url = format!("http://127.0.0.1:{}{}", port, path);
 
-    match ureq::post(&url)
+    let mut request = ureq::post(&url)
         .set("Authorization", &format!("Bearer {}", token))
         .set("Content-Type", "text/html")
-        .timeout(REQUEST_TIMEOUT)
-        .send_bytes(bytes)
-    {
+        .timeout(REQUEST_TIMEOUT);
+    if let Ok(run_id) = std::env::var("CONCEPTIFY_RUN_ID") {
+        if !run_id.trim().is_empty() {
+            request = request.set("X-Conceptify-Run-Id", &run_id);
+        }
+    }
+
+    match request.send_bytes(bytes) {
         Ok(response) => response
             .into_json::<R>()
             .map_err(|e| format!("invalid JSON from {}: {}", path, e)),

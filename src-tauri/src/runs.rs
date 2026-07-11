@@ -560,6 +560,7 @@ struct PersistedQueuedRun {
     provider_pool: String,
     log_path: String,
     retry_of_run_id: Option<String>,
+    base_artifact_version: Option<i64>,
 }
 
 /// Recreate workers for durable queued/throttled rows after boot
@@ -571,7 +572,8 @@ pub async fn resume_queued_runs<R: Runtime>(app_handle: AppHandle<R>) -> Result<
     let rows = db::with_conn(&db, |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, thread_id, agent, model, mode, prompt, env_json,
-                    override_json, route, provider_pool, log_path, retry_of_run_id
+                    override_json, route, provider_pool, log_path, retry_of_run_id,
+                    base_artifact_version
              FROM follow_up_runs
              WHERE status IN ('queued', 'throttled')
              ORDER BY queue_seq ASC, id ASC",
@@ -590,6 +592,7 @@ pub async fn resume_queued_runs<R: Runtime>(app_handle: AppHandle<R>) -> Result<
                 provider_pool: r.get(9)?,
                 log_path: r.get(10)?,
                 retry_of_run_id: r.get(11)?,
+                base_artifact_version: r.get(12)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -647,7 +650,8 @@ async fn resume_one<R: Runtime>(
     let row = db::with_conn(&db, move |conn| {
         conn.query_row(
             "SELECT id, thread_id, agent, model, mode, prompt, env_json,
-                    override_json, route, provider_pool, log_path, retry_of_run_id
+                    override_json, route, provider_pool, log_path, retry_of_run_id,
+                    base_artifact_version
              FROM follow_up_runs WHERE id = ?1 AND status IN ('queued', 'throttled')",
             [&id],
             |r| {
@@ -664,6 +668,7 @@ async fn resume_one<R: Runtime>(
                     provider_pool: r.get(9)?,
                     log_path: r.get(10)?,
                     retry_of_run_id: r.get(11)?,
+                    base_artifact_version: r.get(12)?,
                 })
             },
         )
@@ -707,11 +712,11 @@ async fn prepare_persisted(
         ))
     })?;
     let thread_id = row.thread_id.clone();
+    let captured_base = row.base_artifact_version;
     let loaded = db::with_conn_result(db, move |conn| -> Result<Loaded, RunError> {
         let data = conn
             .query_row(
-                "SELECT p.id, p.root_path, t.slug,
-                        (SELECT MAX(a.version) FROM artifacts a WHERE a.thread_id = t.id)
+                "SELECT p.id, p.root_path, t.slug
                  FROM threads t JOIN projects p ON p.id = t.project_id
                  WHERE t.id = ?1",
                 [&thread_id],
@@ -720,19 +725,18 @@ async fn prepare_persisted(
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
-                        r.get::<_, Option<i64>>(3)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((project_id, root_path, slug, base_artifact_version)) = data else {
+        let Some((project_id, root_path, slug)) = data else {
             return Err(RunError::ThreadNotFound(thread_id));
         };
         Ok(Loaded {
             project_id,
             root_path,
             slug,
-            base_artifact_version,
+            base_artifact_version: captured_base,
             settings: settings::get_settings(conn)?,
             openrouter_key: settings::get_openrouter_api_key(conn)?,
         })
@@ -1229,6 +1233,7 @@ async fn execute_when_admitted<R: Runtime>(
     for (key, value) in &prepared.route.env {
         cmd.env(key, value);
     }
+    cmd.env("CONCEPTIFY_RUN_ID", &run_id);
     #[cfg(unix)]
     cmd.process_group(0); // child leads its own group → pgid == pid
 
@@ -1607,51 +1612,72 @@ async fn finalize<R: Runtime>(
 ) {
     let run_id = ctx.run_id.clone();
     let persisted = db::with_conn(&ctx.db, move |conn| {
-        conn.execute(
-            "UPDATE follow_up_runs
-             SET status = ?1,
-                 finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?2",
-            rusqlite::params![status.as_str(), run_id],
-        )
+        persist_terminal_status(conn, &run_id, status)
     })
     .await;
-    if let Err(e) = persisted {
-        // The row stays 'running' until boot reconciliation; the log marker
-        // below still records the truth. Nothing else useful can be done.
-        eprintln!(
-            "[conceptify-runs] failed to persist terminal status for {}: {e}",
-            ctx.run_id
-        );
-        append_log(
-            &ctx.log_path,
-            &format!(
-                "[run] WARNING: failed to persist terminal status '{}': {e}",
-                status.as_str()
-            ),
-        );
-    }
+    let effective_status = match persisted {
+        Ok(value) => value,
+        Err(e) => {
+            eprintln!(
+                "[conceptify-runs] failed to persist terminal status for {}: {e}",
+                ctx.run_id
+            );
+            append_log(
+                &ctx.log_path,
+                &format!(
+                    "[run] WARNING: failed to persist terminal status '{}': {e}",
+                    status.as_str()
+                ),
+            );
+            status
+        }
+    };
 
     ctx.registry.release(&ctx.run_id).await;
     append_log(
         &ctx.log_path,
-        &format!("[run] finalized: {} at {}", status.as_str(), now_iso()),
+        &format!("[run] finalized: {} at {}", effective_status.as_str(), now_iso()),
     );
     let _ = ctx.app_handle.emit(
         "run-finished",
         &RunFinishedEvent {
             run_id: &ctx.run_id,
             thread_id: &ctx.thread_id,
-            status: status.as_str(),
+            status: effective_status.as_str(),
         },
     );
     let _ = done_tx.send(FinishedRun {
         run_id: ctx.run_id,
         thread_id: ctx.thread_id,
-        status,
+        status: effective_status,
         exit_code,
         log_path: ctx.log_path,
     });
+}
+
+fn persist_terminal_status(
+    conn: &Connection,
+    run_id: &str,
+    requested: RunStatus,
+) -> rusqlite::Result<RunStatus> {
+    let current: String = conn.query_row(
+        "SELECT status FROM follow_up_runs WHERE id = ?1",
+        [run_id],
+        |r| r.get(0),
+    )?;
+    let effective = if current == "conflicted" {
+        RunStatus::Conflicted
+    } else {
+        requested
+    };
+    conn.execute(
+        "UPDATE follow_up_runs
+         SET status = ?1,
+             finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?2",
+        rusqlite::params![effective.as_str(), run_id],
+    )?;
+    Ok(effective)
 }
 
 // ---------------------------------------------------------------------------
@@ -1806,7 +1832,9 @@ pub fn dismiss_activity(conn: &Connection, run_id: &str) -> rusqlite::Result<boo
         "UPDATE follow_up_runs
          SET activity_dismissed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = ?1
-           AND status NOT IN ('queued', 'starting', 'running', 'throttled', 'cancelling')",
+           AND status NOT IN ('queued', 'starting', 'running', 'throttled', 'cancelling')
+           AND NOT (status = 'conflicted'
+                    AND COALESCE(conflict_resolution, 'pending') = 'pending')",
         [run_id],
     )? == 1)
 }
@@ -3271,6 +3299,7 @@ mod tests {
             for (id, status, finished) in [
                 ("recent", "completed", "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"),
                 ("attention", "failed", "'2000-01-01T00:00:00.000Z'"),
+                ("conflict", "conflicted", "'2000-01-01T00:00:00.000Z'"),
                 ("old-complete", "completed", "'2000-01-01T00:00:00.000Z'"),
             ] {
                 conn.execute(
@@ -3290,6 +3319,7 @@ mod tests {
         assert!(ids.contains(&"queued-activity"));
         assert!(ids.contains(&"recent"));
         assert!(ids.contains(&"attention"));
+        assert!(ids.contains(&"conflict"));
         assert!(!ids.contains(&"old-complete"));
         assert_eq!(
             activity
@@ -3318,6 +3348,12 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(!dismiss_activity(&conn, "queued-activity").unwrap());
+        assert!(!dismiss_activity(&conn, "conflict").unwrap());
+        assert_eq!(
+            persist_terminal_status(&conn, "conflict", RunStatus::Failed).unwrap(),
+            RunStatus::Conflicted,
+            "nonzero CLI exit must not overwrite a retained stale candidate"
+        );
         assert!(dismiss_activity(&conn, "attention").unwrap());
         assert!(!list_activity(&conn)
             .unwrap()

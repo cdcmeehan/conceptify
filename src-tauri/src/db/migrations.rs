@@ -40,6 +40,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(FOLLOW_UP_RUNS_QUEUE),
         M::up(FOLLOW_UP_RUNS_ACTIVITY),
         M::up(FOLLOW_UP_RUNS_NOTIFICATIONS),
+        M::up(CONFLICT_CANDIDATES),
     ])
 }
 
@@ -398,6 +399,18 @@ CREATE INDEX idx_follow_up_runs_unseen_activity
     ON follow_up_runs(activity_seen_at, finished_at);
 ";
 
+/// Retains stale mutation output plus provenance for explicit conflict review
+/// and records provenance on any later explicit publication (`k9z.6`).
+const CONFLICT_CANDIDATES: &str = "
+ALTER TABLE follow_up_runs ADD COLUMN candidate_path TEXT NULL;
+ALTER TABLE follow_up_runs ADD COLUMN conflict_current_version INTEGER NULL;
+ALTER TABLE follow_up_runs ADD COLUMN conflict_resolution TEXT NULL;
+ALTER TABLE artifacts ADD COLUMN source_run_id TEXT NULL
+    REFERENCES follow_up_runs(id) ON DELETE SET NULL;
+ALTER TABLE artifacts ADD COLUMN source_base_version INTEGER NULL;
+ALTER TABLE artifacts ADD COLUMN resolution TEXT NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,7 +418,7 @@ mod tests {
 
     /// `user_version` after the full chain — the count of `M::up` entries in
     /// [`migrations`].
-    const LATEST: usize = 15;
+    const LATEST: usize = 16;
 
     /// Position of the durable scheduler metadata migration.
     const RUN_QUEUE: usize = 13;
@@ -415,6 +428,7 @@ mod tests {
 
     const RUN_ACTIVITY: usize = 14;
     const RUN_NOTIFICATIONS: usize = 15;
+    const CONFLICTS: usize = 16;
 
     /// Position of the `follow_up_runs.override_json` ALTER (the 11th
     /// migration), pinned explicitly — like `ASK_MODE` below — so appending
@@ -951,5 +965,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(markers, (None, None));
+    }
+
+    #[test]
+    fn add_conflict_candidate_and_artifact_provenance_columns() {
+        let mut conn = fresh_conn();
+        let migrations = migrations();
+        migrations.to_version(&mut conn, CONFLICTS - 1).unwrap();
+        seed_thread(&conn);
+        migrations.to_version(&mut conn, CONFLICTS).unwrap();
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path,
+                  candidate_path, conflict_current_version, conflict_resolution)
+             VALUES ('r1', 't1', 'claude', 'm', 'apply', 'conflicted', '/r.log',
+                     '/candidate.html', 2, 'pending')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO artifacts
+                 (id, thread_id, version, file_path, created_by,
+                  source_run_id, source_base_version, resolution)
+             VALUES ('a1', 't1', 1, '/a.html', 'follow_up', 'r1', 1, 'separate')",
+            [],
+        )
+        .unwrap();
     }
 }

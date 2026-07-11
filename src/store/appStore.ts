@@ -193,6 +193,7 @@ export interface AppState {
   runActivity: RunActivity[];
   runActivityLoading: boolean;
   activityTrayOpen: boolean;
+  conflictReviewRunId: string | null;
 }
 
 type Listener = () => void;
@@ -221,6 +222,7 @@ const initialState: AppState = {
   runActivity: [],
   runActivityLoading: false,
   activityTrayOpen: false,
+  conflictReviewRunId: null,
 };
 
 let askDraftSequence = 0;
@@ -585,6 +587,14 @@ class AppStore {
 
   closeActivityTray(): void {
     this.set({ activityTrayOpen: false });
+  }
+
+  openConflictReview(runId: string): void {
+    this.set({ conflictReviewRunId: runId, activityTrayOpen: false });
+  }
+
+  closeConflictReview(): void {
+    this.set({ conflictReviewRunId: null });
   }
 
   async dismissRunActivity(runId: string): Promise<void> {

@@ -106,6 +106,14 @@ pub enum ArtifactError {
     #[error("artifact rejected: {}", .0.first().map(|i| i.code).unwrap_or("E-?"))]
     Rejected(Vec<Issue>),
 
+    #[error("artifact candidate was based on version {base:?}, but current is {current:?}")]
+    Conflict {
+        run_id: String,
+        base: Option<i64>,
+        current: Option<i64>,
+        candidate_path: PathBuf,
+    },
+
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
 
@@ -306,6 +314,20 @@ pub fn save_artifact(
     thread_id: &str,
     bytes: &[u8],
 ) -> Result<SavedArtifact, ArtifactError> {
+    save_artifact_for_run(conn, root, thread_id, bytes, None, None)
+}
+
+/// Run-aware save path. A headless mutation supplies its durable run id through
+/// the inherited CLI environment; the server reads the immutable captured base
+/// from that row and retains stale output as a candidate instead of publishing.
+pub fn save_artifact_for_run(
+    conn: &Connection,
+    root: &Path,
+    thread_id: &str,
+    bytes: &[u8],
+    source_run_id: Option<&str>,
+    resolution: Option<&str>,
+) -> Result<SavedArtifact, ArtifactError> {
     let row = conn
         .query_row(
             "SELECT project_id, slug FROM threads WHERE id = ?1",
@@ -319,11 +341,12 @@ pub fn save_artifact(
 
     // Version is derived from the DB (not the filesystem), so an orphan file
     // from an earlier crashed save is harmlessly overwritten.
-    let version: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) + 1 FROM artifacts WHERE thread_id = ?1",
+    let current_version: Option<i64> = conn.query_row(
+        "SELECT MAX(version) FROM artifacts WHERE thread_id = ?1",
         [thread_id],
         |r| r.get(0),
     )?;
+    let version = current_version.unwrap_or(0) + 1;
 
     let validation = validate(bytes, version);
     if !validation.errors.is_empty() {
@@ -334,6 +357,43 @@ pub fn save_artifact(
     // `runs/` is reserved for headless-agent transcripts (§5.6); created here
     // so the layout is complete from the first save.
     fs::create_dir_all(dir.join("runs"))?;
+
+    let mut source_base_version = None;
+    if let Some(run_id) = source_run_id {
+        let run: Option<(String, String, Option<i64>)> = conn
+            .query_row(
+                "SELECT thread_id, run_class, base_artifact_version
+                 FROM follow_up_runs WHERE id = ?1",
+                [run_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((run_thread_id, run_class, captured_base)) = run else {
+            return Err(ArtifactError::Database(rusqlite::Error::QueryReturnedNoRows));
+        };
+        if run_thread_id != thread_id || run_class != "mutation" {
+            return Err(ArtifactError::Database(rusqlite::Error::InvalidQuery));
+        }
+        source_base_version = captured_base;
+        if captured_base != current_version && resolution.is_none() {
+            let candidate_path = dir.join("runs").join(format!("{run_id}.candidate.html"));
+            atomic_write(&candidate_path, bytes)?;
+            conn.execute(
+                "UPDATE follow_up_runs
+                 SET status = 'conflicted', status_reason = 'stale_base',
+                     candidate_path = ?2, conflict_current_version = ?3,
+                     conflict_resolution = 'pending'
+                 WHERE id = ?1 AND status IN ('starting', 'running')",
+                rusqlite::params![run_id, candidate_path.to_string_lossy(), current_version],
+            )?;
+            return Err(ArtifactError::Conflict {
+                run_id: run_id.to_owned(),
+                base: captured_base,
+                current: current_version,
+                candidate_path,
+            });
+        }
+    }
 
     let version_path = dir.join(format!("artifact.v{version}.html"));
     atomic_write(&version_path, bytes)?;
@@ -348,18 +408,39 @@ pub fn save_artifact(
     // together: readers never observe a `ready` thread without its artifact
     // row, or the new version without its comments migrated (FR-4.4).
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "INSERT INTO artifacts (id, thread_id, version, file_path, created_by)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![
-            uuid::Uuid::new_v4().to_string(),
-            thread_id,
-            version,
-            version_path.to_string_lossy(),
-            created_by
-        ],
-    )?;
+    let artifact_id = uuid::Uuid::new_v4().to_string();
+    if source_run_id.is_some() {
+        tx.execute(
+            "INSERT INTO artifacts
+                 (id, thread_id, version, file_path, created_by,
+                  source_run_id, source_base_version, resolution)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                artifact_id, thread_id, version, version_path.to_string_lossy(),
+                created_by, source_run_id, source_base_version, resolution
+            ],
+        )?;
+    } else {
+        // Keep the pure/manual path compatible with focused test schemas and
+        // older embedders that only model the original artifact columns.
+        tx.execute(
+            "INSERT INTO artifacts (id, thread_id, version, file_path, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                artifact_id, thread_id, version, version_path.to_string_lossy(), created_by
+            ],
+        )?;
+    }
     threads::set_thread_status(&tx, thread_id, ThreadStatus::Ready)?;
+    if let (Some(run_id), Some(resolution)) = (source_run_id, resolution) {
+        tx.execute(
+            "UPDATE follow_up_runs
+             SET conflict_resolution = ?2,
+                 activity_dismissed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1 AND status = 'conflicted'",
+            rusqlite::params![run_id, resolution],
+        )?;
+    }
 
     // FR-4.4 re-attachment: migrate earlier-version comments onto this new
     // version (or flag them "reference moved"). Runs after the artifact row

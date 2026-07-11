@@ -15,6 +15,7 @@ import { ThreadList } from "./components/ThreadList";
 import { ThreadView } from "./components/ThreadView";
 import { SettingsView } from "./components/SettingsView";
 import { ActivityTray } from "./components/ActivityTray";
+import { ConflictReview } from "./components/ConflictReview";
 import { initSystemNotifications } from "./lib/systemNotifications";
 import "./App.css";
 
@@ -70,6 +71,9 @@ function App() {
         loading={state.runActivityLoading}
         open={state.activityTrayOpen}
       />
+      {state.conflictReviewRunId != null && (
+        <ConflictReview runId={state.conflictReviewRunId} />
+      )}
       {state.settingsOpen && <SettingsView />}
     </div>
   );

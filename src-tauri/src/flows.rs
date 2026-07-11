@@ -541,6 +541,103 @@ pub async fn apply_to_artifact<R: Runtime>(
     })
 }
 
+/// Resolve a retained stale mutation by generating a fresh synthesis against
+/// the current artifact. This is a new queued mutation with fresh base capture
+/// and retry lineage; the original conflicted row/candidate remain immutable.
+pub async fn rebase_conflict<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    source_run_id: &str,
+) -> Result<FlowStarted, FlowError> {
+    let db = app_handle.state::<DbHandle>().inner().clone();
+    let source = source_run_id.to_owned();
+    let loaded = db::with_conn_result(&db, move |conn| -> Result<_, FlowError> {
+        let row = conn.query_row(
+            "SELECT r.thread_id, p.id, p.root_path, t.title, t.initial_question,
+                    r.candidate_path, a.file_path, r.override_json, r.agent, r.model, r.route
+             FROM follow_up_runs r
+             JOIN threads t ON t.id = r.thread_id
+             JOIN projects p ON p.id = t.project_id
+             JOIN artifacts a ON a.thread_id = t.id
+                AND a.version = r.conflict_current_version
+             WHERE r.id = ?1 AND r.status = 'conflicted'
+               AND COALESCE(r.conflict_resolution, 'pending') = 'pending'",
+            [&source],
+            |r| Ok((
+                r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?, r.get::<_, Option<String>>(7)?,
+                r.get::<_, String>(8)?, r.get::<_, String>(9)?, r.get::<_, Option<String>>(10)?,
+            )),
+        ).map_err(|_| FlowError::NoArtifact)?;
+        Ok(row)
+    }).await?;
+
+    let run_override = match loaded.7 {
+        Some(json) => serde_json::from_str(&json).ok(),
+        None => Some(RunOverride {
+            adapter: (loaded.10.as_deref() == Some("manual")).then_some(loaded.8.clone()),
+            model: Some(loaded.9.clone()),
+        }),
+    };
+    let prompt = format!(
+        "Resolve a retained stale artifact candidate by synthesizing it onto the current version.\n\n\
+         Thread: {thread_id}\nProject root (read-only): {project_root}\n\
+         Current artifact (authoritative base; preserve all of it): {current}\n\
+         Stale candidate (proposal only): {candidate}\n\n\
+         Compare both documents semantically by data-cfy-id. Start from a temporary copy of the CURRENT artifact. \
+         Incorporate the candidate's useful intent only where it does not discard or regress current content. \
+         If the changes cannot be reconciled safely, do not publish. Preserve data-cfy-id values. \
+         When the synthesis is complete, run exactly once as your final command:\n\
+         conceptify save-artifact --thread {thread_id} --file <synthesized-current-copy.html>\n\
+         Do not resolve comments in this recovery run.",
+        thread_id = loaded.0,
+        project_root = loaded.2,
+        current = loaded.6,
+        candidate = loaded.5,
+    );
+    let env = child_env().await?;
+    let started = runs::start_run(app_handle, StartRun {
+        thread_id: loaded.0.clone(),
+        mode: RunMode::Apply,
+        prompt,
+        env,
+        run_override,
+        retry_of_run_id: Some(source_run_id.to_owned()),
+    }).await?;
+    {
+        let source = source_run_id.to_owned();
+        let new_run = started.run_id.clone();
+        db::with_conn(&db, move |conn| conn.execute(
+            "UPDATE follow_up_runs SET conflict_resolution = ?2,
+                 activity_dismissed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1 AND status = 'conflicted'",
+            rusqlite::params![source, format!("rebase:{new_run}")],
+        )).await?;
+    }
+    let thread_id = loaded.0.clone();
+    let project_id = loaded.1.clone();
+    db::with_conn(&db, {
+        let thread_id = thread_id.clone();
+        move |conn| threads::set_thread_status(conn, &thread_id, ThreadStatus::Updating)
+    }).await?;
+    emit_thread_updated(app_handle, &project_id, &thread_id, "updating");
+    let finished = started.finished;
+    let app = app_handle.clone();
+    let db_for_watch = db.clone();
+    let pid = project_id.clone();
+    let tid = thread_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = finished.await;
+        revert_updating(&app, &db_for_watch, &pid, &tid).await;
+    });
+    Ok(FlowStarted {
+        run_id: started.run_id,
+        thread_id,
+        mode: RunMode::Apply,
+        target_comment_ids: Vec::new(),
+    })
+}
+
 /// Conditionally restore `updating → ready` after an apply run terminated,
 /// emitting `thread-updated` only when a row actually changed (a `ready`
 /// already set by the agent's `save-artifact` no-ops silently).

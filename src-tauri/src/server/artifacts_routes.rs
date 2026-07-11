@@ -9,7 +9,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::{Json, Router};
 use serde_json::json;
@@ -80,6 +80,7 @@ async fn diff_versions<R: tauri::Runtime>(
 async fn save_artifact<R: tauri::Runtime>(
     State(state): State<ApiState<R>>,
     Path(thread_id): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
     let root = match artifacts::artifacts_root() {
@@ -98,8 +99,17 @@ async fn save_artifact<R: tauri::Runtime>(
     // writes → DB transaction) runs inside the shared connection lock so
     // concurrent saves serialize and can never race a version number.
     let tid = thread_id.clone();
+    let source_run_id = headers
+        .get("x-conceptify-run-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let result = db::with_conn_result(&state.db, move |conn| {
-        artifacts::save_artifact(conn, &root, &tid, &body)
+        match source_run_id.as_deref() {
+            Some(run_id) => artifacts::save_artifact_for_run(
+                conn, &root, &tid, &body, Some(run_id), None,
+            ),
+            None => artifacts::save_artifact(conn, &root, &tid, &body),
+        }
     })
     .await;
 
@@ -175,6 +185,17 @@ async fn save_artifact<R: tauri::Runtime>(
             };
             (StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response()
         }
+        Err(ArtifactError::Conflict { run_id, base, current, .. }) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "stale artifact base; candidate retained for review",
+                "code": "STALE_BASE",
+                "run_id": run_id,
+                "base_version": base,
+                "current_version": current,
+            })),
+        )
+            .into_response(),
         Err(ArtifactError::Io(e)) => {
             eprintln!("[conceptify-server] save_artifact io error: {e}");
             (
@@ -320,6 +341,15 @@ mod tests {
         builder.body(Body::from(body.to_owned())).unwrap()
     }
 
+    fn post_run(thread_id: &str, body: &str, run_id: &str) -> Request<Body> {
+        let mut request = post(thread_id, body, Some(TOKEN));
+        request.headers_mut().insert(
+            "x-conceptify-run-id",
+            run_id.parse().unwrap(),
+        );
+        request
+    }
+
     fn get_diff(thread_id: &str, from: i64, to: i64, token: Option<&str>) -> Request<Body> {
         let mut builder = Request::builder().method("GET").uri(format!(
             "/api/v1/threads/{thread_id}/artifacts/diff?from_version={from}&to_version={to}"
@@ -458,6 +488,63 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn stale_run_retains_candidate_and_explicit_separate_publish_recovers() {
+        let h = harness("stale-candidate");
+        let first = h.router.clone().oneshot(post(&h.thread_id, &valid_html(1), Some(TOKEN))).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        {
+            let conn = h.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO follow_up_runs
+                     (id, thread_id, agent, model, mode, status, log_path,
+                      run_class, base_artifact_version)
+                 VALUES ('stale-run', ?1, 'claude', 'm', 'apply', 'running', '/r.log',
+                         'mutation', 1)",
+                [&h.thread_id],
+            ).unwrap();
+        }
+        let second = h.router.clone().oneshot(post(&h.thread_id, &valid_html(2), Some(TOKEN))).await.unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let candidate = valid_html(3).replace(">T</h1>", ">Stale candidate</h1>");
+        let conflict = h.router.clone().oneshot(post_run(&h.thread_id, &candidate, "stale-run")).await.unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let body = body_json(conflict).await;
+        assert_eq!(body["code"], "STALE_BASE");
+        assert_eq!(body["base_version"], 1);
+        assert_eq!(body["current_version"], 2);
+
+        let conn = h.db.lock().unwrap();
+        let (status, candidate_path): (String, String) = conn.query_row(
+            "SELECT status, candidate_path FROM follow_up_runs WHERE id = 'stale-run'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(status, "conflicted");
+        assert_eq!(std::fs::read_to_string(&candidate_path).unwrap(), candidate);
+        let versions: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE thread_id = ?1",
+            [&h.thread_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(versions, 2, "stale candidate must not publish");
+
+        let saved = crate::artifacts::save_artifact_for_run(
+            &conn,
+            shared_artifacts_root(),
+            &h.thread_id,
+            candidate.as_bytes(),
+            Some("stale-run"),
+            Some("separate"),
+        ).unwrap();
+        assert_eq!(saved.version, 3);
+        let provenance: (Option<String>, Option<i64>, Option<String>) = conn.query_row(
+            "SELECT source_run_id, source_base_version, resolution
+             FROM artifacts WHERE thread_id = ?1 AND version = 3",
+            [&h.thread_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(provenance, (Some("stale-run".into()), Some(1), Some("separate".into())));
     }
 
     #[tokio::test]

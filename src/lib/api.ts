@@ -396,6 +396,33 @@ export function claimSystemRunNotification(
   });
 }
 
+export interface ConflictReview {
+  run_id: string;
+  thread_id: string;
+  project_id: string;
+  project_name: string;
+  thread_title: string;
+  agent: string;
+  model: string;
+  route: string | null;
+  base_version: number | null;
+  current_version: number;
+  resolution: string;
+  diff: ArtifactVersionDiff;
+}
+
+export function getConflictReview(runId: string): Promise<ConflictReview> {
+  return invoke<ConflictReview>("get_conflict_review", { run_id: runId });
+}
+
+export function publishConflictCandidate(runId: string): Promise<number> {
+  return invoke<number>("publish_conflict_candidate", { run_id: runId });
+}
+
+export function rebaseConflict(runId: string): Promise<RunStarted> {
+  return invoke<RunStarted>("rebase_conflict", { run_id: runId });
+}
+
 /** Cancel a live run (FR-4.8): SIGKILLs the whole process tree; the run ends
  *  `cancelled` with partial answers preserved. */
 export function cancelRun(runId: string): Promise<void> {
