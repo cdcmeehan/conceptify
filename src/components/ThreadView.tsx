@@ -26,6 +26,13 @@ import { GenerationError, GenerationProgress } from "./GenerationView";
 import { StatusChip } from "./StatusChip";
 import { ArtifactDiffPanel } from "./ArtifactDiffPanel";
 
+const PROFILE_LABELS = {
+  depth: { quick: "Quick", balanced: "Balanced", deep: "Deep" },
+  language: { plain: "Plain language", familiar: "Familiar", domain_native: "Domain-native" },
+  visuals: { auto: "Visuals when useful", prefer: "Prefer visuals", avoid: "Text only" },
+  shape: { auto: "Best fit", walkthrough: "Walkthrough", comparison: "Comparison", reference: "Reference" },
+} as const;
+
 export function ThreadView({ thread }: { thread: Thread | null }) {
   const state = useAppStore();
   const [openError, setOpenError] = useState<string | null>(null);
@@ -69,6 +76,13 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
       : [...versions]
           .reverse()
           .find((version) => version.version < resolvedVersion)?.version ?? null;
+  const versionMetadata = resolvedVersion == null
+    ? null
+    : versions.find((version) => version.version === resolvedVersion) ?? null;
+  const responseIntent = versionMetadata?.response_intent ?? null;
+  const profileSummary = responseIntent == null
+    ? null
+    : `${PROFILE_LABELS.depth[responseIntent.depth]} · ${PROFILE_LABELS.language[responseIntent.language]} · ${PROFILE_LABELS.visuals[responseIntent.visuals]} · ${PROFILE_LABELS.shape[responseIntent.shape]}`;
 
   const latestSeenRef = useRef({ threadId, version: latestVersion });
   useEffect(() => {
@@ -250,6 +264,22 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
             )}
           </button>
         </div>
+        {profileSummary != null ? (
+          <div class="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
+            <span class="cfy-chip bg-accent-bg text-accent-ink" title="Effective response profile stored with this artifact version">
+              Aa&nbsp; {profileSummary}
+            </span>
+            {versionMetadata!.skills.map((skill) => (
+              <span
+                key={`${skill.id}-${skill.capability_version}`}
+                class="cfy-chip bg-well text-muted"
+                title={`${skill.selection === "manual" ? "Chosen" : "Suggested"} skill · capability schema v${skill.capability_version}`}
+              >
+                {skill.selection === "manual" ? "Chosen" : "Suggested"}: {skill.name}
+              </span>
+            ))}
+          </div>
+        ) : null}
         {(viewingOldVersion || openError != null) && (
           <div class="mt-2 flex items-center gap-3">
             {viewingOldVersion && (

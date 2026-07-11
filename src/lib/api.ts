@@ -156,6 +156,13 @@ export interface ArtifactVersion {
   created_at: string;
   /** `initial` (v1) or `follow_up` (v2+). */
   created_by: string;
+  response_intent: ResponseIntent | null;
+  skills: Array<{
+    id: string;
+    name: string;
+    capability_version: number;
+    selection: "recommended" | "manual";
+  }>;
 }
 
 export function listArtifactVersions(threadId: string): Promise<ArtifactVersion[]> {
@@ -529,12 +536,24 @@ export function askFromApp(
   title: string | null,
   question: string,
   runOverride?: RunOverride | null,
+  responseIntent?: ResponseIntent,
+  skillMode: "auto" | "none" | "manual" = "auto",
+  selectedSkillIds: string[] = [],
 ): Promise<AskStarted> {
   return invoke<AskStarted>("ask_from_app", {
     project_id: projectId,
     title: title ?? null,
     question,
     run_override: runOverride ?? null,
+    response_intent: responseIntent ?? {
+      version: 1,
+      depth: "balanced",
+      language: "familiar",
+      visuals: "auto",
+      shape: "auto",
+    },
+    skill_mode: skillMode,
+    selected_skill_ids: selectedSkillIds,
   });
 }
 

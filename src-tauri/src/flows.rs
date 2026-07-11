@@ -259,8 +259,9 @@ pub async fn ask_follow_ups<R: Runtime>(
                 artifact_version: latest.version,
                 targets: ctx.open_comment_threads,
             })
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     let prompt = build_answer_prompt(&AnswerPromptContext {
         thread_id,
@@ -282,6 +283,7 @@ pub async fn ask_follow_ups<R: Runtime>(
             env,
             run_override,
             retry_of_run_id: None,
+            response_metadata: None,
         },
     )
     .await?;
@@ -365,8 +367,9 @@ pub async fn ask_single_comment<R: Runtime>(
                 artifact_version: latest.version,
                 targets: exchange,
             })
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     let prompt = build_answer_prompt(&AnswerPromptContext {
         thread_id,
@@ -388,6 +391,7 @@ pub async fn ask_single_comment<R: Runtime>(
             env,
             run_override,
             retry_of_run_id: None,
+            response_metadata: None,
         },
     )
     .await?;
@@ -419,52 +423,55 @@ pub async fn apply_to_artifact<R: Runtime>(
     let db = app_handle.state::<DbHandle>().inner().clone();
 
     let tid = thread_id.to_owned();
-    let loaded = db::with_conn_result(&db, move |conn| -> Result<LoadedFlow<Vec<Comment>>, FlowError> {
-        let ctx = context::thread_context(conn, &tid)?;
-        let latest = ctx.latest_artifact.ok_or(FlowError::NoArtifact)?;
-        // `list_comments_with_parent` pairs each comment with its `parent_id` so
-        // apply can target ROOTS only: `resolve-comment --applied` on a reply now
-        // 400s (`applied` is root-only), and an answered reply must never be
-        // picked up here (epic conceptify-6xi heads-up #2).
-        let all = crate::comments::list_comments_with_parent(conn, &tid, None)
-            .map_err(|e| FlowError::Context(ContextError::Comments(e)))?;
+    let loaded = db::with_conn_result(
+        &db,
+        move |conn| -> Result<LoadedFlow<Vec<Comment>>, FlowError> {
+            let ctx = context::thread_context(conn, &tid)?;
+            let latest = ctx.latest_artifact.ok_or(FlowError::NoArtifact)?;
+            // `list_comments_with_parent` pairs each comment with its `parent_id` so
+            // apply can target ROOTS only: `resolve-comment --applied` on a reply now
+            // 400s (`applied` is root-only), and an answered reply must never be
+            // picked up here (epic conceptify-6xi heads-up #2).
+            let all = crate::comments::list_comments_with_parent(conn, &tid, None)
+                .map_err(|e| FlowError::Context(ContextError::Comments(e)))?;
 
-        let targets: Vec<Comment> = if comment_ids.is_empty() {
-            all.into_iter()
-                .filter(|(c, parent)| c.status == CommentStatus::Answered && parent.is_none())
-                .map(|(c, _)| c)
-                .collect()
-        } else {
-            let mut picked = Vec::with_capacity(comment_ids.len());
-            for id in &comment_ids {
-                let (comment, parent_id) = all
-                    .iter()
-                    .find(|(c, _)| &c.id == id)
-                    .ok_or_else(|| FlowError::CommentNotFound(id.clone()))?;
-                if parent_id.is_some() {
-                    return Err(FlowError::TargetIsReply(id.clone()));
+            let targets: Vec<Comment> = if comment_ids.is_empty() {
+                all.into_iter()
+                    .filter(|(c, parent)| c.status == CommentStatus::Answered && parent.is_none())
+                    .map(|(c, _)| c)
+                    .collect()
+            } else {
+                let mut picked = Vec::with_capacity(comment_ids.len());
+                for id in &comment_ids {
+                    let (comment, parent_id) = all
+                        .iter()
+                        .find(|(c, _)| &c.id == id)
+                        .ok_or_else(|| FlowError::CommentNotFound(id.clone()))?;
+                    if parent_id.is_some() {
+                        return Err(FlowError::TargetIsReply(id.clone()));
+                    }
+                    if comment.status == CommentStatus::Applied {
+                        return Err(FlowError::AlreadyApplied(id.clone()));
+                    }
+                    picked.push(comment.clone());
                 }
-                if comment.status == CommentStatus::Applied {
-                    return Err(FlowError::AlreadyApplied(id.clone()));
-                }
-                picked.push(comment.clone());
+                picked
+            };
+            if targets.is_empty() {
+                return Err(FlowError::NoTargetComments);
             }
-            picked
-        };
-        if targets.is_empty() {
-            return Err(FlowError::NoTargetComments);
-        }
 
-        Ok(LoadedFlow {
-            project_id: ctx.project.id,
-            project_root: ctx.project.root_path,
-            title: ctx.thread.title,
-            question: ctx.thread.initial_question,
-            artifact_path: latest.file_path,
-            artifact_version: latest.version,
-            targets,
-        })
-    })
+            Ok(LoadedFlow {
+                project_id: ctx.project.id,
+                project_root: ctx.project.root_path,
+                title: ctx.thread.title,
+                question: ctx.thread.initial_question,
+                artifact_path: latest.file_path,
+                artifact_version: latest.version,
+                targets,
+            })
+        },
+    )
     .await?;
 
     let prompt = build_apply_prompt(&PromptContext {
@@ -487,6 +494,7 @@ pub async fn apply_to_artifact<R: Runtime>(
             env,
             run_override,
             retry_of_run_id: None,
+            response_metadata: None,
         },
     )
     .await?;
@@ -561,16 +569,27 @@ pub async fn rebase_conflict<R: Runtime>(
                 AND a.version = r.conflict_current_version
              WHERE r.id = ?1 AND r.status = 'conflicted'
                AND COALESCE(r.conflict_resolution, 'pending') = 'pending'",
-            [&source],
-            |r| Ok((
-                r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?, r.get::<_, Option<String>>(7)?,
-                r.get::<_, String>(8)?, r.get::<_, String>(9)?, r.get::<_, Option<String>>(10)?,
-            )),
-        ).map_err(|_| FlowError::NoArtifact)?;
+                [&source],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, Option<String>>(7)?,
+                        r.get::<_, String>(8)?,
+                        r.get::<_, String>(9)?,
+                        r.get::<_, Option<String>>(10)?,
+                    ))
+                },
+            )
+            .map_err(|_| FlowError::NoArtifact)?;
         Ok(row)
-    }).await?;
+    })
+    .await?;
 
     let run_override = match loaded.7 {
         Some(json) => serde_json::from_str(&json).ok(),
@@ -596,30 +615,39 @@ pub async fn rebase_conflict<R: Runtime>(
         candidate = loaded.5,
     );
     let env = child_env().await?;
-    let started = runs::start_run(app_handle, StartRun {
-        thread_id: loaded.0.clone(),
-        mode: RunMode::Apply,
-        prompt,
-        env,
-        run_override,
-        retry_of_run_id: Some(source_run_id.to_owned()),
-    }).await?;
+    let started = runs::start_run(
+        app_handle,
+        StartRun {
+            thread_id: loaded.0.clone(),
+            mode: RunMode::Apply,
+            prompt,
+            env,
+            run_override,
+            retry_of_run_id: Some(source_run_id.to_owned()),
+            response_metadata: None,
+        },
+    )
+    .await?;
     {
         let source = source_run_id.to_owned();
         let new_run = started.run_id.clone();
-        db::with_conn(&db, move |conn| conn.execute(
-            "UPDATE follow_up_runs SET conflict_resolution = ?2,
+        db::with_conn(&db, move |conn| {
+            conn.execute(
+                "UPDATE follow_up_runs SET conflict_resolution = ?2,
                  activity_dismissed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1 AND status = 'conflicted'",
-            rusqlite::params![source, format!("rebase:{new_run}")],
-        )).await?;
+                rusqlite::params![source, format!("rebase:{new_run}")],
+            )
+        })
+        .await?;
     }
     let thread_id = loaded.0.clone();
     let project_id = loaded.1.clone();
     db::with_conn(&db, {
         let thread_id = thread_id.clone();
         move |conn| threads::set_thread_status(conn, &thread_id, ThreadStatus::Updating)
-    }).await?;
+    })
+    .await?;
     emit_thread_updated(app_handle, &project_id, &thread_id, "updating");
     let finished = started.finished;
     let app = app_handle.clone();
@@ -655,9 +683,9 @@ async fn revert_updating<R: Runtime>(
     match changed {
         Ok(true) => emit_thread_updated(app_handle, project_id, thread_id, "ready"),
         Ok(false) => {} // already `ready` (agent saved) — nothing to announce
-        Err(e) => eprintln!(
-            "[conceptify-flows] failed to restore thread {thread_id} from updating: {e}"
-        ),
+        Err(e) => {
+            eprintln!("[conceptify-flows] failed to restore thread {thread_id} from updating: {e}")
+        }
     }
 }
 
@@ -759,6 +787,7 @@ pub async fn ask_from_app<R: Runtime>(
     title: Option<&str>,
     question: &str,
     run_override: Option<RunOverride>,
+    response_metadata: Option<crate::skill_catalog::RunResponseMetadata>,
 ) -> Result<AskStarted, FlowError> {
     let question = question.trim();
     if question.is_empty() {
@@ -778,9 +807,11 @@ pub async fn ask_from_app<R: Runtime>(
         &db,
         move |conn| -> Result<(String, String, String), FlowError> {
             let root: Option<String> = conn
-                .query_row("SELECT root_path FROM projects WHERE id = ?1", [&pid], |r| {
-                    r.get(0)
-                })
+                .query_row(
+                    "SELECT root_path FROM projects WHERE id = ?1",
+                    [&pid],
+                    |r| r.get(0),
+                )
                 .optional()?;
             let Some(root) = root else {
                 return Err(FlowError::ProjectNotFound(pid.clone()));
@@ -801,6 +832,7 @@ pub async fn ask_from_app<R: Runtime>(
         question,
         &project_root,
         run_override,
+        response_metadata,
         None,
     )
     .await
@@ -825,6 +857,7 @@ struct RetryLoad {
     title: String,
     question: String,
     run_override: Option<RunOverride>,
+    response_metadata: Option<crate::skill_catalog::RunResponseMetadata>,
     retry_of_run_id: String,
 }
 
@@ -849,7 +882,8 @@ pub async fn retry_ask<R: Runtime>(
         // frontend, so retry is robust across app restarts. A NULL
         // (override-free run) or an unparseable blob → None → current defaults;
         // a real override is re-applied verbatim.
-        let (retry_of_run_id, run_override) = load_latest_retry_source(conn, &tid)?;
+        let (retry_of_run_id, run_override, response_metadata) =
+            load_latest_retry_source(conn, &tid)?;
         Ok(RetryLoad {
             project_id: ctx.project.id,
             project_root: ctx.project.root_path,
@@ -857,6 +891,7 @@ pub async fn retry_ask<R: Runtime>(
             title: ctx.thread.title,
             question: ctx.thread.initial_question,
             run_override,
+            response_metadata,
             retry_of_run_id,
         })
     })
@@ -868,6 +903,7 @@ pub async fn retry_ask<R: Runtime>(
         title,
         question,
         run_override,
+        response_metadata,
         retry_of_run_id,
     } = loaded;
 
@@ -894,6 +930,7 @@ pub async fn retry_ask<R: Runtime>(
         &question,
         &project_root,
         run_override,
+        response_metadata,
         Some(retry_of_run_id),
     )
     .await
@@ -916,18 +953,39 @@ pub async fn retry_ask<R: Runtime>(
 fn load_latest_retry_source(
     conn: &Connection,
     thread_id: &str,
-) -> Result<(String, Option<RunOverride>), rusqlite::Error> {
-    let (run_id, raw): (String, Option<String>) = conn
-        .query_row(
-            "SELECT id, override_json FROM follow_up_runs
+) -> Result<
+    (
+        String,
+        Option<RunOverride>,
+        Option<crate::skill_catalog::RunResponseMetadata>,
+    ),
+    rusqlite::Error,
+> {
+    let (run_id, raw, intent_raw, skills_raw): (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = conn.query_row(
+        "SELECT id, override_json, response_intent_json, selected_skills_json
+             FROM follow_up_runs
              WHERE thread_id = ?1 ORDER BY started_at DESC, id DESC LIMIT 1",
-            [thread_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        [thread_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
     let run_override = raw
         .and_then(|json| serde_json::from_str::<RunOverride>(&json).ok())
         .filter(|o| !o.is_empty());
-    Ok((run_id, run_override))
+    let response_metadata = intent_raw
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .map(|intent| crate::skill_catalog::RunResponseMetadata {
+            intent,
+            skills: skills_raw
+                .as_deref()
+                .and_then(|json| serde_json::from_str(json).ok())
+                .unwrap_or_default(),
+        });
+    Ok((run_id, run_override, response_metadata))
 }
 
 /// Assemble the ask prompt, prepare the child env, start the generation run,
@@ -944,6 +1002,7 @@ async fn try_spawn_ask<R: Runtime>(
     question: &str,
     project_root: &str,
     run_override: Option<RunOverride>,
+    response_metadata: Option<crate::skill_catalog::RunResponseMetadata>,
     retry_of_run_id: Option<String>,
 ) -> Result<AskStarted, FlowError> {
     let prompt = build_ask_prompt(&AskPromptContext {
@@ -952,6 +1011,7 @@ async fn try_spawn_ask<R: Runtime>(
         title,
         question,
         project_root,
+        response_metadata: response_metadata.as_ref(),
     });
     let env = child_env().await?;
 
@@ -964,6 +1024,7 @@ async fn try_spawn_ask<R: Runtime>(
             env,
             run_override,
             retry_of_run_id,
+            response_metadata,
         },
     )
     .await?;
@@ -1503,6 +1564,59 @@ pub(crate) struct AskPromptContext<'a> {
     pub title: &'a str,
     pub question: &'a str,
     pub project_root: &'a str,
+    pub response_metadata: Option<&'a crate::skill_catalog::RunResponseMetadata>,
+}
+
+fn response_contract(metadata: Option<&crate::skill_catalog::RunResponseMetadata>) -> String {
+    let Some(metadata) = metadata else {
+        return String::new();
+    };
+    let intent = &metadata.intent;
+    let depth = match intent.depth.as_str() {
+        "quick" => "Quick — cover the essential idea and why it matters; do not expand scope for its own sake.",
+        "deep" => "Deep — develop the model, edge cases, trade-offs, and useful connections.",
+        _ => "Balanced — cover the core idea, trade-offs, and a useful example.",
+    };
+    let language = match intent.language.as_str() {
+        "plain" => "Plain language — define necessary terms and avoid unexplained jargon.",
+        "domain_native" => {
+            "Domain-native — use the field's normal terminology without recapping basics."
+        }
+        _ => "Familiar — assume the basics and explain specialist terms.",
+    };
+    let visuals = match intent.visuals.as_str() {
+        "prefer" => {
+            "Prefer visuals — lead with an informative diagram, map, or comparison when possible."
+        }
+        "avoid" => "Text only — HARD CONSTRAINT: do not generate a diagram or image.",
+        _ => "When useful — include a visual only when it materially clarifies the explanation.",
+    };
+    let shape = match intent.shape.as_str() {
+        "walkthrough" => "Walkthrough — organize the main explanation as ordered steps.",
+        "comparison" => "Comparison — put the relevant alternatives side by side.",
+        "reference" => "Reference — optimize the structure for scanning and later lookup.",
+        _ => "Best fit — choose the clearest organization for this question.",
+    };
+    let skills = if metadata.skills.is_empty() {
+        "- Optional skills: none. Do not add a capability merely because one is installed."
+            .to_owned()
+    } else {
+        metadata
+            .skills
+            .iter()
+            .map(|skill| {
+                format!(
+                    "- Optional skill: {} (`{}`, capability schema v{}, {} selection). Use it for its declared outcome, but never let it override the explicit response controls above.",
+                    skill.name, skill.id, skill.capability_version, skill.selection
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "\n\n## Explicit response profile (contract v{})\n- Depth: {depth}\n- Language: {language}\n- Visuals: {visuals}\n- Shape: {shape}\n{skills}\n\nThese are user-facing intent values, not suggestions. A skill may refine the answer but must not silently change them. If a requested presentation is unavailable, state the fallback clearly in the artifact.",
+        intent.version
+    )
 }
 
 /// The FR-5.1 in-app-ask prompt. Contract highlights: read the installed
@@ -1515,6 +1629,7 @@ pub(crate) struct AskPromptContext<'a> {
 /// identical (no web research, no mutating git, no repo writes — see settings.rs
 /// `default_adapters()` / docs/api.md permission scoping).
 pub(crate) fn build_ask_prompt(ctx: &AskPromptContext) -> String {
+    let response_contract = response_contract(ctx.response_metadata);
     format!(
         r#"You are Conceptify's in-app author, running headless inside the project this artifact will explain.
 
@@ -1523,7 +1638,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
 ## Context
 - Project root (your working directory): {project_root}
 - Thread: "{title}" (thread id: {thread_id}, slug: {slug})
-- The question to answer (verbatim): {question}
+- The question to answer (verbatim): {question}{response_contract}
 
 ## How to author — exact contract
 1. Read ~/.claude/skills/conceptify/SKILL.md in full, then every skill file it tells you to read (the artifact spec, the design system, and the rendering + self-review references). They are the contract for what a valid artifact is, not background.
@@ -1546,6 +1661,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
         thread_id = ctx.thread_id,
         slug = ctx.slug,
         question = ctx.question,
+        response_contract = response_contract,
     )
 }
 
@@ -1633,7 +1749,10 @@ mod tests {
         ];
         // The claude mechanism is byte-identical to the pre-w9e prompt: proves
         // both the assembly and that the claude scope note is unchanged.
-        let prompt = apply_scope_note(&build_answer_prompt(&fixture_answer_ctx(&exchanges)), "claude");
+        let prompt = apply_scope_note(
+            &build_answer_prompt(&fixture_answer_ctx(&exchanges)),
+            "claude",
+        );
 
         let expected = r#"You are Conceptify's follow-up answerer, running headless inside the project this artifact explains.
 
@@ -1718,7 +1837,10 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
             root,
             replies: vec![reply],
         }];
-        let prompt = apply_scope_note(&build_answer_prompt(&fixture_answer_ctx(&exchanges)), "claude");
+        let prompt = apply_scope_note(
+            &build_answer_prompt(&fixture_answer_ctx(&exchanges)),
+            "claude",
+        );
 
         let expected = r#"You are Conceptify's follow-up answerer, running headless inside the project this artifact explains.
 
@@ -1762,7 +1884,10 @@ Answer now: resolve comment r-1 (the latest unanswered message in this exchange)
     #[test]
     fn apply_prompt_exact_for_fixture() {
         let comments = vec![fixture_comment("c-answered", true, CommentStatus::Answered)];
-        let prompt = apply_scope_note(&build_apply_prompt(&fixture_prompt_ctx(&comments)), "claude");
+        let prompt = apply_scope_note(
+            &build_apply_prompt(&fixture_prompt_ctx(&comments)),
+            "claude",
+        );
 
         let expected = r#"You are Conceptify's artifact updater, running headless inside the project this artifact explains.
 
@@ -1834,6 +1959,7 @@ Why this order: `--applied` freezes each comment at the artifact version it was 
                 title: "How does OAuth work?",
                 question: "Explain the OAuth 2.0 authorization code flow.",
                 project_root: "/Users/chris/code/myrepo",
+                response_metadata: None,
             }),
             "claude",
         );
@@ -1866,6 +1992,54 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
     }
 
     #[test]
+    fn ask_prompt_keeps_depth_language_visual_shape_and_skill_explicit() {
+        let metadata = crate::skill_catalog::RunResponseMetadata {
+            intent: crate::skill_catalog::ResponseIntentInput {
+                version: 1,
+                depth: "deep".to_owned(),
+                language: "plain".to_owned(),
+                visuals: "avoid".to_owned(),
+                shape: "reference".to_owned(),
+            },
+            skills: vec![crate::skill_catalog::SelectedSkill {
+                id: "conceptify".to_owned(),
+                name: "Conceptify artifact".to_owned(),
+                capability_version: 1,
+                selection: "manual".to_owned(),
+            }],
+        };
+        let prompt = build_ask_prompt(&AskPromptContext {
+            thread_id: "t1",
+            slug: "profile",
+            title: "Profile",
+            question: "Explain this",
+            project_root: "/tmp/project",
+            response_metadata: Some(&metadata),
+        });
+        assert!(
+            prompt.contains("Depth: Deep — develop the model, edge cases"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Language: Plain language — define necessary terms"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("HARD CONSTRAINT: do not generate a diagram or image"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Shape: Reference — optimize the structure"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("`conceptify`, capability schema v1, manual selection"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("must not silently change them"), "{prompt}");
+    }
+
+    #[test]
     fn answer_prompt_exact_codex() {
         // Same two-exchange fixture as `answer_prompt_exact_for_fixture`; ONLY
         // the scope line differs — the codex mechanism note verbatim. The
@@ -1877,7 +2051,10 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
             exchange(fixture_comment("c-anchored", true, CommentStatus::Open)),
             exchange(fixture_comment("c-direct", false, CommentStatus::Open)),
         ];
-        let prompt = apply_scope_note(&build_answer_prompt(&fixture_answer_ctx(&exchanges)), "codex");
+        let prompt = apply_scope_note(
+            &build_answer_prompt(&fixture_answer_ctx(&exchanges)),
+            "codex",
+        );
 
         let expected = r#"You are Conceptify's follow-up answerer, running headless inside the project this artifact explains.
 
@@ -1951,6 +2128,7 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
                     title: "How does OAuth work?",
                     question: "Explain the OAuth 2.0 authorization code flow.",
                     project_root: "/Users/chris/code/myrepo",
+                    response_metadata: None,
                 }),
             ),
         ];
@@ -2205,8 +2383,10 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
 
         fn comment_status(&self, id: &str) -> String {
             let conn = self.db.lock().unwrap();
-            conn.query_row("SELECT status FROM comments WHERE id = ?1", [id], |r| r.get(0))
-                .unwrap()
+            conn.query_row("SELECT status FROM comments WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
         }
 
         fn thread_status(&self) -> String {
@@ -2777,9 +2957,16 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
              exit 0\n",
         );
 
-        let started = ask_from_app(&h.handle, &h.project_id, Some("OAuth"), "Explain OAuth.", None)
-            .await
-            .unwrap();
+        let started = ask_from_app(
+            &h.handle,
+            &h.project_id,
+            Some("OAuth"),
+            "Explain OAuth.",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_ne!(started.thread_id, h.thread_id, "a fresh thread is created");
 
         let run_id = started.run_id.clone();
@@ -2795,9 +2982,11 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
         // A thread-updated {status:"error"} landed for the new thread.
         assert!(
             wait_until(
-                || h.thread_updated.lock().unwrap().iter().any(|e| e["thread_id"]
-                    == started.thread_id.as_str()
-                    && e["status"] == "error"),
+                || {
+                    h.thread_updated.lock().unwrap().iter().any(|e| {
+                        e["thread_id"] == started.thread_id.as_str() && e["status"] == "error"
+                    })
+                },
                 5_000
             )
             .await
@@ -2829,9 +3018,16 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
         // Sleep so a save can land mid-run before the process exits 0.
         h.install_fake_agent("#!/bin/sh\nsleep 1\nexit 0\n");
 
-        let started = ask_from_app(&h.handle, &h.project_id, None, "Explain the flow", None)
-            .await
-            .unwrap();
+        let started = ask_from_app(
+            &h.handle,
+            &h.project_id,
+            None,
+            "Explain the flow",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(h.thread_status_of(&started.thread_id), "generating");
 
         // Simulate the agent's mid-run save-artifact → thread flips to `ready`.
@@ -2859,9 +3055,16 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
     async fn ask_crash_errors_thread() {
         let h = harness("ask-crash");
         h.install_fake_agent("#!/bin/sh\nexit 3\n");
-        let started = ask_from_app(&h.handle, &h.project_id, None, "Explain crash handling", None)
-            .await
-            .unwrap();
+        let started = ask_from_app(
+            &h.handle,
+            &h.project_id,
+            None,
+            "Explain crash handling",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         let run_id = started.run_id.clone();
         assert!(wait_until(|| h.run_row(&run_id).0 == "failed", 15_000).await);
         assert!(wait_until(|| h.thread_status_of(&started.thread_id) == "error", 15_000).await);
@@ -2871,9 +3074,16 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
     async fn ask_timeout_errors_thread() {
         let h = harness("ask-timeout");
         h.install_fake_agent_timeout("#!/bin/sh\nsleep 30\n", 1);
-        let started = ask_from_app(&h.handle, &h.project_id, None, "Explain timeouts", None)
-            .await
-            .unwrap();
+        let started = ask_from_app(
+            &h.handle,
+            &h.project_id,
+            None,
+            "Explain timeouts",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         let run_id = started.run_id.clone();
         assert!(wait_until(|| h.run_row(&run_id).0 == "timeout", 15_000).await);
         assert!(wait_until(|| h.thread_status_of(&started.thread_id) == "error", 15_000).await);
@@ -2884,9 +3094,26 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
         let h = harness("ask-retry");
         // First ask: exit 0 without saving → error.
         h.install_fake_agent("#!/bin/sh\nexit 0\n");
-        let first = ask_from_app(&h.handle, &h.project_id, Some("Retry me"), "Explain retries", None)
-            .await
-            .unwrap();
+        let response_metadata = crate::skill_catalog::RunResponseMetadata {
+            intent: crate::skill_catalog::ResponseIntentInput {
+                version: 1,
+                depth: "deep".to_owned(),
+                language: "plain".to_owned(),
+                visuals: "avoid".to_owned(),
+                shape: "reference".to_owned(),
+            },
+            skills: Vec::new(),
+        };
+        let first = ask_from_app(
+            &h.handle,
+            &h.project_id,
+            Some("Retry me"),
+            "Explain retries",
+            None,
+            Some(response_metadata),
+        )
+        .await
+        .unwrap();
         let thread_id = first.thread_id.clone();
         assert!(wait_until(|| h.thread_status_of(&thread_id) == "error", 15_000).await);
         assert_eq!(h.run_count(&thread_id), 1);
@@ -2897,25 +3124,46 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
         assert_eq!(retry.thread_id, thread_id, "retry re-uses the same thread");
         assert_ne!(retry.run_id, first.run_id, "retry spawns a NEW run row");
         assert_eq!(h.run_count(&thread_id), 2);
-        let retry_of: Option<String> = h
-            .db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT retry_of_run_id FROM follow_up_runs WHERE id = ?1",
-                [&retry.run_id],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let retry_of: Option<String> =
+            h.db.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT retry_of_run_id FROM follow_up_runs WHERE id = ?1",
+                    [&retry.run_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
         assert_eq!(retry_of.as_deref(), Some(first.run_id.as_str()));
+        let profiles: Vec<(String, String)> = {
+            let conn = h.db.lock().unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT response_intent_json, selected_skills_json
+                     FROM follow_up_runs WHERE id IN (?1, ?2) ORDER BY id",
+                )
+                .unwrap();
+            stmt.query_map(rusqlite::params![first.run_id, retry.run_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(
+            profiles[0], profiles[1],
+            "retry preserves immutable profile and skills"
+        );
 
         // Thread went back to `generating`, with a thread-updated event.
         assert_eq!(h.thread_status_of(&thread_id), "generating");
         assert!(
             wait_until(
-                || h.thread_updated.lock().unwrap().iter().any(|e| e["thread_id"]
-                    == thread_id.as_str()
-                    && e["status"] == "generating"),
+                || h.thread_updated
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["thread_id"] == thread_id.as_str() && e["status"] == "generating"),
                 5_000
             )
             .await
@@ -2958,6 +3206,7 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
             Some("Override retry"),
             "Explain overrides",
             Some(over),
+            None,
         )
         .await
         .unwrap();
@@ -3001,13 +3250,13 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
         h.install_fake_agent("#!/bin/sh\nexit 0\n");
 
         // Empty/whitespace question → EmptyQuestion (no thread created).
-        let err = ask_from_app(&h.handle, &h.project_id, None, "   ", None)
+        let err = ask_from_app(&h.handle, &h.project_id, None, "   ", None, None)
             .await
             .unwrap_err();
         assert!(matches!(err, FlowError::EmptyQuestion), "{err:?}");
 
         // Unknown project → ProjectNotFound (no thread created).
-        let err = ask_from_app(&h.handle, "no-such-project", None, "q", None)
+        let err = ask_from_app(&h.handle, "no-such-project", None, "q", None, None)
             .await
             .unwrap_err();
         assert!(matches!(err, FlowError::ProjectNotFound(_)), "{err:?}");

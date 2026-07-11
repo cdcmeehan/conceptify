@@ -60,8 +60,10 @@ async fn diff_versions<R: tauri::Runtime>(
     .await;
     match result {
         Ok(diff) => (StatusCode::OK, Json(diff)).into_response(),
-        Err(error @ (crate::artifact_diff::DiffError::ThreadNotFound(_)
-        | crate::artifact_diff::DiffError::VersionNotFound { .. })) => (
+        Err(
+            error @ (crate::artifact_diff::DiffError::ThreadNotFound(_)
+            | crate::artifact_diff::DiffError::VersionNotFound { .. }),
+        ) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": error.to_string() })),
         )
@@ -103,13 +105,11 @@ async fn save_artifact<R: tauri::Runtime>(
         .get("x-conceptify-run-id")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let result = db::with_conn_result(&state.db, move |conn| {
-        match source_run_id.as_deref() {
-            Some(run_id) => artifacts::save_artifact_for_run(
-                conn, &root, &tid, &body, Some(run_id), None,
-            ),
-            None => artifacts::save_artifact(conn, &root, &tid, &body),
+    let result = db::with_conn_result(&state.db, move |conn| match source_run_id.as_deref() {
+        Some(run_id) => {
+            artifacts::save_artifact_for_run(conn, &root, &tid, &body, Some(run_id), None)
         }
+        None => artifacts::save_artifact(conn, &root, &tid, &body),
     })
     .await;
 
@@ -343,10 +343,9 @@ mod tests {
 
     fn post_run(thread_id: &str, body: &str, run_id: &str) -> Request<Body> {
         let mut request = post(thread_id, body, Some(TOKEN));
-        request.headers_mut().insert(
-            "x-conceptify-run-id",
-            run_id.parse().unwrap(),
-        );
+        request
+            .headers_mut()
+            .insert("x-conceptify-run-id", run_id.parse().unwrap());
         request
     }
 
@@ -493,23 +492,43 @@ mod tests {
     #[tokio::test]
     async fn stale_run_retains_candidate_and_explicit_separate_publish_recovers() {
         let h = harness("stale-candidate");
-        let first = h.router.clone().oneshot(post(&h.thread_id, &valid_html(1), Some(TOKEN))).await.unwrap();
+        let first = h
+            .router
+            .clone()
+            .oneshot(post(&h.thread_id, &valid_html(1), Some(TOKEN)))
+            .await
+            .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
         {
             let conn = h.db.lock().unwrap();
             conn.execute(
                 "INSERT INTO follow_up_runs
                      (id, thread_id, agent, model, mode, status, log_path,
-                      run_class, base_artifact_version)
+                      run_class, base_artifact_version,
+                      response_intent_json, selected_skills_json)
                  VALUES ('stale-run', ?1, 'claude', 'm', 'apply', 'running', '/r.log',
-                         'mutation', 1)",
-                [&h.thread_id],
+                         'mutation', 1, ?2, ?3)",
+                rusqlite::params![
+                    h.thread_id,
+                    r#"{"version":1,"depth":"deep","language":"plain","visuals":"avoid","shape":"reference"}"#,
+                    r#"[{"id":"conceptify","name":"Conceptify artifact","capability_version":1,"selection":"manual"}]"#,
+                ],
             ).unwrap();
         }
-        let second = h.router.clone().oneshot(post(&h.thread_id, &valid_html(2), Some(TOKEN))).await.unwrap();
+        let second = h
+            .router
+            .clone()
+            .oneshot(post(&h.thread_id, &valid_html(2), Some(TOKEN)))
+            .await
+            .unwrap();
         assert_eq!(second.status(), StatusCode::OK);
         let candidate = valid_html(3).replace(">T</h1>", ">Stale candidate</h1>");
-        let conflict = h.router.clone().oneshot(post_run(&h.thread_id, &candidate, "stale-run")).await.unwrap();
+        let conflict = h
+            .router
+            .clone()
+            .oneshot(post_run(&h.thread_id, &candidate, "stale-run"))
+            .await
+            .unwrap();
         assert_eq!(conflict.status(), StatusCode::CONFLICT);
         let body = body_json(conflict).await;
         assert_eq!(body["code"], "STALE_BASE");
@@ -537,14 +556,23 @@ mod tests {
             candidate.as_bytes(),
             Some("stale-run"),
             Some("separate"),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(saved.version, 3);
-        let provenance: (Option<String>, Option<i64>, Option<String>) = conn.query_row(
-            "SELECT source_run_id, source_base_version, resolution
+        let provenance: (Option<String>, Option<i64>, Option<String>, String, String) = conn
+            .query_row(
+                "SELECT source_run_id, source_base_version, resolution,
+                    response_intent_json, selected_skills_json
              FROM artifacts WHERE thread_id = ?1 AND version = 3",
-            [&h.thread_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        ).unwrap();
-        assert_eq!(provenance, (Some("stale-run".into()), Some(1), Some("separate".into())));
+                [&h.thread_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(provenance.0, Some("stale-run".into()));
+        assert_eq!(provenance.1, Some(1));
+        assert_eq!(provenance.2, Some("separate".into()));
+        assert!(provenance.3.contains("\"depth\":\"deep\""));
+        assert!(provenance.4.contains("\"capability_version\":1"));
     }
 
     #[tokio::test]

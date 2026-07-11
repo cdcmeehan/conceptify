@@ -497,6 +497,9 @@ class AppStore {
             submission.title === "" ? null : submission.title,
             submission.question,
             runOverrideOfModel(submission.modelOverride),
+            submission.responseIntent,
+            submission.skillMode,
+            submission.selectedSkillIds,
           );
           const active = await api.getActiveRun(started.thread_id).catch(() => null);
           const latest = active == null
@@ -793,6 +796,8 @@ class AppStore {
           version: payload.version,
           created_at: new Date().toISOString(),
           created_by: payload.version === 1 ? "initial" : "follow_up",
+          response_intent: null,
+          skills: [],
         },
       ].sort((a, b) => a.version - b.version);
       this.set({ artifactVersions: optimistic });

@@ -230,6 +230,9 @@ pub struct StartRun {
     /// Original attempt when this submission is an explicit retry. Immutable
     /// lineage; retries never mutate or replace their source row.
     pub retry_of_run_id: Option<String>,
+    /// Fully resolved provider-neutral response intent and versioned skills.
+    /// `None` for legacy answer/apply runs that do not yet expose a profile.
+    pub response_metadata: Option<crate::skill_catalog::RunResponseMetadata>,
 }
 
 /// Handle returned by [`start_run`]. Dropping it does **not** affect the run
@@ -797,6 +800,7 @@ async fn prepare_persisted(
             env,
             run_override,
             retry_of_run_id: row.retry_of_run_id,
+            response_metadata: None,
         },
         route,
         invocation,
@@ -995,6 +999,12 @@ async fn start_reserved<R: Runtime>(
     let env_json = serde_json::to_string(&req.env).expect("run env always serializes");
     let prompt_chars = prompt.chars().count();
     let retry_of_run_id = req.retry_of_run_id.clone();
+    let response_intent_json = req.response_metadata.as_ref().map(|metadata| {
+        serde_json::to_string(&metadata.intent).expect("response intent serializes")
+    });
+    let selected_skills_json = req.response_metadata.as_ref().map(|metadata| {
+        serde_json::to_string(&metadata.skills).expect("selected skills serialize")
+    });
     {
         let (run_id, thread_id, agent, model, mode, log_path_str, override_json, route_tag) = (
             run_id.to_owned(),
@@ -1027,14 +1037,24 @@ async fn start_reserved<R: Runtime>(
                     env_json: &env_json,
                     base_artifact_version,
                     retry_of_run_id: retry_of_run_id.as_deref(),
+                    response_intent_json: response_intent_json.as_deref(),
+                    selected_skills_json: selected_skills_json.as_deref(),
                 },
             )
         })
         .await?;
     }
 
-    append_log(&log_path, &format!("[run] queued {run_id} at {}", now_iso()));
-    emit_run_state(app_handle, run_id, &req.thread_id, RunStatus::Queued.as_str());
+    append_log(
+        &log_path,
+        &format!("[run] queued {run_id} at {}", now_iso()),
+    );
+    emit_run_state(
+        app_handle,
+        run_id,
+        &req.thread_id,
+        RunStatus::Queued.as_str(),
+    );
     let (done_tx, done_rx) = oneshot::channel();
     let started_thread_id = req.thread_id.clone();
     let prepared = PreparedExec {
@@ -1076,13 +1096,18 @@ async fn execute_when_admitted<R: Runtime>(
         let notified = registry.notify.notified();
         let pool = prepared.provider_pool.clone();
         let capacity = match db::with_conn_result(&db, move |conn| -> Result<usize, RunError> {
-            Ok(settings::get_settings(conn)?.run_concurrency.limit_for(&pool))
+            Ok(settings::get_settings(conn)?
+                .run_concurrency
+                .limit_for(&pool))
         })
         .await
         {
             Ok(limit) => limit,
             Err(e) => {
-                append_log(&prepared.log_path, &format!("[run] capacity lookup failed: {e}"));
+                append_log(
+                    &prepared.log_path,
+                    &format!("[run] capacity lookup failed: {e}"),
+                );
                 mark_run_failed(&db, &run_id).await;
                 let _ = done_tx.send(FinishedRun {
                     run_id,
@@ -1137,7 +1162,10 @@ async fn execute_when_admitted<R: Runtime>(
                 }
             }
             Err(e) => {
-                append_log(&prepared.log_path, &format!("[run] queue admission failed: {e}"));
+                append_log(
+                    &prepared.log_path,
+                    &format!("[run] queue admission failed: {e}"),
+                );
                 mark_run_failed(&db, &run_id).await;
                 let _ = done_tx.send(FinishedRun {
                     run_id,
@@ -1411,12 +1439,7 @@ fn spawn_supervisor<R: Runtime>(
                     let id = ctx.run_id.clone();
                     let until_for_db = until.clone();
                     let throttled = db::with_conn(&ctx.db, move |conn| {
-                        crate::run_queue::throttle(
-                            conn,
-                            &id,
-                            &until_for_db,
-                            "provider_rate_limit",
-                        )
+                        crate::run_queue::throttle(conn, &id, &until_for_db, "provider_rate_limit")
                     })
                     .await
                     .unwrap_or(false);
@@ -2155,6 +2178,7 @@ mod tests {
                     env: Vec::new(),
                     run_override,
                     retry_of_run_id: None,
+                    response_metadata: None,
                 },
             )
             .await
@@ -3160,6 +3184,7 @@ mod tests {
                 env: Vec::new(),
                 run_override: None,
                 retry_of_run_id: None,
+                response_metadata: None,
             },
         )
         .await
@@ -3195,6 +3220,8 @@ mod tests {
                     env_json: "[]",
                     base_artifact_version: None,
                     retry_of_run_id: None,
+                    response_intent_json: None,
+                    selected_skills_json: None,
                 },
             )
             .unwrap();
@@ -3244,6 +3271,8 @@ mod tests {
                     env_json: "[]",
                     base_artifact_version: None,
                     retry_of_run_id: None,
+                    response_intent_json: None,
+                    selected_skills_json: None,
                 },
             )
             .unwrap();
@@ -3293,11 +3322,17 @@ mod tests {
                     env_json: "[]",
                     base_artifact_version: None,
                     retry_of_run_id: None,
+                    response_intent_json: None,
+                    selected_skills_json: None,
                 },
             )
             .unwrap();
             for (id, status, finished) in [
-                ("recent", "completed", "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"),
+                (
+                    "recent",
+                    "completed",
+                    "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                ),
                 ("attention", "failed", "'2000-01-01T00:00:00.000Z'"),
                 ("conflict", "conflicted", "'2000-01-01T00:00:00.000Z'"),
                 ("old-complete", "completed", "'2000-01-01T00:00:00.000Z'"),

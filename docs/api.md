@@ -209,19 +209,27 @@ and are invoked by the app shell as Tauri commands (snake_case args):
 
 The in-app ask flow (FR-5.1/5.2/5.3, bead 959.1/959.2) adds three more:
 
-- `ask_from_app { project_id, title?, question, run_override? }` → `{ run_id,
+- `ask_from_app { project_id, title?, question, run_override?, response_intent,
+  skill_mode, selected_skill_ids }` → `{ run_id,
   thread_id }` — FR-5.1: creates a thread (status `generating`) and spawns ONE headless
   `ask` (`mode: "ask"`, `Purpose::InAppAsk`) generation run whose contract is
   to author an artifact per the installed Conceptify skill and publish it via
   `conceptify save-artifact` into that thread. `title` is optional (derived
   from the question's first words when blank). `cwd` = project root. Errors
-  (user-facing strings): empty question, unknown project, missing agent/CLI.
+  The response-intent v1 object is validated and `skill_mode` is `auto`, `none`,
+  or `manual`; automatic selection runs locally before thread creation, while
+  unknown/unavailable manual skills fail visibly. The resolved profile and
+  versioned skills become immutable run metadata and explicit agent
+  instructions. Errors (user-facing strings): invalid profile/skill, empty
+  question, unknown project, missing agent/CLI.
 - `retry_ask { thread_id }` → `{ run_id, thread_id }` — FR-5.3: re-spawns the
   SAME question into the SAME thread, moving it back to `generating`. A fresh
   `follow_up_runs` row is created; the failed run's history stays on disk.
   **Takes no `run_override`** — it reuses the ORIGINAL run's persisted override
   (see below), so a retried generation runs with the same adapter/model choice
-  the user made, robustly across app restarts.
+  the user made, robustly across app restarts. It also reuses the original
+  resolved response profile and skill versions; retry never re-runs current
+  recommendations or silently adopts changed preferences.
 - `get_latest_run { thread_id }` → `{ run_id, mode, status, model, route,
   overridden }` or `null` — the most recent run row for a thread (any
   mode/status). The FR-5.3 error state uses it to resolve the failed
@@ -455,6 +463,11 @@ settings commands are the exception (they emit `settings-changed`, above).
 - `diff_versions { thread_id, from_version, to_version }` → the same
   `ArtifactVersionDiffResponse` as the authenticated HTTP endpoint below. It is
   a read-only command and emits no event.
+
+`list_artifact_versions` also returns `response_intent` and `skills` for each
+historical version. Both are snapshots copied from the publishing run (or
+inherited from the preceding artifact for an unprofiled follow-up), allowing
+the thread header to show effective provenance without exposing raw prompts.
 
 **Skill capabilities (`conceptify-l9w.2`):**
 

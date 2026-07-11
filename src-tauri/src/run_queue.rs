@@ -47,6 +47,8 @@ pub struct NewQueuedRun<'a> {
     pub env_json: &'a str,
     pub base_artifact_version: Option<i64>,
     pub retry_of_run_id: Option<&'a str>,
+    pub response_intent_json: Option<&'a str>,
+    pub selected_skills_json: Option<&'a str>,
 }
 
 /// Allocate a monotonic sequence and persist the complete restart-safe payload
@@ -63,9 +65,11 @@ pub fn enqueue(conn: &Connection, run: &NewQueuedRun<'_>) -> rusqlite::Result<i6
         "INSERT INTO follow_up_runs
              (id, thread_id, agent, model, mode, status, log_path,
               override_json, route, run_class, provider_pool, prompt, env_json,
-              base_artifact_version, queued_at, queue_seq, retry_of_run_id)
+              base_artifact_version, queued_at, queue_seq, retry_of_run_id,
+              response_intent_json, selected_skills_json)
          VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?10, ?11,
-                 ?12, ?13, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?14, ?15)",
+                 ?12, ?13, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?14, ?15,
+                 ?16, ?17)",
         rusqlite::params![
             run.id,
             run.thread_id,
@@ -82,6 +86,8 @@ pub fn enqueue(conn: &Connection, run: &NewQueuedRun<'_>) -> rusqlite::Result<i6
             run.base_artifact_version,
             queue_seq,
             run.retry_of_run_id,
+            run.response_intent_json,
+            run.selected_skills_json,
         ],
     )?;
     Ok(queue_seq)
@@ -376,6 +382,8 @@ mod tests {
                     env_json: "[]",
                     base_artifact_version: None,
                     retry_of_run_id: None,
+                    response_intent_json: None,
+                    selected_skills_json: None,
                 },
             )
             .unwrap()
@@ -431,29 +439,12 @@ mod tests {
         h.enqueue("p2", 1, RunClass::Exploration, "anthropic");
 
         let conn = h.db.lock().unwrap();
-        let none = admit_next(
-            &conn,
-            "anthropic",
-            1,
-            1,
-            &HashSet::new(),
-            None,
-            None,
-        )
-        .unwrap();
+        let none = admit_next(&conn, "anthropic", 1, 1, &HashSet::new(), None, None).unwrap();
         assert!(none.is_none(), "full provider pool admits nothing");
 
-        let first = admit_next(
-            &conn,
-            "anthropic",
-            2,
-            0,
-            &HashSet::new(),
-            None,
-            None,
-        )
-        .unwrap()
-        .unwrap();
+        let first = admit_next(&conn, "anthropic", 2, 0, &HashSet::new(), None, None)
+            .unwrap()
+            .unwrap();
         assert_eq!(first.id, "p1-first");
 
         let active_mutations = HashSet::from([h.threads[0].clone()]);
@@ -569,10 +560,12 @@ mod tests {
     fn throttle_releases_row_until_not_before() {
         let h = Harness::new();
         h.enqueue("run", 0, RunClass::Exploration, "anthropic");
-        h.db
-            .lock()
+        h.db.lock()
             .unwrap()
-            .execute("UPDATE follow_up_runs SET status = 'running' WHERE id = 'run'", [])
+            .execute(
+                "UPDATE follow_up_runs SET status = 'running' WHERE id = 'run'",
+                [],
+            )
             .unwrap();
         assert!(throttle(
             &h.db.lock().unwrap(),

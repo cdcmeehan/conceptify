@@ -71,6 +71,20 @@ pub struct SkillRecommendation {
     pub selected_manually: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SelectedSkill {
+    pub id: String,
+    pub name: String,
+    pub capability_version: u32,
+    pub selection: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RunResponseMetadata {
+    pub intent: ResponseIntentInput,
+    pub skills: Vec<SelectedSkill>,
+}
+
 fn default_roots() -> Vec<PathBuf> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
@@ -176,7 +190,7 @@ fn catalog_from_roots(roots: &[PathBuf]) -> Vec<SkillCatalogEntry> {
     catalog.into_values().collect()
 }
 
-fn validates_intent(intent: &ResponseIntentInput) -> Result<(), String> {
+pub fn validate_intent(intent: &ResponseIntentInput) -> Result<(), String> {
     if intent.version != 1 {
         return Err(format!(
             "unsupported response intent version {}",
@@ -247,8 +261,15 @@ fn recommend_from_catalog(
     intent: &ResponseIntentInput,
     selected_skill_ids: &[String],
 ) -> Result<Vec<SkillRecommendation>, String> {
-    validates_intent(intent)?;
+    validate_intent(intent)?;
     let selected: BTreeSet<&str> = selected_skill_ids.iter().map(String::as_str).collect();
+    let known: BTreeSet<&str> = catalog
+        .iter()
+        .map(|entry| entry.metadata.id.as_str())
+        .collect();
+    if let Some(unknown) = selected.difference(&known).next() {
+        return Err(format!("unknown skill id '{unknown}'"));
+    }
     let question = question.to_lowercase();
     let mut recommendations = Vec::new();
 
@@ -312,6 +333,51 @@ fn recommend_from_catalog(
             .then_with(|| a.skill.metadata.name.cmp(&b.skill.metadata.name))
     });
     Ok(recommendations)
+}
+
+pub fn resolve_run_metadata(
+    question: &str,
+    intent: ResponseIntentInput,
+    skill_mode: &str,
+    selected_skill_ids: &[String],
+) -> Result<RunResponseMetadata, String> {
+    validate_intent(&intent)?;
+    let catalog = catalog_from_roots(&default_roots());
+    let recommendations = match skill_mode {
+        "auto" => recommend_from_catalog(catalog, question, &intent, &[])?,
+        "none" => Vec::new(),
+        "manual" => recommend_from_catalog(catalog, question, &intent, selected_skill_ids)?,
+        value => return Err(format!("unknown skill selection mode '{value}'")),
+    };
+    if let Some(item) = recommendations
+        .iter()
+        .find(|item| !item.skill.availability.available)
+    {
+        return Err(format!(
+            "skill '{}' is unavailable: {}",
+            item.skill.metadata.name,
+            item.skill
+                .availability
+                .reason
+                .as_deref()
+                .unwrap_or("installation was not found")
+        ));
+    }
+    let skills = recommendations
+        .into_iter()
+        .map(|item| SelectedSkill {
+            id: item.skill.metadata.id,
+            name: item.skill.metadata.name,
+            capability_version: item.skill.metadata.schema_version,
+            selection: if item.selected_manually {
+                "manual"
+            } else {
+                "recommended"
+            }
+            .to_owned(),
+        })
+        .collect();
+    Ok(RunResponseMetadata { intent, skills })
 }
 
 #[tauri::command]
@@ -418,6 +484,20 @@ mod tests {
         .unwrap();
         assert!(result[0].selected_manually);
         assert!(result[0].reason.contains("unavailable"));
+    }
+
+    #[test]
+    fn unknown_manual_skill_is_rejected_instead_of_silently_dropped() {
+        let (root, _) = installed_root();
+        let error = recommend_from_catalog(
+            catalog_from_roots(std::slice::from_ref(&root)),
+            "ordinary question",
+            &intent("auto", "auto"),
+            &["not-installed".to_owned()],
+        )
+        .unwrap_err();
+        assert!(error.contains("unknown skill id 'not-installed'"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

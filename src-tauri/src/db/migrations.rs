@@ -41,6 +41,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(FOLLOW_UP_RUNS_ACTIVITY),
         M::up(FOLLOW_UP_RUNS_NOTIFICATIONS),
         M::up(CONFLICT_CANDIDATES),
+        M::up(RESPONSE_METADATA),
     ])
 }
 
@@ -411,6 +412,16 @@ ALTER TABLE artifacts ADD COLUMN source_base_version INTEGER NULL;
 ALTER TABLE artifacts ADD COLUMN resolution TEXT NULL;
 ";
 
+/// Immutable response intent and versioned skill selection provenance. Runs
+/// retain what the agent received; artifacts snapshot the same metadata so a
+/// viewed historical version never depends on mutable run or preference state.
+const RESPONSE_METADATA: &str = "
+ALTER TABLE follow_up_runs ADD COLUMN response_intent_json TEXT NULL;
+ALTER TABLE follow_up_runs ADD COLUMN selected_skills_json TEXT NULL;
+ALTER TABLE artifacts ADD COLUMN response_intent_json TEXT NULL;
+ALTER TABLE artifacts ADD COLUMN selected_skills_json TEXT NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,7 +429,7 @@ mod tests {
 
     /// `user_version` after the full chain — the count of `M::up` entries in
     /// [`migrations`].
-    const LATEST: usize = 16;
+    const LATEST: usize = 17;
 
     /// Position of the durable scheduler metadata migration.
     const RUN_QUEUE: usize = 13;
@@ -429,6 +440,7 @@ mod tests {
     const RUN_ACTIVITY: usize = 14;
     const RUN_NOTIFICATIONS: usize = 15;
     const CONFLICTS: usize = 16;
+    const RESPONSE_PROFILE: usize = 17;
 
     /// Position of the `follow_up_runs.override_json` ALTER (the 11th
     /// migration), pinned explicitly — like `ASK_MODE` below — so appending
@@ -672,13 +684,16 @@ mod tests {
         .expect("seed pre-migration comment");
 
         // Apply the parent_id migration.
-        m.to_version(&mut conn, LATEST).expect("apply parent_id migration");
+        m.to_version(&mut conn, LATEST)
+            .expect("apply parent_id migration");
 
         // The pre-existing comment survives and is a root (parent_id NULL).
         let parent: Option<String> = conn
-            .query_row("SELECT parent_id FROM comments WHERE id = 'root'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT parent_id FROM comments WHERE id = 'root'",
+                [],
+                |r| r.get(0),
+            )
             .expect("row should survive");
         assert!(parent.is_none(), "existing comment becomes a root");
 
@@ -991,5 +1006,42 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn add_response_metadata_preserves_and_snapshots_profile() {
+        let mut conn = fresh_conn();
+        let migrations = migrations();
+        migrations
+            .to_version(&mut conn, RESPONSE_PROFILE - 1)
+            .unwrap();
+        seed_thread(&conn);
+        migrations.to_version(&mut conn, RESPONSE_PROFILE).unwrap();
+        let intent = r#"{"version":1,"depth":"deep","language":"plain","visuals":"avoid","shape":"reference"}"#;
+        let skills = r#"[{"id":"conceptify","name":"Conceptify artifact","capability_version":1,"selection":"manual"}]"#;
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path,
+                  response_intent_json, selected_skills_json)
+             VALUES ('r1', 't1', 'claude', 'm', 'ask', 'completed', '/r.log', ?1, ?2)",
+            rusqlite::params![intent, skills],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO artifacts
+                 (id, thread_id, version, file_path, created_by,
+                  response_intent_json, selected_skills_json)
+             VALUES ('a1', 't1', 1, '/a.html', 'initial', ?1, ?2)",
+            rusqlite::params![intent, skills],
+        )
+        .unwrap();
+        let stored: (String, String) = conn
+            .query_row(
+                "SELECT response_intent_json, selected_skills_json FROM artifacts WHERE id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (intent.to_owned(), skills.to_owned()));
     }
 }

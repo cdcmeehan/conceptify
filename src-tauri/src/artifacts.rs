@@ -359,22 +359,43 @@ pub fn save_artifact_for_run(
     fs::create_dir_all(dir.join("runs"))?;
 
     let mut source_base_version = None;
+    let mut response_intent_json: Option<String> = None;
+    let mut selected_skills_json: Option<String> = None;
     if let Some(run_id) = source_run_id {
-        let run: Option<(String, String, Option<i64>)> = conn
+        let run: Option<(String, String, Option<i64>, Option<String>, Option<String>)> = conn
             .query_row(
-                "SELECT thread_id, run_class, base_artifact_version
+                "SELECT thread_id, run_class, base_artifact_version,
+                        response_intent_json, selected_skills_json
                  FROM follow_up_runs WHERE id = ?1",
                 [run_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        let Some((run_thread_id, run_class, captured_base)) = run else {
-            return Err(ArtifactError::Database(rusqlite::Error::QueryReturnedNoRows));
+        let Some((run_thread_id, run_class, captured_base, run_intent, run_skills)) = run else {
+            return Err(ArtifactError::Database(
+                rusqlite::Error::QueryReturnedNoRows,
+            ));
         };
         if run_thread_id != thread_id || run_class != "mutation" {
             return Err(ArtifactError::Database(rusqlite::Error::InvalidQuery));
         }
         source_base_version = captured_base;
+        response_intent_json = run_intent;
+        selected_skills_json = run_skills;
+        if response_intent_json.is_none() {
+            let inherited: Option<(Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT response_intent_json, selected_skills_json
+                     FROM artifacts WHERE thread_id = ?1 ORDER BY version DESC LIMIT 1",
+                    [thread_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((intent, skills)) = inherited {
+                response_intent_json = intent;
+                selected_skills_json = skills;
+            }
+        }
         if captured_base != current_version && resolution.is_none() {
             let candidate_path = dir.join("runs").join(format!("{run_id}.candidate.html"));
             atomic_write(&candidate_path, bytes)?;
@@ -413,11 +434,20 @@ pub fn save_artifact_for_run(
         tx.execute(
             "INSERT INTO artifacts
                  (id, thread_id, version, file_path, created_by,
-                  source_run_id, source_base_version, resolution)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  source_run_id, source_base_version, resolution,
+                  response_intent_json, selected_skills_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
-                artifact_id, thread_id, version, version_path.to_string_lossy(),
-                created_by, source_run_id, source_base_version, resolution
+                artifact_id,
+                thread_id,
+                version,
+                version_path.to_string_lossy(),
+                created_by,
+                source_run_id,
+                source_base_version,
+                resolution,
+                response_intent_json,
+                selected_skills_json
             ],
         )?;
     } else {
@@ -624,12 +654,7 @@ fn walk_document(doc: &Html, ctx: &mut DocContext, v: &mut Validation) {
     }
 }
 
-fn visit_element(
-    node: &NodeRef<'_, Node>,
-    el: &Element,
-    ctx: &mut DocContext,
-    v: &mut Validation,
-) {
+fn visit_element(node: &NodeRef<'_, Node>, el: &Element, ctx: &mut DocContext, v: &mut Validation) {
     let name = el.name();
 
     // data-cfy-id collection + W-ID-FORMAT.
@@ -744,9 +769,9 @@ fn visit_element(
         // W-ANCHOR-DIAGRAM: only outermost <svg> elements are analyzed so a
         // nested <svg> never double-counts.
         "svg" => {
-            let nested = node.ancestors().any(|a| {
-                matches!(a.value(), Node::Element(ancestor) if ancestor.name() == "svg")
-            });
+            let nested = node
+                .ancestors()
+                .any(|a| matches!(a.value(), Node::Element(ancestor) if ancestor.name() == "svg"));
             if !nested {
                 check_diagram_coverage(node, el, v);
             }
@@ -787,11 +812,7 @@ fn visit_element(
 }
 
 /// `<!--cfy:src ...-->` comments: W-SRC-MALFORMED + W-SRC-ORPHAN (spec §5.1).
-fn visit_comment(
-    node: &NodeRef<'_, Node>,
-    comment: &scraper::node::Comment,
-    v: &mut Validation,
-) {
+fn visit_comment(node: &NodeRef<'_, Node>, comment: &scraper::node::Comment, v: &mut Validation) {
     let text: &str = comment;
     // The finder contract is `<!--cfy:src\s` — `cfy:src` immediately after
     // the opener, followed by whitespace.
@@ -844,11 +865,7 @@ fn visit_comment(
 /// W-ANCHOR-DIAGRAM: an svg with ≥ 6 shape elements needs ≥ 3 data-cfy-id
 /// bearers (the svg itself and all descendants count for both tallies as the
 /// spec defines them).
-fn check_diagram_coverage(
-    node: &NodeRef<'_, Node>,
-    el: &Element,
-    v: &mut Validation,
-) {
+fn check_diagram_coverage(node: &NodeRef<'_, Node>, el: &Element, v: &mut Validation) {
     const SHAPES: [&str; 7] = [
         "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
     ];
@@ -1094,10 +1111,7 @@ fn parse_url_token(css: &str, start: usize) -> (String, usize) {
 fn parse_quoted(css: &str, start: usize) -> (String, usize) {
     let quote = css.as_bytes()[start];
     match css[start + 1..].find(quote as char) {
-        Some(p) => (
-            css[start + 1..start + 1 + p].to_owned(),
-            start + 1 + p + 1,
-        ),
+        Some(p) => (css[start + 1..start + 1 + p].to_owned(), start + 1 + p + 1),
         None => (css[start + 1..].to_owned(), css.len()),
     }
 }
@@ -1371,18 +1385,29 @@ mod tests {
         assert!(!is_allowlisted("https://cdn.jsdelivr.net/npm/lodash@4"));
         assert!(!is_allowlisted("https://unpkg.com/mermaid@11"));
         // Rule 3: charset excludes query strings, fragments, percent-escapes.
-        assert!(!is_allowlisted("https://cdn.jsdelivr.net/npm/mermaid@11?x=1"));
+        assert!(!is_allowlisted(
+            "https://cdn.jsdelivr.net/npm/mermaid@11?x=1"
+        ));
         assert!(!is_allowlisted("https://cdn.jsdelivr.net/npm/mermaid@11#f"));
-        assert!(!is_allowlisted("https://cdn.jsdelivr.net/npm/mermaid@11/%2e%2e/x"));
+        assert!(!is_allowlisted(
+            "https://cdn.jsdelivr.net/npm/mermaid@11/%2e%2e/x"
+        ));
         // No `..` path segment.
-        assert!(!is_allowlisted("https://cdn.jsdelivr.net/npm/mermaid@11/../gsap@3/x.js"));
+        assert!(!is_allowlisted(
+            "https://cdn.jsdelivr.net/npm/mermaid@11/../gsap@3/x.js"
+        ));
         // Case-sensitive.
         assert!(!is_allowlisted("HTTPS://cdn.jsdelivr.net/npm/mermaid@11"));
     }
 
     #[test]
     fn e_external_code_covers_code_loading_link_rels() {
-        for rel in ["stylesheet", "preload", "modulepreload", "PRELOAD stylesheet"] {
+        for rel in [
+            "stylesheet",
+            "preload",
+            "modulepreload",
+            "PRELOAD stylesheet",
+        ] {
             let v = validate_str(&valid_doc(&format!(
                 r#"<link rel="{rel}" href="https://fonts.example.com/inter.css">"#
             )));
@@ -1469,17 +1494,16 @@ mod tests {
 
     #[test]
     fn w_title_warns_when_missing_and_svg_title_does_not_count() {
-        let doc = valid_doc("<svg><title>node label</title></svg>")
-            .replacen("<title>Test artifact</title>\n", "", 1);
+        let doc = valid_doc("<svg><title>node label</title></svg>").replacen(
+            "<title>Test artifact</title>\n",
+            "",
+            1,
+        );
         let v = validate_str(&doc);
         assert_eq!(warning_codes(&v), vec!["W-TITLE"]);
 
         // Empty title also warns.
-        let doc = valid_doc("").replacen(
-            "<title>Test artifact</title>",
-            "<title>  </title>",
-            1,
-        );
+        let doc = valid_doc("").replacen("<title>Test artifact</title>", "<title>  </title>", 1);
         let v = validate_str(&doc);
         assert_eq!(warning_codes(&v), vec!["W-TITLE"]);
     }
@@ -1498,11 +1522,7 @@ mod tests {
         // Empty content counts as missing; all three missing → three W-META.
         let doc = valid_doc("")
             .replacen("content=\"Explain the thing.\"", "content=\"\"", 1)
-            .replacen(
-                "<meta name=\"cfy:version\" content=\"1\">\n",
-                "",
-                1,
-            )
+            .replacen("<meta name=\"cfy:version\" content=\"1\">\n", "", 1)
             .replacen(
                 "<meta name=\"cfy:generated-by\" content=\"claude-code/test\">\n",
                 "",
@@ -1738,7 +1758,9 @@ mod tests {
 
         // Two DB rows with the right created_by sequence.
         let rows: Vec<(i64, String)> = conn
-            .prepare("SELECT version, created_by FROM artifacts WHERE thread_id='t1' ORDER BY version")
+            .prepare(
+                "SELECT version, created_by FROM artifacts WHERE thread_id='t1' ORDER BY version",
+            )
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()

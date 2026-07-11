@@ -114,11 +114,7 @@ pub fn rename_project(db: State<DbHandle>, id: String, name: String) -> Result<(
 
 /// Archive or unarchive a project (FR-1.3: hide, don't delete).
 #[tauri::command(rename_all = "snake_case")]
-pub fn set_project_archived(
-    db: State<DbHandle>,
-    id: String,
-    archived: bool,
-) -> Result<(), String> {
+pub fn set_project_archived(db: State<DbHandle>, id: String, archived: bool) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     projects::set_archived(&conn, &id, archived).map_err(|e| e.to_string())
 }
@@ -285,6 +281,8 @@ pub struct ArtifactVersionDto {
     pub created_at: String,
     /// `initial` (v1) or `follow_up` (v2+), mirroring the artifacts table.
     pub created_by: String,
+    pub response_intent: Option<crate::skill_catalog::ResponseIntentInput>,
+    pub skills: Vec<crate::skill_catalog::SelectedSkill>,
 }
 
 /// List a thread's saved artifact versions, oldest first (FR-2.4). An
@@ -298,7 +296,9 @@ pub fn list_artifact_versions(
     let conn = db.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT version, created_at, created_by FROM artifacts
+            "SELECT version, created_at, created_by,
+                    response_intent_json, selected_skills_json
+             FROM artifacts
              WHERE thread_id = ?1 ORDER BY version ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -308,10 +308,18 @@ pub fn list_artifact_versions(
                 version: r.get(0)?,
                 created_at: r.get(1)?,
                 created_by: r.get(2)?,
+                response_intent: r
+                    .get::<_, Option<String>>(3)?
+                    .and_then(|json| serde_json::from_str(&json).ok()),
+                skills: r
+                    .get::<_, Option<String>>(4)?
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default(),
             })
         })
         .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -375,10 +383,7 @@ fn resolve_latest_artifact_html(
 /// (macOS: `/usr/bin/open`, which launches the `.html` default handler).
 /// Returns the opened path (handy for logging/diagnostics).
 #[tauri::command(rename_all = "snake_case")]
-pub fn open_artifact_in_browser(
-    db: State<DbHandle>,
-    thread_id: String,
-) -> Result<String, String> {
+pub fn open_artifact_in_browser(db: State<DbHandle>, thread_id: String) -> Result<String, String> {
     let root = artifacts::artifacts_root().map_err(|e| e.to_string())?;
     // Resolve under the lock, open after releasing it — the launch can take
     // long enough that holding the shared connection would stall the API.
@@ -461,7 +466,9 @@ pub fn create_comment(
     let conn = db.lock().map_err(|e| e.to_string())?;
     let ctx = match parent_id.as_deref() {
         Some(pid) => comments::create_reply(&conn, &thread_id, pid, &body),
-        None => comments::create_comment(&conn, &thread_id, artifact_version, anchor.as_ref(), &body),
+        None => {
+            comments::create_comment(&conn, &thread_id, artifact_version, anchor.as_ref(), &body)
+        }
     }
     .map_err(|e| e.to_string())?;
     Ok((ctx.comment, ctx.parent_id).into())
@@ -477,16 +484,16 @@ pub fn list_comments(
     thread_id: String,
     status: Option<String>,
 ) -> Result<Vec<CommentDto>, String> {
-    let status = match status.as_deref() {
-        None | Some("") => None,
-        Some(s) => Some(
-            comments::CommentStatus::parse(s)
-                .ok_or_else(|| format!("invalid status \"{s}\" (expected open|answered|applied)"))?,
-        ),
-    };
+    let status =
+        match status.as_deref() {
+            None | Some("") => None,
+            Some(s) => Some(comments::CommentStatus::parse(s).ok_or_else(|| {
+                format!("invalid status \"{s}\" (expected open|answered|applied)")
+            })?),
+        };
     let conn = db.lock().map_err(|e| e.to_string())?;
-    let rows =
-        comments::list_comments_with_parent(&conn, &thread_id, status).map_err(|e| e.to_string())?;
+    let rows = comments::list_comments_with_parent(&conn, &thread_id, status)
+        .map_err(|e| e.to_string())?;
     Ok(rows.into_iter().map(CommentDto::from).collect())
 }
 
@@ -550,7 +557,9 @@ mod tests {
                 callback: tauri::ipc::CallbackFn(0),
                 error: tauri::ipc::CallbackFn(1),
                 url: "tauri://localhost".parse().unwrap(),
-                body: tauri::ipc::InvokeBody::Json(serde_json::json!({ "include_archived": false })),
+                body: tauri::ipc::InvokeBody::Json(
+                    serde_json::json!({ "include_archived": false }),
+                ),
                 headers: Default::default(),
                 invoke_key: tauri::test::INVOKE_KEY.to_string(),
             },
@@ -579,7 +588,14 @@ mod tests {
 
     /// Shared fixture for the artifact-facing command tests: a real-migration
     /// DB with one project + one thread, and a throwaway artifacts root.
-    fn artifact_fixture(tag: &str) -> (crate::db::DbHandle, std::path::PathBuf, String, std::path::PathBuf) {
+    fn artifact_fixture(
+        tag: &str,
+    ) -> (
+        crate::db::DbHandle,
+        std::path::PathBuf,
+        String,
+        std::path::PathBuf,
+    ) {
         let db_path = std::env::temp_dir().join(format!(
             "conceptify-test-cmd-artifacts-{tag}-{}-{}.db",
             std::process::id(),
@@ -645,8 +661,13 @@ mod tests {
         {
             let conn = db_handle.lock().unwrap();
             for v in 1..=3 {
-                crate::artifacts::save_artifact(&conn, &root, &thread_id, artifact_html(v).as_bytes())
-                    .unwrap_or_else(|e| panic!("save v{v}: {e:?}"));
+                crate::artifacts::save_artifact(
+                    &conn,
+                    &root,
+                    &thread_id,
+                    artifact_html(v).as_bytes(),
+                )
+                .unwrap_or_else(|e| panic!("save v{v}: {e:?}"));
             }
         }
 
@@ -1187,10 +1208,7 @@ pub fn dismiss_run_activity(db: State<DbHandle>, run_id: String) -> Result<bool,
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn mark_run_activity_seen(
-    db: State<DbHandle>,
-    run_ids: Vec<String>,
-) -> Result<usize, String> {
+pub fn mark_run_activity_seen(db: State<DbHandle>, run_ids: Vec<String>) -> Result<usize, String> {
     let mut conn = db.lock().map_err(|e| e.to_string())?;
     crate::runs::mark_activity_seen(&mut conn, &run_ids).map_err(|e| e.to_string())
 }
@@ -1221,7 +1239,10 @@ pub struct ConflictReviewDto {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn get_conflict_review(db: State<DbHandle>, run_id: String) -> Result<ConflictReviewDto, String> {
+pub fn get_conflict_review(
+    db: State<DbHandle>,
+    run_id: String,
+) -> Result<ConflictReviewDto, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     let row = conn
         .query_row(
@@ -1410,11 +1431,27 @@ pub async fn ask_from_app<R: tauri::Runtime>(
     title: Option<String>,
     question: String,
     run_override: Option<crate::settings::RunOverride>,
+    response_intent: crate::skill_catalog::ResponseIntentInput,
+    skill_mode: String,
+    selected_skill_ids: Vec<String>,
 ) -> Result<AskStartedDto, String> {
-    crate::flows::ask_from_app(&app, &project_id, title.as_deref(), &question, run_override)
-        .await
-        .map(AskStartedDto::from)
-        .map_err(|e| e.to_string())
+    let response_metadata = crate::skill_catalog::resolve_run_metadata(
+        &question,
+        response_intent,
+        &skill_mode,
+        &selected_skill_ids,
+    )?;
+    crate::flows::ask_from_app(
+        &app,
+        &project_id,
+        title.as_deref(),
+        &question,
+        run_override,
+        Some(response_metadata),
+    )
+    .await
+    .map(AskStartedDto::from)
+    .map_err(|e| e.to_string())
 }
 
 /// Retry a failed in-app ask (FR-5.3): re-spawn the same question into the same
@@ -1513,9 +1550,7 @@ pub async fn ask_single_comment<R: tauri::Runtime>(
 /// cache (or bundled snapshot) — never the network — so it is instant and always
 /// succeeds. The background startup refresh (see `lib.rs`) keeps the cache warm.
 #[tauri::command(rename_all = "snake_case")]
-pub fn get_model_catalog(
-    db: State<DbHandle>,
-) -> Result<conceptify_types::CatalogResponse, String> {
+pub fn get_model_catalog(db: State<DbHandle>) -> Result<conceptify_types::CatalogResponse, String> {
     let enabled = {
         let conn = db.lock().map_err(|e| e.to_string())?;
         crate::settings::get_settings(&conn)

@@ -258,3 +258,15 @@ states, and offers an explicit no-skill mode. Profiles persist independently on
 each staged question. Browser QA covered defaults, visual recommendation,
 manual search/choice, no-skill mode, independent multi-question radio groups,
 Escape/focus behavior, narrow single-column layout, and a clean console.
+
+**Profile and skill propagation (`conceptify-l9w.5`).** Ask submission now
+resolves the local skill policy before creating a thread, validates every
+response dimension, and stores the effective profile plus skill id/name/schema
+version/selection source on the durable queued run. The agent prompt translates
+all four dimensions into explicit, provider-neutral obligations (including a
+hard text-only constraint) and states that skills cannot override them. Retry
+copies the original resolved metadata; artifact versions snapshot it, with
+follow-up versions inheriting provenance when their mutation run has no new
+profile. The thread header shows the effective profile and chosen/suggested
+skills without exposing raw prompt plumbing. Tests cover every dimension,
+retry identity, migration, conflict recovery publication, and skill validation.
