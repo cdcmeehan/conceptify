@@ -41,6 +41,24 @@ pub struct TopicContext {
 }
 
 fn topic_key(project_id: &str) -> String { format!("topic_context:{project_id}") }
+fn goal_key(project_id: &str) -> String { format!("project_goal:{project_id}") }
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_project_goal(db: State<DbHandle>, project_id: String) -> Result<String, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    Ok(conn.query_row("SELECT value FROM settings WHERE key = ?1", [goal_key(&project_id)], |r| r.get(0)).optional().map_err(|e| e.to_string())?.unwrap_or_default())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_project_goal(db: State<DbHandle>, project_id: String, goal: String) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    if goal.trim().is_empty() {
+        conn.execute("DELETE FROM settings WHERE key = ?1", [goal_key(&project_id)]).map_err(|e| e.to_string())?;
+    } else {
+        conn.execute("INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", rusqlite::params![goal_key(&project_id), goal.trim()]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 
 pub fn stored_topic(conn: &rusqlite::Connection, project_id: &str) -> Option<TopicContext> {
     conn.query_row("SELECT value FROM settings WHERE key = ?1", [topic_key(project_id)], |r| r.get::<_, String>(0))
@@ -64,9 +82,14 @@ pub fn set_topic_context(
     let root: String = conn.query_row("SELECT root_path FROM projects WHERE id = ?1", [&project_id], |r| r.get(0))
         .map_err(|_| format!("project not found: {project_id}"))?;
     let sources_dir = Path::new(&root).join(".conceptify-sources");
-    if sources_dir.exists() { std::fs::remove_dir_all(&sources_dir).map_err(|e| e.to_string())?; }
+    let preserves_existing = files.iter().all(|value| value.starts_with(".conceptify-sources/"));
+    if !preserves_existing && sources_dir.exists() { std::fs::remove_dir_all(&sources_dir).map_err(|e| e.to_string())?; }
     let mut copied_files = Vec::new();
     for source in files.into_iter().filter(|value| !value.trim().is_empty()) {
+        if source.starts_with(".conceptify-sources/") {
+            if Path::new(&root).join(&source).is_file() { copied_files.push(source); }
+            continue;
+        }
         let path = Path::new(&source);
         if !path.is_file() { return Err(format!("source file not found: {source}")); }
         std::fs::create_dir_all(&sources_dir).map_err(|e| e.to_string())?;

@@ -16,6 +16,7 @@ import { ThreadView } from "./components/ThreadView";
 import { SettingsView } from "./components/SettingsView";
 import { ActivityTray } from "./components/ActivityTray";
 import { ConflictReview } from "./components/ConflictReview";
+import { ProjectHome } from "./components/ProjectHome";
 import { initSystemNotifications } from "./lib/systemNotifications";
 import "./App.css";
 
@@ -65,7 +66,11 @@ function App() {
         error={state.threadsError}
         runActivity={state.runActivity}
       />
-      <ThreadView thread={selectedThread} />
+      {selectedThread != null || selectedProject == null ? (
+        <ThreadView thread={selectedThread} />
+      ) : (
+        <ProjectHome project={selectedProject} threads={state.threads} activity={state.runActivity} />
+      )}
       <ActivityTray
         activity={state.runActivity}
         loading={state.runActivityLoading}

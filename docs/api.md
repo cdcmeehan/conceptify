@@ -518,6 +518,11 @@ same schema; invalid or unknown-version sidecars are not executable.
 These commands use namespaced rows in the existing settings key/value table;
 model/provider settings remain separate.
 
+**Project brief (`conceptify-vc1.5`):** `get_project_goal { project_id }` and
+`set_project_goal { project_id, goal }` read/write the short project-home
+learning brief in the settings store. Clearing the text removes the setting;
+thread questions and artifact provenance are never rewritten.
+
 **Settings (FR-7.1–7.4, beads 959.4):**
 
 - `get_agent_settings {}` → `AgentSettings` — stored overrides merged over code

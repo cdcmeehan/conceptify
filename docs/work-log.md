@@ -345,3 +345,11 @@ response preferences and opens its generating thread. A failed ask therefore
 leaves the selected project and durable run available for retry, while the
 core's existing title derivation turns an unlabelled starter/edit into a
 sensible thread title.
+
+**Project home (`conceptify-vc1.5`).** Selecting a project without a thread now
+opens a scannable home instead of a bare instruction. It includes an editable
+persistent learning brief, available-context summary and warnings, actionable
+active runs, three recent result cards, and editable next-question suggestions
+that launch through the same durable ask/profile path. Empty projects explain
+the next action; established projects keep their full history in the adjacent
+thread list rather than duplicating it on the home.

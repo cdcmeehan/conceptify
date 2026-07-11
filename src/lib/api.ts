@@ -146,6 +146,12 @@ export function getTopicContext(projectId: string): Promise<TopicContext> {
 export function setTopicContext(projectId: string, context: TopicContext): Promise<TopicContext> {
   return invoke<TopicContext>("set_topic_context", { project_id: projectId, ...context });
 }
+export function getProjectGoal(projectId: string): Promise<string> {
+  return invoke<string>("get_project_goal", { project_id: projectId });
+}
+export function setProjectGoal(projectId: string, goal: string): Promise<void> {
+  return invoke<void>("set_project_goal", { project_id: projectId, goal });
+}
 
 export interface Thread {
   id: string;

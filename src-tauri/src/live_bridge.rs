@@ -136,6 +136,8 @@ async fn live_bridge() {
             crate::project_context::scan_project_context,
             crate::project_context::get_topic_context,
             crate::project_context::set_topic_context,
+            crate::project_context::get_project_goal,
+            crate::project_context::set_project_goal,
             crate::commands::delete_thread,
             crate::commands::list_artifact_versions,
             crate::commands::diff_versions,

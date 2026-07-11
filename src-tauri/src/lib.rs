@@ -101,6 +101,8 @@ pub fn run() {
             project_context::scan_project_context,
             project_context::get_topic_context,
             project_context::set_topic_context,
+            project_context::get_project_goal,
+            project_context::set_project_goal,
             commands::delete_thread,
             commands::list_artifact_versions,
             commands::diff_versions,
