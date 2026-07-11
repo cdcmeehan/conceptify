@@ -1485,6 +1485,18 @@ pub(crate) fn apply_scope_note(prompt: &str, adapter: &str) -> String {
     prompt.replace(SCOPE_MECHANISM_PLACEHOLDER, scope_mechanism(adapter))
 }
 
+/// Agent CLIs may intentionally sanitize environment variables before their
+/// own shell/tool subprocesses. Keep the inherited env as a fast path, but
+/// also make the non-secret durable run id explicit on every instructed
+/// save-artifact command so the CLI can authenticate mutation provenance and
+/// enforce stale/preview retention in the production server.
+pub(crate) fn apply_run_identity(prompt: &str, run_id: &str) -> String {
+    prompt.replace(
+        "conceptify save-artifact --thread",
+        &format!("CONCEPTIFY_RUN_ID={run_id} conceptify save-artifact --thread"),
+    )
+}
+
 /// The FR-4.6 answer-mode prompt (epic conceptify-6xi exchange-history form).
 /// Each targeted root renders as an exchange transcript (root + prior answer +
 /// ordered replies); the agent addresses the LATEST unanswered message and
@@ -3035,6 +3047,7 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
             "{prompt}"
         );
         assert!(prompt.contains("save-artifact --thread"), "{prompt}");
+        assert!(prompt.contains(&format!("CONCEPTIFY_RUN_ID={} conceptify save-artifact", run_id)), "run identity must survive agent env sanitization: {prompt}");
     }
 
     #[tokio::test]
@@ -3060,6 +3073,7 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
         assert!(prompt.contains("smallest change"), "{prompt}");
         assert!(prompt.contains("do not use `--applied`"), "{prompt}");
         assert!(!prompt.contains("resolve-comment --id"), "{prompt}");
+        assert!(prompt.contains(&format!("CONCEPTIFY_RUN_ID={} conceptify save-artifact", started.run_id)), "{prompt}");
     }
 
     #[tokio::test]

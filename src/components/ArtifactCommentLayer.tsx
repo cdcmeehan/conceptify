@@ -16,9 +16,9 @@
 //        - Comment swaps the toolbar for the composer in place (stage 2).
 //      · Stage 2 (composer): the textarea + Add comment/Cancel controls, Cmd+Enter
 //        to save, autofocused on entry.
-//  - Bridge `element_click` → the composer directly (single stage): clicking an
-//    element is already an explicit intent to comment, and an element anchor has
-//    no user-selected text to Copy, so the toolbar would add a redundant step.
+//  - Bridge `element_click` → the same action toolbar, with Copy omitted. This
+//    exposes Explain/Deepen/Simplify/Visualise and Change/Redraw for semantic
+//    blocks and diagram nodes, while Comment still opens the ordinary composer.
 //  - Save → `api.createComment` against the *currently displayed* artifact
 //    version, then the returned comment is pushed into `appStore` and its
 //    highlight is commanded onto the artifact immediately (`set_highlights`).
@@ -47,9 +47,10 @@
 //      · a new `selection` / `element_click` REPLACES the popover only while not
 //        dirty (so re-selecting retargets an untouched toolbar/composer, but never
 //        eats a half-written comment);
-//      · `selection_cleared` dismisses a *selection* popover (either stage) only
-//        while not dirty (collapsing the selection after you've started writing
-//        keeps the composer).
+//      · `selection_cleared` dismisses only the transient selection toolbar.
+//        Once the user opens the composer its target is pinned: shell controls
+//        can collapse the iframe selection, so only explicit cancel/click-away/
+//        submit dismisses that stage.
 //  - Escape and click-away (mousedown outside the popover) always cancel — they
 //    are explicit user gestures — in both stages.
 //  - `element_click` popovers ignore `selection_cleared` (they aren't tied to a
@@ -212,6 +213,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
   const popoverRef = useRef<PopoverState | null>(popover);
   popoverRef.current = popover;
   const openIdRef = useRef(0);
+  const composerPinnedRef = useRef(false);
 
   const highlights = useMemo(
     () => computeHighlights(state.comments, artifactVersion),
@@ -241,6 +243,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
       if (iframe == null) return;
       const { left, top } = placeToolbar(iframe, rect);
       openIdRef.current += 1;
+      composerPinnedRef.current = false;
       setPopover({
         openId: openIdRef.current,
         kind: "selection",
@@ -259,17 +262,16 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
       });
     };
 
-    // element_click opens the composer directly (see module header): clicking an
-    // element is an explicit comment intent, and it has no selected text to Copy.
-    const openElementComposer = (anchor: ElementAnchor, rect: BridgeRect) => {
+    const openElementToolbar = (anchor: ElementAnchor, rect: BridgeRect) => {
       const iframe = iframeRef.current;
       if (iframe == null) return;
-      const { left, top } = placePopover(iframe, rect);
+      const { left, top } = placeToolbar(iframe, rect);
       openIdRef.current += 1;
+      composerPinnedRef.current = false;
       setPopover({
         openId: openIdRef.current,
         kind: "element",
-        stage: "composer",
+        stage: "toolbar",
         anchor,
         rect,
         left,
@@ -279,7 +281,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
         copied: false,
         error: null,
         action: null,
-        destination: "sidebar",
+        destination: "inline",
         moreOpen: false,
       });
     };
@@ -295,11 +297,15 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
           if (!isDirty(popoverRef.current)) openToolbar(msg.anchor, msg.rect);
           break;
         case "element_click":
-          if (!isDirty(popoverRef.current)) openElementComposer(msg.anchor, msg.rect);
+          if (!isDirty(popoverRef.current)) openElementToolbar(msg.anchor, msg.rect);
           break;
         case "selection_cleared": {
           const current = popoverRef.current;
-          if (current?.kind === "selection" && !isDirty(current)) setPopover(null);
+          // Once the user deliberately opens the composer, shell interactions
+          // (notably choosing a destination) may collapse the iframe selection.
+          // Keep that pinned request until an explicit cancel/click-away/submit;
+          // only the transient toolbar follows the live selection lifecycle.
+          if (!composerPinnedRef.current && current?.kind === "selection" && current.stage === "toolbar" && !isDirty(current)) setPopover(null);
           break;
         }
       }
@@ -323,10 +329,12 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
       if (el != null && e.target instanceof Node && !el.contains(e.target)) setPopover(null);
     };
     window.addEventListener("keydown", onKeyDown, true);
-    window.addEventListener("mousedown", onMouseDown, true);
+    // Click (not mousedown) runs after a control's own handler, so destination
+    // and profile updates commit without racing click-away dismissal.
+    window.addEventListener("click", onMouseDown);
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("mousedown", onMouseDown, true);
+      window.removeEventListener("click", onMouseDown);
     };
   }, [popover != null]);
 
@@ -344,7 +352,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
     if (current == null || current.stage !== "toolbar" || iframe == null) return;
     const { left, top } = placePopover(iframe, current.rect);
     openIdRef.current += 1;
-    setPopover({
+    const next: PopoverState = {
       ...current,
       stage: "composer",
       left,
@@ -354,7 +362,14 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
       error: null,
       action,
       moreOpen: false,
-    });
+    };
+    // Focus moving from the sandboxed iframe to this shell button can enqueue
+    // `selection_cleared` before Preact commits the state update. Advance the
+    // subscription's synchronous ref first so that delayed bridge message sees
+    // a pinned composer, not the stale toolbar stage.
+    popoverRef.current = next;
+    composerPinnedRef.current = true;
+    setPopover(next);
   }
 
   // Copy the exact selected text to the clipboard from the shell (the sandboxed
@@ -478,6 +493,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
         class="cfy-toolbar fixed z-50 flex w-[310px] flex-col items-stretch"
         style={positionStyle}
         onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
       >
         {popover.copied ? (
           <span class="cfy-toolbar-status" role="status">
@@ -500,7 +516,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
                   <button type="button" role="menuitem" onClick={() => goToComposer("simplify")} class="cfy-btn cfy-btn-ghost w-full justify-start">Simplify</button>
                   <button type="button" role="menuitem" onClick={() => goToComposer("visualise")} class="cfy-btn cfy-btn-ghost w-full justify-start">Visualise</button>
                   <button type="button" role="menuitem" onClick={() => goToComposer("change")} class="cfy-btn cfy-btn-ghost w-full justify-start">{["figure", "image", "diagram"].includes(popover.anchor.target?.kind ?? "") ? "Redraw" : "Change"}</button>
-                  <button type="button" role="menuitem" onClick={copySelection} class="cfy-btn cfy-btn-ghost w-full justify-start">Copy</button>
+                  {popover.kind === "selection" && <button type="button" role="menuitem" onClick={copySelection} class="cfy-btn cfy-btn-ghost w-full justify-start">Copy</button>}
                 </div>}
               </div>
             </div>
@@ -528,6 +544,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
       class="cfy-popover fixed z-50 w-72 p-2.5"
       style={positionStyle}
       onMouseDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
     >
       <p class="cfy-label mb-1.5">{label}</p>
       <div class="mb-2 rounded-ctl border border-line bg-well px-2 py-1.5">

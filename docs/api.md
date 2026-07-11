@@ -137,6 +137,10 @@ differs from current, validated HTML is retained as
 `409` with `code: "STALE_BASE"`, `run_id`, `base_version`, and
 `current_version`. No artifact row/version or update event is created, and
 supervisor finalization preserves `conflicted` despite the CLI's nonzero exit.
+Because agent CLIs may sanitize environment variables before tool subprocesses,
+generated mutation prompts also prefix their final save command with the same
+non-secret run id. The inherited environment and explicit command prefix are
+deliberate redundant paths to the identical authenticated provenance header.
 Contextual revisions use the same validated candidate store even on a current
 base (`status_reason: preview_required:<comment-id>`): this is a review state,
 not an overwrite. A stale contextual proposal becomes `stale_preview` and a

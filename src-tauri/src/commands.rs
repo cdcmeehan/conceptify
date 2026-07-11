@@ -1435,6 +1435,18 @@ pub fn restore_artifact_version<R: tauri::Runtime>(
                 "UPDATE comments SET status = 'open', answer_html = NULL, resolved_at = NULL WHERE id = ?1",
                 [comment_id],
             ).map_err(|e| e.to_string())?;
+            // The request was `applied` while the restoring artifact was saved,
+            // so the normal save-time pass correctly skipped it as frozen
+            // history. Reopen first, then run the same reattachment algorithm
+            // against the restored latest content so Undo returns an actionable
+            // anchor on the new version rather than a cross-version orphan.
+            let restored_html = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+            crate::anchoring::reattach_thread_comments(
+                &conn,
+                restored_html,
+                &thread_id,
+                saved.version,
+            ).map_err(|e| e.to_string())?;
         }
         (saved, reopened)
     };

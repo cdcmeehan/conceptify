@@ -941,7 +941,10 @@ async fn start_reserved<R: Runtime>(
     // it must match the adapter actually executing — so it is filled from this
     // single routing decision, never re-derived (no divergence). A prompt with
     // no sentinel (engine-level tests) passes through unchanged.
-    let prompt = crate::flows::apply_scope_note(&req.prompt, &route.adapter);
+    let prompt = crate::flows::apply_run_identity(
+        &crate::flows::apply_scope_note(&req.prompt, &route.adapter),
+        run_id,
+    );
     let routed_selection = RunOverride {
         adapter: Some(route.adapter.clone()),
         model: Some(route.model.clone()),

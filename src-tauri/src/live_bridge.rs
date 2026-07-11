@@ -20,8 +20,12 @@
 //!
 //! Run (from an unsandboxed shell — codex's Seatbelt can't nest):
 //! ```sh
-//! CONCEPTIFY_LIVE_BRIDGE=1 cargo test -p conceptify live_bridge -- --ignored --nocapture
+//! cargo build -p conceptify-cli
+//! CONCEPTIFY_LIVE_BRIDGE=1 CONCEPTIFY_CLI="$PWD/../target/debug/conceptify" \
+//!   cargo test -p conceptify live_bridge -- --ignored --nocapture
 //! ```
+//! The explicit CLI path matters: a developer may have an older release CLI on
+//! PATH, while candidate/stale saves require the current run-identity header.
 //!
 //! The env gate exists so a blanket `cargo test -- --ignored` cannot
 //! accidentally bind ports and camp on the user's DB for hours.

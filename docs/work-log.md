@@ -414,3 +414,23 @@ restores each prior answer together with its target, pulses that anchor on
 selection, and supports previous/next buttons plus Alt+Left/Alt+Right traversal.
 Only one answer card is expanded at a time, and it can be hidden without
 removing its durable history or leaving a filled colour wash over the artifact.
+
+**Live contextual checkpoint (`conceptify-9lj.6`).** The real built shell,
+production IPC bridge, production HTTP server, current CLI, real app database,
+and real Claude runs exercised text, paragraph, code, and nested diagram-node
+targets in light and dark themes. Explain/Deepen/Simplify, inline and new-thread
+destinations, answer history/Alt+Arrow navigation, target pulse, Comment cancel,
+Copy, diagram Redraw, proposal diff, Reject, Apply, Undo, and post-undo
+reattachment all passed. Captured states included both-theme selection and
+composer views, inline running/answered cards, diagram actions, and revision
+review.
+
+The checkpoint found and fixed three integration defects: iframe focus loss
+could race an opened composer, diagram clicks bypassed the action toolbar, and
+an older live-harness CLI did not forward run provenance so a proposal published
+implicitly. Composer intent is now synchronously pinned, semantic elements use
+the full action menu (without text-only Copy), mutation prompts carry an explicit
+run-id prefix in addition to inherited environment, and Undo re-runs normal
+anchor reattachment after reopening the request. The accidental live saves were
+restored through immutable versions; the final reopened request is anchored on
+the restored latest version.
