@@ -170,6 +170,7 @@ async fn live_bridge() {
         "comment-updated",
         "thread-updated",
         "run-progress",
+        "run-state-changed",
         "run-finished",
         "navigate",
         "catalog-refreshed",

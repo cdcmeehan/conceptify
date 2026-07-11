@@ -26,6 +26,7 @@ interface Props {
   threads: Thread[];
   selectedThreadId: string | null;
   projectSelected: boolean;
+  projectId: string | null;
   projectName: string | null;
   loading: boolean;
   error: string | null;
@@ -35,6 +36,7 @@ export function ThreadList({
   threads,
   selectedThreadId,
   projectSelected,
+  projectId,
   projectName,
   loading,
   error,
@@ -100,9 +102,9 @@ export function ThreadList({
         )}
       </header>
 
-      {projectSelected && composerOpen && (
-        <div class="px-2 pb-2">
-          <NewThreadComposer onClose={() => setComposerOpen(false)} />
+      {projectSelected && projectId != null && composerOpen && (
+        <div class="max-h-[68%] overflow-y-auto px-2 pb-2">
+          <NewThreadComposer projectId={projectId} onClose={() => setComposerOpen(false)} />
         </div>
       )}
 

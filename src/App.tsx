@@ -49,6 +49,7 @@ function App() {
         threads={state.threads}
         selectedThreadId={state.selectedThreadId}
         projectSelected={state.selectedProjectId != null}
+        projectId={state.selectedProjectId}
         projectName={selectedProject?.name ?? null}
         loading={state.threadsLoading}
         error={state.threadsError}

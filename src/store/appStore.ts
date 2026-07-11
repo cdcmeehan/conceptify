@@ -129,6 +129,37 @@ export interface RunFailureState {
   targetRootId: string | null;
 }
 
+export interface AskQuestionDraft {
+  id: string;
+  title: string;
+  question: string;
+  modelOverride: string | null;
+}
+
+export type AskSubmissionStatus =
+  | "submitting"
+  | "queued"
+  | "running"
+  | "throttled"
+  | "cancelling"
+  | "completed"
+  | "cancelled"
+  | "failed";
+
+export interface AskSubmission extends AskQuestionDraft {
+  status: AskSubmissionStatus;
+  runId: string | null;
+  threadId: string | null;
+  error: string | null;
+}
+
+export interface AskComposerWorkspace {
+  mode: "single" | "multi";
+  draft: AskQuestionDraft;
+  staged: AskQuestionDraft[];
+  submissions: AskSubmission[];
+}
+
 export interface AppState {
   projects: Project[];
   projectsLoading: boolean;
@@ -156,6 +187,9 @@ export interface AppState {
   runFailure: RunFailureState | null;
   /** Whether the Settings overlay is open (FR-7.x). App-level UI state. */
   settingsOpen: boolean;
+  /** Project-keyed composer state. It intentionally outlives component mounts
+   * so partially written and staged questions survive navigation. */
+  askComposerByProject: Record<string, AskComposerWorkspace>;
 }
 
 type Listener = () => void;
@@ -180,7 +214,50 @@ const initialState: AppState = {
   activeRun: null,
   runFailure: null,
   settingsOpen: false,
+  askComposerByProject: {},
 };
+
+let askDraftSequence = 0;
+
+function newAskDraft(): AskQuestionDraft {
+  askDraftSequence += 1;
+  return {
+    id: `ask-draft-${Date.now()}-${askDraftSequence}`,
+    title: "",
+    question: "",
+    modelOverride: null,
+  };
+}
+
+function defaultAskWorkspace(): AskComposerWorkspace {
+  return { mode: "single", draft: newAskDraft(), staged: [], submissions: [] };
+}
+
+function runOverrideOfModel(model: string | null): RunOverride | null {
+  return model == null ? null : { model };
+}
+
+function askSubmissionStatus(status: api.RunStatus): AskSubmissionStatus {
+  switch (status) {
+    case "queued":
+      return "queued";
+    case "starting":
+    case "running":
+      return "running";
+    case "throttled":
+      return "throttled";
+    case "cancelling":
+      return "cancelling";
+    case "completed":
+      return "completed";
+    case "cancelled":
+      return "cancelled";
+    case "conflicted":
+    case "failed":
+    case "timeout":
+      return "failed";
+  }
+}
 
 /** Fresh viewer state, applied whenever the selected thread changes/vanishes.
  *  Comments (and run tracking) belong to a thread, so they clear on the same
@@ -274,6 +351,196 @@ class AppStore {
   private set(patch: Partial<AppState>): void {
     this.state = { ...this.state, ...patch };
     for (const listener of this.listeners) listener();
+  }
+
+  private askWorkspace(projectId: string): AskComposerWorkspace {
+    return this.state.askComposerByProject[projectId] ?? defaultAskWorkspace();
+  }
+
+  private setAskWorkspace(projectId: string, workspace: AskComposerWorkspace): void {
+    this.set({
+      askComposerByProject: {
+        ...this.state.askComposerByProject,
+        [projectId]: workspace,
+      },
+    });
+  }
+
+  ensureAskWorkspace(projectId: string): void {
+    if (this.state.askComposerByProject[projectId] != null) return;
+    this.setAskWorkspace(projectId, defaultAskWorkspace());
+  }
+
+  setAskComposerMode(projectId: string, mode: "single" | "multi"): void {
+    this.setAskWorkspace(projectId, { ...this.askWorkspace(projectId), mode });
+  }
+
+  updateAskDraft(
+    projectId: string,
+    patch: Partial<Pick<AskQuestionDraft, "title" | "question" | "modelOverride">>,
+  ): void {
+    const workspace = this.askWorkspace(projectId);
+    this.setAskWorkspace(projectId, {
+      ...workspace,
+      draft: { ...workspace.draft, ...patch },
+    });
+  }
+
+  stageAskDraft(projectId: string): void {
+    const workspace = this.askWorkspace(projectId);
+    if (workspace.draft.question.trim().length === 0) return;
+    this.setAskWorkspace(projectId, {
+      ...workspace,
+      staged: [...workspace.staged, { ...workspace.draft }],
+      draft: newAskDraft(),
+    });
+  }
+
+  updateStagedAskDraft(
+    projectId: string,
+    draftId: string,
+    patch: Partial<Pick<AskQuestionDraft, "title" | "question" | "modelOverride">>,
+  ): void {
+    const workspace = this.askWorkspace(projectId);
+    this.setAskWorkspace(projectId, {
+      ...workspace,
+      staged: workspace.staged.map((draft) =>
+        draft.id === draftId ? { ...draft, ...patch } : draft,
+      ),
+    });
+  }
+
+  removeStagedAskDraft(projectId: string, draftId: string): void {
+    const workspace = this.askWorkspace(projectId);
+    this.setAskWorkspace(projectId, {
+      ...workspace,
+      staged: workspace.staged.filter((draft) => draft.id !== draftId),
+    });
+  }
+
+  restoreAskSubmission(projectId: string, submissionId: string): void {
+    const workspace = this.askWorkspace(projectId);
+    const submission = workspace.submissions.find((item) => item.id === submissionId);
+    if (submission == null || submission.status !== "failed") return;
+    this.setAskWorkspace(projectId, {
+      ...workspace,
+      staged: [
+        ...workspace.staged,
+        {
+          id: newAskDraft().id,
+          title: submission.title,
+          question: submission.question,
+          modelOverride: submission.modelOverride,
+        },
+      ],
+      submissions: workspace.submissions.filter((item) => item.id !== submissionId),
+      mode: "multi",
+    });
+  }
+
+  async submitAskQuestions(projectId: string, drafts: AskQuestionDraft[]): Promise<void> {
+    const workspace = this.askWorkspace(projectId);
+    const existing = new Set(workspace.submissions.map((item) => item.id));
+    const unique = drafts.filter(
+      (draft, index) =>
+        draft.question.trim().length > 0 &&
+        !existing.has(draft.id) &&
+        drafts.findIndex((candidate) => candidate.id === draft.id) === index,
+    );
+    if (unique.length === 0) return;
+
+    const launching: AskSubmission[] = unique.map((draft) => ({
+      ...draft,
+      title: draft.title.trim(),
+      question: draft.question.trim(),
+      status: "submitting",
+      runId: null,
+      threadId: null,
+      error: null,
+    }));
+    const ids = new Set(unique.map((draft) => draft.id));
+    this.setAskWorkspace(projectId, {
+      ...workspace,
+      draft: ids.has(workspace.draft.id) ? newAskDraft() : workspace.draft,
+      staged: workspace.staged.filter((draft) => !ids.has(draft.id)),
+      submissions: [...launching, ...workspace.submissions].slice(0, 12),
+    });
+
+    await Promise.all(
+      launching.map(async (submission) => {
+        try {
+          const started = await api.askFromApp(
+            projectId,
+            submission.title === "" ? null : submission.title,
+            submission.question,
+            runOverrideOfModel(submission.modelOverride),
+          );
+          const active = await api.getActiveRun(started.thread_id).catch(() => null);
+          const latest = active == null
+            ? await api.getLatestRun(started.thread_id).catch(() => null)
+            : null;
+          const observed = active?.run_id === started.run_id
+            ? active.status
+            : latest?.run_id === started.run_id
+              ? latest.status
+              : "queued";
+          this.updateAskSubmission(projectId, submission.id, {
+            runId: started.run_id,
+            threadId: started.thread_id,
+            status: askSubmissionStatus(observed),
+          });
+        } catch (error) {
+          this.updateAskSubmission(projectId, submission.id, {
+            status: "failed",
+            error: String(error),
+          });
+        }
+      }),
+    );
+    await this.refetchThreads(projectId);
+  }
+
+  async cancelAskSubmission(projectId: string, submissionId: string): Promise<void> {
+    const workspace = this.askWorkspace(projectId);
+    const submission = workspace.submissions.find((item) => item.id === submissionId);
+    if (submission?.runId == null) return;
+    this.updateAskSubmission(projectId, submissionId, { status: "cancelling" });
+    try {
+      await api.cancelRun(submission.runId);
+    } catch (error) {
+      this.updateAskSubmission(projectId, submissionId, {
+        status: "failed",
+        error: String(error),
+      });
+    }
+  }
+
+  private updateAskSubmission(
+    projectId: string,
+    submissionId: string,
+    patch: Partial<AskSubmission>,
+  ): void {
+    const workspace = this.askWorkspace(projectId);
+    this.setAskWorkspace(projectId, {
+      ...workspace,
+      submissions: workspace.submissions.map((item) =>
+        item.id === submissionId ? { ...item, ...patch } : item,
+      ),
+    });
+  }
+
+  private updateSubmissionByRun(runId: string, patch: Partial<AskSubmission>): void {
+    let changed = false;
+    const next: Record<string, AskComposerWorkspace> = {};
+    for (const [projectId, workspace] of Object.entries(this.state.askComposerByProject)) {
+      const submissions = workspace.submissions.map((item) => {
+        if (item.runId !== runId) return item;
+        changed = true;
+        return { ...item, ...patch };
+      });
+      next[projectId] = submissions === workspace.submissions ? workspace : { ...workspace, submissions };
+    }
+    if (changed) this.set({ askComposerByProject: next });
   }
 
   // ---- reads / refetch seams (qxr.5 event listeners call these) ----
@@ -579,6 +846,7 @@ class AppStore {
    * re-attach via `get_active_run`.
    */
   handleRunProgress(payload: { run_id: string; thread_id: string; kind: string; detail: string }): void {
+    this.updateSubmissionByRun(payload.run_id, { status: "running" });
     const run = this.state.activeRun;
     if (run != null && run.runId === payload.run_id) {
       const line = formatRunProgressLine(payload.kind, payload.detail);
@@ -592,6 +860,19 @@ class AppStore {
     }
   }
 
+  handleRunStateChanged(payload: {
+    run_id: string;
+    thread_id: string;
+    status: api.RunStatus;
+  }): void {
+    this.updateSubmissionByRun(payload.run_id, {
+      status: askSubmissionStatus(payload.status),
+    });
+    if (payload.thread_id === this.state.selectedThreadId) {
+      void this.syncActiveRun(payload.thread_id);
+    }
+  }
+
   /**
    * React to a `run-finished` event: drop the tracked run, surface a failure
    * panel for `failed`/`timeout` (FR-4.8 — the two are the same error class,
@@ -599,6 +880,13 @@ class AppStore {
    * per-comment already; this catches anything missed).
    */
   handleRunFinished(payload: { run_id: string; thread_id: string; status: string }): void {
+    const submissionStatus: AskSubmissionStatus =
+      payload.status === "completed"
+        ? "completed"
+        : payload.status === "cancelled"
+          ? "cancelled"
+          : "failed";
+    this.updateSubmissionByRun(payload.run_id, { status: submissionStatus });
     void this.refetchComments(payload.thread_id);
     void this.refetchThreads();
 

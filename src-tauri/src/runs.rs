@@ -462,14 +462,28 @@ pub fn active_run_for_thread<R: Runtime>(
 /// FR-4.8). Thin wrapper over [`RunRegistry::cancel`]; Rust-side callers use
 /// the registry directly.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn cancel_run(
+pub async fn cancel_run<R: Runtime>(
+    app: AppHandle<R>,
     db: tauri::State<'_, DbHandle>,
     registry: tauri::State<'_, RunRegistry>,
     run_id: String,
 ) -> Result<(), String> {
     cancel_durable(db.inner(), registry.inner(), &run_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let id = run_id.clone();
+    if let Ok((thread_id, status)) = db::with_conn(db.inner(), move |conn| {
+        conn.query_row(
+            "SELECT thread_id, status FROM follow_up_runs WHERE id = ?1",
+            [&id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+    })
+    .await
+    {
+        emit_run_state(&app, &run_id, &thread_id, &status);
+    }
+    Ok(())
 }
 
 pub async fn cancel_durable(
@@ -1016,6 +1030,7 @@ async fn start_reserved<R: Runtime>(
     }
 
     append_log(&log_path, &format!("[run] queued {run_id} at {}", now_iso()));
+    emit_run_state(app_handle, run_id, &req.thread_id, RunStatus::Queued.as_str());
     let (done_tx, done_rx) = oneshot::channel();
     let started_thread_id = req.thread_id.clone();
     let prepared = PreparedExec {
@@ -1131,6 +1146,12 @@ async fn execute_when_admitted<R: Runtime>(
             }
         }
     };
+    emit_run_state(
+        &app_handle,
+        &run_id,
+        &prepared.req.thread_id,
+        RunStatus::Starting.as_str(),
+    );
 
     let id = run_id.clone();
     let began = db::with_conn(&db, move |conn| {
@@ -1164,6 +1185,12 @@ async fn execute_when_admitted<R: Runtime>(
         });
         return;
     }
+    emit_run_state(
+        &app_handle,
+        &run_id,
+        &prepared.req.thread_id,
+        RunStatus::Running.as_str(),
+    );
 
     let route_note = match prepared.route.tag {
         routing::RouteTag::Openrouter => {
@@ -1316,6 +1343,29 @@ struct RunFinishedEvent<'a> {
     status: &'a str,
 }
 
+#[derive(Serialize, Clone)]
+struct RunStateEvent<'a> {
+    run_id: &'a str,
+    thread_id: &'a str,
+    status: &'a str,
+}
+
+fn emit_run_state<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    run_id: &str,
+    thread_id: &str,
+    status: &str,
+) {
+    let _ = app_handle.emit(
+        "run-state-changed",
+        &RunStateEvent {
+            run_id,
+            thread_id,
+            status,
+        },
+    );
+}
+
 /// What the inner supervision loop observed.
 struct SupOutcome {
     timed_out: bool,
@@ -1369,6 +1419,12 @@ fn spawn_supervisor<R: Runtime>(
                         append_log(
                             &ctx.log_path,
                             &format!("[run] provider throttled; queued until {until}"),
+                        );
+                        emit_run_state(
+                            &ctx.app_handle,
+                            &ctx.run_id,
+                            &ctx.thread_id,
+                            RunStatus::Throttled.as_str(),
                         );
                         ctx.registry.release(&ctx.run_id).await;
                         resume_one(ctx.app_handle.clone(), ctx.run_id.clone(), done_tx).await;
@@ -1763,6 +1819,7 @@ mod tests {
         project_id: String,
         thread_id: String,
         progress: Arc<StdMutex<Vec<serde_json::Value>>>,
+        state_events: Arc<StdMutex<Vec<serde_json::Value>>>,
         finished_events: Arc<StdMutex<Vec<serde_json::Value>>>,
         _app: tauri::App<MockRuntime>,
     }
@@ -1812,6 +1869,7 @@ mod tests {
         let handle = app.handle().clone();
 
         let progress: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::default();
+        let state_events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::default();
         let finished_events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::default();
         {
             let sink = progress.clone();
@@ -1826,6 +1884,12 @@ mod tests {
                     .unwrap()
                     .push(serde_json::from_str(event.payload()).unwrap());
             });
+            let sink = state_events.clone();
+            handle.listen_any("run-state-changed", move |event| {
+                sink.lock()
+                    .unwrap()
+                    .push(serde_json::from_str(event.payload()).unwrap());
+            });
         }
 
         Harness {
@@ -1836,6 +1900,7 @@ mod tests {
             project_id,
             thread_id,
             progress,
+            state_events,
             finished_events,
             _app: app,
         }
@@ -2128,6 +2193,14 @@ mod tests {
         assert_eq!(fin.status, RunStatus::Completed);
         assert_eq!(fin.exit_code, Some(0));
         assert_eq!(fin.thread_id, h.thread_id);
+        let states: Vec<String> = h
+            .state_events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| event["status"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(states, vec!["queued", "starting", "running"]);
 
         // Terminal row.
         let (status, _, _, finished_at) = h.run_row(&run_id);

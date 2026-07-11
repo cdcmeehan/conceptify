@@ -155,3 +155,14 @@ cross-project fairness, honest restart recovery, concurrent exploration,
 serialized same-thread mutation, and mandatory stale-base refusal before an
 artifact version can publish. This decision unblocks the scheduler, activity,
 notification, and safe compare/apply work in the concurrency epic.
+
+**Concurrent scheduler + immediate question folio (`conceptify-k9z.2/.3`).**
+Runs now enter a durable provider-aware queue before the submit call returns;
+exploration overlaps, same-thread mutations serialize, capacity changes apply
+live, queued/throttled work resumes after restart, cancellation wins spawn
+races, provider limits requeue the same auditable row, and retries link to their
+source attempt. The new project-keyed question folio keeps drafts across
+navigation, offers an optional editable short-list review, launches each prompt
+as its own trackable thread, and shows live queued/running/cancel states without
+closing the composer. Browser QA covered constrained-pane layout, editing,
+project switching, close/reopen persistence, and two-item batch state display.

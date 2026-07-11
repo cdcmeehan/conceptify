@@ -57,6 +57,7 @@ webview updates live instead of polling. The frontend subscribes with
 | `comment-updated` | `PATCH /api/v1/comments/:id`; `POST /api/v1/threads/:thread_id/artifact` (one per re-attached comment); `POST /api/v1/comments` when a reply re-opens its root | `{ project_id: string, thread_id: string, comment_id: string, status: string }` |
 | `navigate` | `POST /api/v1/open` | `{ project_id: string, thread_id: string \| null }` |
 | `run-progress` | agent-run engine (`runs` module, not an HTTP route) | `{ run_id: string, thread_id: string, kind: string, detail: string }` |
+| `run-state-changed` | durable run scheduler | `{ run_id: string, thread_id: string, status: string }` |
 | `run-finished` | agent-run engine (`runs` module, not an HTTP route) | `{ run_id: string, thread_id: string, status: string }` |
 | `thread-updated` | flow layer (`flows` module, not an HTTP route): thread status changes owned by the run lifecycle — apply-mode `updating` ↔ `ready`, and in-app-ask generation `generating` → `error` (or `generating` again on Retry), PRD §4 | `{ project_id: string, thread_id: string, status: string }` |
 | `settings-changed` | `set_agent_settings` / `reset_agent_settings` (Tauri commands, not HTTP) | `null` (no payload) |
@@ -107,6 +108,10 @@ replayed implicitly.
   frontend drops the purely informational `status: "allowed"` heartbeats and
   shows only genuine limiting; the display filtering/formatting policy lives
   there (one place), never in the core.
+- `run-state-changed` — emitted after each durable scheduler transition that
+  matters to live UI (`queued`, `starting`, `running`, `throttled`, and a
+  cancellation request). Unlike stdout progress, this fires even for a silent
+  child, so queue-versus-running labels cannot drift.
 - `run-finished` — exactly once per run, emitted **after** the DB row reached
   its terminal state. `status` is one of `completed` (exit 0), `conflicted`
   (a stale mutation result retained without publication), `failed`
