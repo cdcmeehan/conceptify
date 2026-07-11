@@ -353,3 +353,17 @@ active runs, three recent result cards, and editable next-question suggestions
 that launch through the same durable ask/profile path. Empty projects explain
 the next action; established projects keep their full history in the adjacent
 thread list rather than duplicating it on the home.
+
+**Kickoff checkpoint (`conceptify-vc1.6`).** The create-to-submit paths were
+walked against a small mixed Rust/TypeScript folder, the bounded 5,000-file
+fallback, and a topic with notes/link/source context. From New project, the
+folder happy path is three actions after choosing a starter (open, starter,
+folder) and topic is four (open, topic, starter, Start & ask); neither opens
+Settings. Project selection and durable submission occur immediately after the
+native picker/create transaction, while orientation continues independently.
+Automated gates prove bounded/unchanged scanning, excluded trees, durable ask
+retry, profile inheritance, and project survival after generation failure.
+Keyboard-native inputs/radios, Escape cancellation, retained inline errors,
+single-column 320px composer layouts, and explicit scanning/queued/provider
+states passed the accumulated browser checkpoints. No regression added an
+empty intermediate screen or duplicate submit path.
