@@ -166,3 +166,14 @@ navigation, offers an optional editable short-list review, launches each prompt
 as its own trackable thread, and shows live queued/running/cancel states without
 closing the composer. Browser QA covered constrained-pane layout, editing,
 project switching, close/reopen persistence, and two-item batch state display.
+
+**Global activity and richer run states (`conceptify-k9z.4`).** A compact
+bottom-right tray makes every active run findable across projects, with queue
+position, model, phase, elapsed time, and only the actions valid for that state:
+jump, cancel, retry, or dismiss. Project rows quietly mark background work and
+thread rows distinguish queued from generating, answering, applying, provider
+wait, and cancellation. Failures remain until dismissed, ordinary terminal
+history clears after 15 minutes, and active work can never be hidden. Browser QA
+covered the real persisted history, cross-project jump, and mocked queued versus
+admitted runs; the polite live summary reports aggregate counts without reading
+streaming progress aloud.

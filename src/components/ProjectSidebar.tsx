@@ -5,7 +5,7 @@
 
 import { useState } from "preact/hooks";
 import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
-import type { Project } from "../lib/api";
+import type { Project, RunActivity } from "../lib/api";
 import { appStore } from "../store/appStore";
 import { relativeTime } from "../lib/time";
 
@@ -15,9 +15,10 @@ interface Props {
   showArchived: boolean;
   loading: boolean;
   error: string | null;
+  runActivity: RunActivity[];
 }
 
-export function ProjectSidebar({ projects, selectedProjectId, showArchived, loading, error }: Props) {
+export function ProjectSidebar({ projects, selectedProjectId, showArchived, loading, error, runActivity }: Props) {
   // Only one project may be inline-editing / re-mapping at a time.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -254,6 +255,11 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
               const selected = project.id === selectedProjectId;
               const isEditing = editingId === project.id;
               const isRemapping = remappingId === project.id;
+              const activeRuns = runActivity.filter(
+                (item) =>
+                  item.project_id === project.id &&
+                  ["queued", "starting", "running", "throttled", "cancelling"].includes(item.status),
+              ).length;
               return (
                 <li key={project.id}>
                   <div
@@ -285,7 +291,13 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
                         >
                           {project.name}
                         </span>
-                        <span class="shrink-0 text-[11px] tabular-nums text-muted">
+                        <span class="flex shrink-0 items-center gap-1 text-[11px] tabular-nums text-muted">
+                          {activeRuns > 0 && (
+                            <span
+                              class="h-1.5 w-1.5 animate-pulse rounded-full bg-info"
+                              title={`${activeRuns} active run${activeRuns === 1 ? "" : "s"}`}
+                            />
+                          )}
                           {project.thread_count}
                         </span>
                       </div>

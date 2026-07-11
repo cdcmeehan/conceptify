@@ -108,6 +108,8 @@ pub fn run() {
             commands::ask_single_comment,
             commands::apply_to_artifact,
             commands::get_active_run,
+            commands::list_run_activity,
+            commands::dismiss_run_activity,
             commands::get_run_log_tail,
             commands::ask_from_app,
             commands::retry_ask,

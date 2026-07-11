@@ -162,6 +162,16 @@ and are invoked by the app shell as Tauri commands (snake_case args):
   `running`, `throttled`, or `cancelling`) or `null` — the UI
   re-attaches to an in-flight run on thread switch. Target ids are not
   persisted, so a re-attached run renders indeterminate progress.
+- `list_run_activity {}` → the global activity read model, with project/thread
+  identity, mode/status/model/provider, queue position, queue/execution/finish
+  timestamps, failure reason, and retry lineage for every active run. It also
+  returns undismissed failures/timeouts/conflicts until the user acts and keeps
+  ordinary completed/cancelled work visible for 15 minutes. The shell uses
+  this to make work locatable across projects without exposing run logs.
+- `dismiss_run_activity { run_id }` → `true` when a terminal run was dismissed,
+  `false` for an unknown or still-active run. Dismissal is durable; active runs
+  cannot be hidden. The shell may call this once per row to clear recent
+  completion history.
 - `get_run_log_tail { run_id, max_lines? }` →
   `{ run_id, log_path, lines }` (default last 30 lines) — FR-4.8 failure
   surfacing; `log_path` is always returned even when the file is unreadable.
@@ -293,6 +303,14 @@ saved (completed-without-artifact) as an error, while never regressing a
 start that fails *after* the thread row exists (missing CLI, gone cwd, spawn
 failure) also flips the thread to `error`, so a generation is never stranded
 in `generating`. Retry re-enters `generating` and re-spawns.
+
+Every durable state transition emits `run-state-changed`. The shell refetches
+the global activity read model from that event rather than reconstructing
+queue truth client-side. Project rows signal active background work, thread
+rows distinguish queued position from generating/answering/applying/provider
+wait/cancelling, and the global tray offers only valid jump, cancel, retry, and
+dismiss actions. Its polite live region announces aggregate active and
+attention counts, avoiding per-progress-message screen-reader noise.
 
 **Child environment:** the flow layer resolves the `conceptify` CLI
 (`CONCEPTIFY_CLI` env override → binary sibling of the app executable →

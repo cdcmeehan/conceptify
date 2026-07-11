@@ -305,6 +305,32 @@ export function getActiveRun(threadId: string): Promise<ActiveRun | null> {
   return invoke<ActiveRun | null>("get_active_run", { thread_id: threadId });
 }
 
+export interface RunActivity {
+  run_id: string;
+  project_id: string;
+  project_name: string;
+  thread_id: string;
+  thread_title: string;
+  mode: RunMode;
+  status: RunStatus;
+  model: string;
+  provider_pool: string | null;
+  queued_at: string | null;
+  execution_started_at: string | null;
+  finished_at: string | null;
+  status_reason: string | null;
+  queue_position: number | null;
+  retry_of_run_id: string | null;
+}
+
+export function listRunActivity(): Promise<RunActivity[]> {
+  return invoke<RunActivity[]>("list_run_activity");
+}
+
+export function dismissRunActivity(runId: string): Promise<boolean> {
+  return invoke<boolean>("dismiss_run_activity", { run_id: runId });
+}
+
 /** Cancel a live run (FR-4.8): SIGKILLs the whole process tree; the run ends
  *  `cancelled` with partial answers preserved. */
 export function cancelRun(runId: string): Promise<void> {

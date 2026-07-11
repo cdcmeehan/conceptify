@@ -38,6 +38,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(FOLLOW_UP_RUNS_OVERRIDE),
         M::up(FOLLOW_UP_RUNS_ROUTE),
         M::up(FOLLOW_UP_RUNS_QUEUE),
+        M::up(FOLLOW_UP_RUNS_ACTIVITY),
     ])
 }
 
@@ -376,6 +377,16 @@ CREATE INDEX idx_follow_up_runs_mutation_target
       AND status IN ('starting', 'running', 'cancelling');
 ";
 
+/// Adds a durable dismissal marker for the global activity tray
+/// (`conceptify-k9z.4`). Active work ignores this field; terminal completed or
+/// attention items remain hidden after the user explicitly clears them. NULL
+/// preserves every pre-migration row as undisposed history.
+const FOLLOW_UP_RUNS_ACTIVITY: &str = "
+ALTER TABLE follow_up_runs ADD COLUMN activity_dismissed_at TEXT NULL;
+CREATE INDEX idx_follow_up_runs_activity
+    ON follow_up_runs(status, activity_dismissed_at, finished_at);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,13 +394,15 @@ mod tests {
 
     /// `user_version` after the full chain — the count of `M::up` entries in
     /// [`migrations`].
-    const LATEST: usize = 13;
+    const LATEST: usize = 14;
 
     /// Position of the durable scheduler metadata migration.
     const RUN_QUEUE: usize = 13;
 
     /// Position of the resolved execution-route tag migration.
     const ROUTE: usize = 12;
+
+    const RUN_ACTIVITY: usize = 14;
 
     /// Position of the `follow_up_runs.override_json` ALTER (the 11th
     /// migration), pinned explicitly — like `ASK_MODE` below — so appending
@@ -869,5 +882,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(index_count, 3);
+    }
+
+    #[test]
+    fn add_run_activity_marker_preserves_rows_and_can_dismiss_terminal_history() {
+        let mut conn = fresh_conn();
+        let m = migrations();
+        m.to_version(&mut conn, RUN_ACTIVITY - 1)
+            .expect("to pre-activity schema");
+        seed_thread(&conn);
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path)
+             VALUES ('r1', 't1', 'claude', 'm', 'answer', 'completed', '/r.log')",
+            [],
+        )
+        .unwrap();
+        m.to_version(&mut conn, RUN_ACTIVITY).unwrap();
+        let dismissed: Option<String> = conn
+            .query_row(
+                "SELECT activity_dismissed_at FROM follow_up_runs WHERE id = 'r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(dismissed.is_none());
+        conn.execute(
+            "UPDATE follow_up_runs SET activity_dismissed_at = '2026-07-11T12:00:00.000Z'
+             WHERE id = 'r1'",
+            [],
+        )
+        .unwrap();
     }
 }

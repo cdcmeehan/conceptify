@@ -19,7 +19,7 @@
 
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../lib/api";
-import type { ArtifactVersion, Comment, Project, RunMode, RunOverride, Thread } from "../lib/api";
+import type { ArtifactVersion, Comment, Project, RunActivity, RunMode, RunOverride, Thread } from "../lib/api";
 
 /** Which artifact version the viewer shows: a concrete number (read-only
  *  history view) or `"latest"` (tracks new saves live, FR-2.4). */
@@ -190,6 +190,9 @@ export interface AppState {
   /** Project-keyed composer state. It intentionally outlives component mounts
    * so partially written and staged questions survive navigation. */
   askComposerByProject: Record<string, AskComposerWorkspace>;
+  runActivity: RunActivity[];
+  runActivityLoading: boolean;
+  activityTrayOpen: boolean;
 }
 
 type Listener = () => void;
@@ -215,6 +218,9 @@ const initialState: AppState = {
   runFailure: null,
   settingsOpen: false,
   askComposerByProject: {},
+  runActivity: [],
+  runActivityLoading: false,
+  activityTrayOpen: false,
 };
 
 let askDraftSequence = 0;
@@ -562,6 +568,58 @@ class AppStore {
     }
   }
 
+  async refetchRunActivity(): Promise<void> {
+    this.set({ runActivityLoading: true });
+    try {
+      const runActivity = await api.listRunActivity();
+      this.set({ runActivity, runActivityLoading: false });
+    } catch {
+      this.set({ runActivityLoading: false });
+    }
+  }
+
+  openActivityTray(): void {
+    this.set({ activityTrayOpen: true });
+    void this.refetchRunActivity();
+  }
+
+  closeActivityTray(): void {
+    this.set({ activityTrayOpen: false });
+  }
+
+  async dismissRunActivity(runId: string): Promise<void> {
+    await api.dismissRunActivity(runId);
+    this.set({ runActivity: this.state.runActivity.filter((item) => item.run_id !== runId) });
+  }
+
+  async clearCompletedActivity(): Promise<void> {
+    const clearable = this.state.runActivity.filter((item) =>
+      ["completed", "cancelled"].includes(item.status),
+    );
+    await Promise.all(clearable.map((item) => api.dismissRunActivity(item.run_id)));
+    const ids = new Set(clearable.map((item) => item.run_id));
+    this.set({ runActivity: this.state.runActivity.filter((item) => !ids.has(item.run_id)) });
+  }
+
+  async jumpToRunActivity(item: RunActivity): Promise<void> {
+    if (this.state.selectedProjectId !== item.project_id) {
+      this.selectProject(item.project_id);
+      await this.refetchThreads(item.project_id);
+    }
+    this.selectThread(item.thread_id);
+  }
+
+  async cancelRunActivity(item: RunActivity): Promise<void> {
+    await api.cancelRun(item.run_id);
+    await this.refetchRunActivity();
+  }
+
+  async retryRunActivity(item: RunActivity): Promise<void> {
+    await this.jumpToRunActivity(item);
+    if (item.mode === "ask") await this.retryAsk(item.thread_id);
+    await this.refetchRunActivity();
+  }
+
   /**
    * Refetch the thread list for `projectId` (defaults to the selected project).
    * A no-op when `projectId` isn't the project currently on screen, so an event
@@ -865,6 +923,7 @@ class AppStore {
     thread_id: string;
     status: api.RunStatus;
   }): void {
+    void this.refetchRunActivity();
     this.updateSubmissionByRun(payload.run_id, {
       status: askSubmissionStatus(payload.status),
     });
@@ -880,6 +939,7 @@ class AppStore {
    * per-comment already; this catches anything missed).
    */
   handleRunFinished(payload: { run_id: string; thread_id: string; status: string }): void {
+    void this.refetchRunActivity();
     const submissionStatus: AskSubmissionStatus =
       payload.status === "completed"
         ? "completed"

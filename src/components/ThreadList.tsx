@@ -2,8 +2,8 @@
 // threads sorted by last activity, so this renders them in order with a status
 // chip and open-comment count. Arrow keys move the selection when focused.
 
-import { useState } from "preact/hooks";
-import type { Thread } from "../lib/api";
+import { useEffect, useState } from "preact/hooks";
+import type { RunActivity, Thread } from "../lib/api";
 import { appStore } from "../store/appStore";
 import { relativeTime } from "../lib/time";
 import { NewThreadComposer } from "./NewThreadComposer";
@@ -30,6 +30,7 @@ interface Props {
   projectName: string | null;
   loading: boolean;
   error: string | null;
+  runActivity: RunActivity[];
 }
 
 export function ThreadList({
@@ -40,6 +41,7 @@ export function ThreadList({
   projectName,
   loading,
   error,
+  runActivity,
 }: Props) {
   // FR-5.1 in-app ask composer, toggled by the "New thread" header button.
   const [composerOpen, setComposerOpen] = useState(false);
@@ -48,6 +50,12 @@ export function ThreadList({
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!runActivity.some((item) => ["queued", "starting", "running", "throttled", "cancelling"].includes(item.status))) return;
+    const timer = window.setInterval(() => tick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [runActivity]);
 
   function confirmDelete(threadId: string) {
     setDeleteBusy(true);
@@ -144,6 +152,11 @@ export function ThreadList({
           <ul class="flex flex-col gap-0.5">
             {threads.map((thread) => {
               const selected = thread.id === selectedThreadId;
+              const run = runActivity.find(
+                (item) =>
+                  item.thread_id === thread.id &&
+                  ["queued", "starting", "running", "throttled", "cancelling"].includes(item.status),
+              );
               return (
                 <li key={thread.id}>
                   <div
@@ -171,7 +184,11 @@ export function ThreadList({
                       )}
                     </div>
                     <div class="mt-1.5 flex items-center justify-between gap-2">
-                      <StatusChip status={thread.status} stalled={isStalled(thread)} />
+                      {run != null ? (
+                        <ThreadRunStage run={run} />
+                      ) : (
+                        <StatusChip status={thread.status} stalled={isStalled(thread)} />
+                      )}
                       <span class="shrink-0 text-[11px] text-muted">
                         {relativeTime(thread.updated_at)}
                       </span>
@@ -234,4 +251,33 @@ export function ThreadList({
       </div>
     </section>
   );
+}
+
+function ThreadRunStage({ run }: { run: RunActivity }) {
+  const label =
+    run.status === "queued"
+      ? run.queue_position != null ? `Queued #${run.queue_position}` : "Queued"
+      : run.status === "throttled"
+        ? "Provider wait"
+        : run.status === "cancelling"
+          ? "Cancelling"
+          : run.mode === "apply"
+            ? "Applying"
+            : run.mode === "answer"
+              ? "Answering"
+              : "Generating";
+  const started = run.execution_started_at ?? run.queued_at;
+  return (
+    <span class="cfy-chip bg-info-bg text-info" title={`${label} · ${run.model}`}>
+      <span class={`h-1.5 w-1.5 rounded-full ${run.status === "queued" ? "bg-muted/60" : "animate-pulse bg-info"}`} />
+      {label}
+      {started != null && <span class="tabular-nums opacity-80">{shortElapsed(started)}</span>}
+    </span>
+  );
+}
+
+function shortElapsed(iso: string): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m`;
 }

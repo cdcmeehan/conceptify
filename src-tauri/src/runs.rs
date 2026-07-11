@@ -1655,6 +1655,91 @@ async fn finalize<R: Runtime>(
 }
 
 // ---------------------------------------------------------------------------
+// Global activity read model (conceptify-k9z.4)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunActivity {
+    pub run_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub thread_id: String,
+    pub thread_title: String,
+    pub mode: String,
+    pub status: String,
+    pub model: String,
+    pub provider_pool: Option<String>,
+    pub queued_at: Option<String>,
+    pub execution_started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub status_reason: Option<String>,
+    pub queue_position: Option<i64>,
+    pub retry_of_run_id: Option<String>,
+}
+
+pub fn list_activity(conn: &Connection) -> rusqlite::Result<Vec<RunActivity>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id, p.id, p.name, t.id, t.title, r.mode, r.status, r.model,
+                r.provider_pool, r.queued_at, r.execution_started_at,
+                r.finished_at, r.status_reason,
+                CASE WHEN r.status = 'queued' THEN (
+                    SELECT COUNT(*) FROM follow_up_runs earlier
+                    WHERE earlier.provider_pool = r.provider_pool
+                      AND earlier.status = 'queued'
+                      AND earlier.queue_seq <= r.queue_seq
+                ) ELSE NULL END,
+                r.retry_of_run_id
+         FROM follow_up_runs r
+         JOIN threads t ON t.id = r.thread_id
+         JOIN projects p ON p.id = t.project_id
+         WHERE r.status IN ('queued', 'starting', 'running', 'throttled', 'cancelling')
+            OR (r.activity_dismissed_at IS NULL AND (
+                r.status IN ('failed', 'timeout', 'conflicted')
+                OR r.finished_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-15 minutes')
+            ))
+         ORDER BY
+            CASE
+              WHEN r.status IN ('running', 'starting', 'cancelling') THEN 0
+              WHEN r.status IN ('queued', 'throttled') THEN 1
+              WHEN r.status IN ('failed', 'timeout', 'conflicted') THEN 2
+              ELSE 3
+            END,
+            COALESCE(r.execution_started_at, r.queued_at, r.finished_at, r.started_at) DESC,
+            r.queue_seq ASC, r.id ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(RunActivity {
+            run_id: r.get(0)?,
+            project_id: r.get(1)?,
+            project_name: r.get(2)?,
+            thread_id: r.get(3)?,
+            thread_title: r.get(4)?,
+            mode: r.get(5)?,
+            status: r.get(6)?,
+            model: r.get(7)?,
+            provider_pool: r.get(8)?,
+            queued_at: r.get(9)?,
+            execution_started_at: r.get(10)?,
+            finished_at: r.get(11)?,
+            status_reason: r.get(12)?,
+            queue_position: r.get(13)?,
+            retry_of_run_id: r.get(14)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn dismiss_activity(conn: &Connection, run_id: &str) -> rusqlite::Result<bool> {
+    Ok(conn.execute(
+        "UPDATE follow_up_runs
+         SET activity_dismissed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1
+           AND status NOT IN ('queued', 'starting', 'running', 'throttled', 'cancelling')",
+        [run_id],
+    )? == 1)
+}
+
+// ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
 
@@ -3084,6 +3169,70 @@ mod tests {
             .await,
             "recovered watcher should transition generating → error"
         );
+    }
+
+    #[test]
+    fn global_activity_lists_active_attention_and_recent_then_dismisses_terminal() {
+        let h = harness("activity-read-model");
+        {
+            let conn = h.db.lock().unwrap();
+            crate::run_queue::enqueue(
+                &conn,
+                &crate::run_queue::NewQueuedRun {
+                    id: "queued-activity",
+                    thread_id: &h.thread_id,
+                    agent: "fake",
+                    model: "m",
+                    mode: "answer",
+                    log_path: "/tmp/q.log",
+                    override_json: None,
+                    route: "manual",
+                    run_class: crate::run_queue::RunClass::Exploration,
+                    provider_pool: "manual",
+                    prompt: "q",
+                    env_json: "[]",
+                    base_artifact_version: None,
+                    retry_of_run_id: None,
+                },
+            )
+            .unwrap();
+            for (id, status, finished) in [
+                ("recent", "completed", "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"),
+                ("attention", "failed", "'2000-01-01T00:00:00.000Z'"),
+                ("old-complete", "completed", "'2000-01-01T00:00:00.000Z'"),
+            ] {
+                conn.execute(
+                    &format!(
+                        "INSERT INTO follow_up_runs
+                           (id, thread_id, agent, model, mode, status, log_path, finished_at)
+                         VALUES (?1, ?2, 'fake', 'm', 'answer', ?3, '/tmp/a.log', {finished})"
+                    ),
+                    rusqlite::params![id, h.thread_id, status],
+                )
+                .unwrap();
+            }
+        }
+        let conn = h.db.lock().unwrap();
+        let activity = list_activity(&conn).unwrap();
+        let ids: Vec<&str> = activity.iter().map(|item| item.run_id.as_str()).collect();
+        assert!(ids.contains(&"queued-activity"));
+        assert!(ids.contains(&"recent"));
+        assert!(ids.contains(&"attention"));
+        assert!(!ids.contains(&"old-complete"));
+        assert_eq!(
+            activity
+                .iter()
+                .find(|item| item.run_id == "queued-activity")
+                .unwrap()
+                .queue_position,
+            Some(1)
+        );
+        assert!(!dismiss_activity(&conn, "queued-activity").unwrap());
+        assert!(dismiss_activity(&conn, "attention").unwrap());
+        assert!(!list_activity(&conn)
+            .unwrap()
+            .iter()
+            .any(|item| item.run_id == "attention"));
     }
 
     // -- boot reconciliation (N4) --------------------------------------------

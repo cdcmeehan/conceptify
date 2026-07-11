@@ -14,6 +14,7 @@ import { ProjectSidebar } from "./components/ProjectSidebar";
 import { ThreadList } from "./components/ThreadList";
 import { ThreadView } from "./components/ThreadView";
 import { SettingsView } from "./components/SettingsView";
+import { ActivityTray } from "./components/ActivityTray";
 import "./App.css";
 
 function App() {
@@ -21,6 +22,7 @@ function App() {
 
   useEffect(() => {
     void appStore.refetchProjects();
+    void appStore.refetchRunActivity();
     // Apply the stored appearance (FR-7.2). theme.ts already applied `system`
     // before first paint (main.tsx); this replaces it with the saved value.
     void getAgentSettings()
@@ -44,6 +46,7 @@ function App() {
         showArchived={state.showArchived}
         loading={state.projectsLoading}
         error={state.projectsError}
+        runActivity={state.runActivity}
       />
       <ThreadList
         threads={state.threads}
@@ -53,8 +56,14 @@ function App() {
         projectName={selectedProject?.name ?? null}
         loading={state.threadsLoading}
         error={state.threadsError}
+        runActivity={state.runActivity}
       />
       <ThreadView thread={selectedThread} />
+      <ActivityTray
+        activity={state.runActivity}
+        loading={state.runActivityLoading}
+        open={state.activityTrayOpen}
+      />
       {state.settingsOpen && <SettingsView />}
     </div>
   );
