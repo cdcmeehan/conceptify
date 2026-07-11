@@ -405,3 +405,12 @@ post-apply confirmation offers Undo, which creates a restoring version from the
 prior artifact and reopens the request. Stale bases keep the existing conflict
 review and re-synthesis path, with the synthesis retained for another explicit
 preview rather than auto-published.
+
+**Focus and history (`conceptify-9lj.5`).** The bridge now distinguishes warm
+saved/open anchors from quiet dotted answered dig-ins in both themes; live text
+selection remains stronger and transient, while moved references stay out of
+the artifact and retain their warning badge in Comments. A compact history
+restores each prior answer together with its target, pulses that anchor on
+selection, and supports previous/next buttons plus Alt+Left/Alt+Right traversal.
+Only one answer card is expanded at a time, and it can be hidden without
+removing its durable history or leaving a filled colour wash over the artifact.

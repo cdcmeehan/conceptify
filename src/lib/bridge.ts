@@ -90,6 +90,7 @@ export type BridgeMessage =
 export interface HighlightSpec {
   key: string;
   anchor: Anchor;
+  state?: "saved" | "answered";
 }
 
 export interface DiffMarkerSpec {

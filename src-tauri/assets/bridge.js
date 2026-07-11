@@ -414,6 +414,8 @@
     // which follows the element's own border-radius) so the mark separates
     // from any artifact border it sits beside instead of doubling it up.
     ":where([data-cfy-hl='element']) { outline: 2px solid rgba(163, 77, 36, 0.9); outline-offset: 3px; box-shadow: 0 0 0 6px rgba(232, 126, 52, 0.2); }",
+    ":where(span[data-cfy-hl-state='answered']) { background-color: transparent; border-bottom: 2px dotted rgba(53, 112, 128, 0.9); }",
+    ":where([data-cfy-hl-state='answered'][data-cfy-hl='element']) { outline: 2px dotted rgba(53, 112, 128, 0.9); box-shadow: none; }",
 
     // Live drag selection. ::selection is a pseudo-ELEMENT, so it cannot be
     // wrapped in :where() (pseudo-elements are invalid there) — this is the one
@@ -448,6 +450,8 @@
     "@media (prefers-color-scheme: dark) {" +
       " :where(span[data-cfy-hl='text']) { background-color: rgba(224, 152, 99, 0.26); border-bottom-color: rgba(232, 169, 124, 0.95); }" +
       " :where([data-cfy-hl='element']) { outline-color: rgba(224, 152, 99, 0.95); box-shadow: 0 0 0 6px rgba(224, 152, 99, 0.24); }" +
+      " :where(span[data-cfy-hl-state='answered']) { background-color: transparent; border-bottom-color: rgba(115, 190, 207, 0.95); }" +
+      " :where([data-cfy-hl-state='answered'][data-cfy-hl='element']) { outline-color: rgba(115, 190, 207, 0.95); box-shadow: none; }" +
       " ::selection { background-color: rgba(224, 152, 99, 0.4); }" +
       " }",
   ].join("\n");
@@ -467,6 +471,7 @@
       if (deco.element) {
         deco.element.removeAttribute("data-cfy-hl");
         deco.element.removeAttribute("data-cfy-hl-key");
+        deco.element.removeAttribute("data-cfy-hl-state");
         deco.element.removeAttribute("data-cfy-pulse");
       }
       for (var j = 0; j < deco.spans.length; j++) unwrap(deco.spans[j]);
@@ -491,8 +496,9 @@
       var anchor = item.anchor;
       if (!anchor || typeof anchor !== "object") continue;
       var key = typeof item.key === "string" ? item.key : "";
+      var state = item.state === "answered" ? "answered" : "saved";
       try {
-        var deco = applyHighlight(key, anchor);
+        var deco = applyHighlight(key, anchor, state);
         if (deco) decorations.push(deco);
       } catch (e) {
         /* one bad anchor must not break the rest */
@@ -550,31 +556,32 @@
 
   window.addEventListener("resize", positionDiffMarkers);
 
-  function markElement(el, key) {
+  function markElement(el, key, state) {
     el.setAttribute("data-cfy-hl", "element");
     if (key) el.setAttribute("data-cfy-hl-key", key);
+    el.setAttribute("data-cfy-hl-state", state);
     return { key: key, element: el, spans: [] };
   }
 
-  function applyHighlight(key, anchor) {
+  function applyHighlight(key, anchor, state) {
     if (anchor.type === "element") {
       var el = byCfyId(anchor.cfy_id);
-      return el ? markElement(el, key) : null;
+      return el ? markElement(el, key, state) : null;
     }
     if (anchor.type === "text") {
       var range = resolveTextRange(anchor);
       if (range) {
-        var spans = wrapRange(range, key);
+        var spans = wrapRange(range, key, state);
         if (spans.length > 0) return { key: key, element: null, spans: spans };
         // Range resolved but nothing wrappable (e.g. text inside SVG):
         // decorate the nearest id-bearing ancestor instead.
         var near = cfyAncestor(range.startContainer);
-        return near ? markElement(near, key) : null;
+        return near ? markElement(near, key, state) : null;
       }
       // Neither offsets nor quote resolved: coarse fallback to the host
       // element so the comment still has *some* visual anchor.
       var host = byCfyId(anchor.cfy_id);
-      return host ? markElement(host, key) : null;
+      return host ? markElement(host, key, state) : null;
     }
     return null; // unknown anchor type: ignore (forward compatibility)
   }
@@ -652,7 +659,7 @@
    * splitText per the DOM spec). Purely inline, background-only styling, so
    * layout and typography are untouched; unwrap() fully reverses it.
    */
-  function wrapRange(range, key) {
+  function wrapRange(range, key, state) {
     if (
       range.endContainer.nodeType === 3 &&
       range.endOffset < range.endContainer.data.length
@@ -692,6 +699,7 @@
       var span = document.createElement("span");
       span.setAttribute("data-cfy-hl", "text");
       if (key) span.setAttribute("data-cfy-hl-key", key);
+      span.setAttribute("data-cfy-hl-state", state);
       parent.insertBefore(span, node);
       span.appendChild(node);
       spans.push(span);

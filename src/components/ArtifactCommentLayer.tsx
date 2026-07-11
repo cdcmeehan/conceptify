@@ -163,10 +163,17 @@ function computeHighlights(
 ): HighlightSpec[] {
   const specs: HighlightSpec[] = [];
   for (const c of comments) {
-    if (c.status !== "open") continue;
     if (c.artifact_version !== artifactVersion) continue;
     if (c.anchor == null) continue;
-    specs.push({ key: c.id, anchor: c.anchor as unknown as Anchor });
+    if (c.anchor_state === "moved") continue;
+    const meta = explorationMeta(c.anchor);
+    const answeredDigIn = c.status === "answered" && c.answer_html != null && meta?.action != null && meta.action !== "change";
+    if (c.status !== "open" && !answeredDigIn) continue;
+    specs.push({
+      key: c.id,
+      anchor: c.anchor as unknown as Anchor,
+      state: answeredDigIn ? "answered" : "saved",
+    });
   }
   return specs;
 }
@@ -445,15 +452,15 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
       });
   }
 
-  const inlineAnswers = state.comments.filter((comment) => {
+  const explorationHistory = state.comments.filter((comment) => {
     const meta = explorationMeta(comment.anchor);
-    return comment.parent_id == null && comment.artifact_version === artifactVersion && meta?.destination === "inline";
-  }).slice(-3);
+    return comment.parent_id == null && comment.artifact_version === artifactVersion && meta?.action != null && meta.action !== "change";
+  });
   const inlineRight = iframeRef.current == null
     ? 16
     : Math.max(16, window.innerWidth - iframeRef.current.getBoundingClientRect().right + 16);
 
-  if (popover == null && inlineAnswers.length === 0) return null;
+  if (popover == null && explorationHistory.length === 0) return null;
 
   // Keep mousedowns inside the popover from bubbling out to the artifact / list
   // panes. (The capture-phase click-away listener already ignores clicks whose
@@ -504,7 +511,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
   }
 
   // Stage 2: the comment composer.
-  if (popover == null) return <InlineExplorationCards comments={inlineAnswers} activeRun={state.activeRun} right={inlineRight} />;
+  if (popover == null) return <InlineExplorationCards comments={explorationHistory} activeRun={state.activeRun} right={inlineRight} />;
 
   const actionLabels = { explain: "Explain selection", deepen: "Deepen selection", simplify: "Simplify selection", visualise: "Visualise selection", change: "Change selection" } as const;
   const label = popover.action == null
@@ -621,33 +628,85 @@ function InlineExplorationCards({
   activeRun: import("../store/appStore").ActiveRunState | null;
   right: number;
 }) {
+  const newestInline = [...comments].reverse().find((comment) => explorationMeta(comment.anchor)?.destination === "inline") ?? null;
+  const [activeId, setActiveId] = useState<string | null>(newestInline?.id ?? null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const activeIndex = activeId == null ? -1 : comments.findIndex((comment) => comment.id === activeId);
+  const active = activeIndex < 0 ? null : comments[activeIndex];
+
+  useEffect(() => {
+    if (newestInline != null && !comments.some((comment) => comment.id === activeId)) {
+      setActiveId(newestInline.id);
+    }
+  }, [comments.length, newestInline?.id]);
+
+  function selectAt(index: number) {
+    if (comments.length === 0) return;
+    const next = comments[(index + comments.length) % comments.length];
+    setActiveId(next.id);
+    setHistoryOpen(false);
+    artifactBridge.scrollToAnchor(next.anchor as unknown as Anchor, next.id);
+  }
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.altKey || comments.length === 0) return;
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        selectAt((activeIndex < 0 ? comments.length - 1 : activeIndex) + (event.key === "ArrowRight" ? 1 : -1));
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeIndex, comments]);
+
+  const anchor = active?.anchor as unknown as Anchor | undefined;
+  const answering = active != null && activeRun?.mode === "answer" && activeRun.targetIds?.includes(active.id);
+
   return (
     <aside class="fixed bottom-4 z-40 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2" style={{ right: `${right}px` }} aria-label="Inline exploration answers">
-      {comments.map((comment) => {
-        const anchor = comment.anchor as unknown as Anchor;
-        const target = anchor.target;
-        const answering = activeRun?.mode === "answer" && activeRun.targetIds?.includes(comment.id);
-        return (
-          <article key={comment.id} class="cfy-card overflow-hidden shadow-lg">
+      {historyOpen && (
+        <ol class="cfy-card max-h-52 overflow-y-auto p-1 shadow-lg" aria-label="Exploration history">
+          {comments.map((comment, index) => {
+            const itemAnchor = comment.anchor as unknown as Anchor;
+            return (
+              <li key={comment.id}>
+                <button type="button" onClick={() => selectAt(index)} aria-current={comment.id === activeId ? "true" : undefined} class={`w-full rounded-ctl px-2 py-1.5 text-left ${comment.id === activeId ? "bg-selected" : "hover:bg-hover"}`}>
+                  <span class="cfy-label block">{String(explorationMeta(comment.anchor)?.action || "Explore")}</span>
+                  <span class="mt-0.5 block truncate text-[11px] text-muted">{itemAnchor.target?.label || itemAnchor.target?.excerpt || comment.body}</span>
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      {active != null && anchor != null && (
+          <article class="cfy-card overflow-hidden shadow-lg">
+            <div class="flex items-center gap-1 border-b border-line bg-well px-2 py-1">
+              <button type="button" onClick={() => selectAt(activeIndex - 1)} aria-label="Previous exploration" aria-keyshortcuts="Alt+ArrowLeft" class="cfy-btn cfy-btn-ghost h-6 w-6 p-0">‹</button>
+              <span class="flex-1 text-center text-[9px] tabular-nums text-muted">{activeIndex + 1} / {comments.length}</span>
+              <button type="button" onClick={() => selectAt(activeIndex + 1)} aria-label="Next exploration" aria-keyshortcuts="Alt+ArrowRight" class="cfy-btn cfy-btn-ghost h-6 w-6 p-0">›</button>
+              <button type="button" onClick={() => setActiveId(null)} aria-label="Hide exploration answer" class="cfy-btn cfy-btn-ghost ml-1 h-6 w-6 p-0">×</button>
+            </div>
             <button
               type="button"
-              onClick={() => artifactBridge.scrollToAnchor(anchor, comment.id)}
+              onClick={() => artifactBridge.scrollToAnchor(anchor, active.id)}
               class="flex w-full items-start justify-between gap-2 border-b border-line bg-well px-3 py-2 text-left hover:bg-hover"
               title="Show the anchored target"
             >
               <span class="min-w-0">
-                <span class="cfy-label block">{String(explorationMeta(comment.anchor)?.action || "Explore")}</span>
-                <span class="mt-0.5 block truncate text-[11px] text-muted">{target?.label || target?.excerpt || comment.body}</span>
+                <span class="cfy-label block">{String(explorationMeta(active.anchor)?.action || "Explore")}</span>
+                <span class="mt-0.5 block truncate text-[11px] text-muted">{anchor.target?.label || anchor.target?.excerpt || active.body}</span>
               </span>
               <span class="cfy-chip shrink-0 bg-accent-bg text-[9px] text-accent-ink">Show target</span>
             </button>
             <div class="px-3 py-2">
-              {comment.answer_html ? (
-                <div class="cfy-answer select-text text-xs leading-relaxed text-ink" dangerouslySetInnerHTML={{ __html: comment.answer_html }} />
+              {active.answer_html ? (
+                <div class="cfy-answer select-text text-xs leading-relaxed text-ink" dangerouslySetInnerHTML={{ __html: active.answer_html }} />
               ) : (
                 <div class="flex items-center gap-2 text-[11px] text-muted">
                   {answering && <span class="h-2 w-2 animate-pulse rounded-full bg-info" aria-hidden="true" />}
-                  <span>{answering ? "Answering…" : comment.status === "open" ? "Waiting to answer" : "Answer unavailable"}</span>
+                  <span>{answering ? "Answering…" : active.status === "open" ? "Waiting to answer" : "Answer unavailable"}</span>
                   {answering && (
                     <button type="button" onClick={() => appStore.cancelActiveRun()} class="cfy-btn cfy-btn-ghost ml-auto px-1.5 py-0.5 text-[10px]">Cancel</button>
                   )}
@@ -655,8 +714,10 @@ function InlineExplorationCards({
               )}
             </div>
           </article>
-        );
-      })}
+      )}
+      <button type="button" onClick={() => setHistoryOpen((open) => !open)} aria-expanded={historyOpen} class="cfy-btn cfy-btn-secondary self-end px-2 py-1 text-[10px]">
+        History · {comments.length}
+      </button>
     </aside>
   );
 }

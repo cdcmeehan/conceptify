@@ -807,6 +807,9 @@ mod tests {
         for target in ["semanticTargetForRange", "multi_block", "figure", "diagram"] {
             assert!(BRIDGE_TAG.contains(target), "bridge must capture semantic target {target:?}");
         }
+        for state in ["data-cfy-hl-state", "answered", "saved"] {
+            assert!(BRIDGE_TAG.contains(state), "bridge must distinguish highlight state {state:?}");
+        }
     }
 
     #[test]
