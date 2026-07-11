@@ -230,3 +230,13 @@ retained a reviewable candidate instead of overwriting the newer version. The
 production frontend build and activity/conflict browser checks stayed responsive,
 keyboard-operable, and explicit about every recovery choice. No draft, ask, or
 artifact candidate was lost.
+
+## 2026-07-11 — Adaptive response intent
+
+**Response-intent contract (`conceptify-l9w.1`).** Accepted a provider-neutral
+v1 contract with four independent dimensions: depth, assumed language, visual
+preference, and output shape. It defines plain-language labels and examples,
+per-dimension user/project/question inheritance, immutable resolved provenance,
+valid cross-combinations, explicit capability fallbacks, a hard text-only
+constraint, stable localization keys, and keyboard/zoom/focus requirements.
+The ordinary default remains Balanced + Familiar + When useful + Best fit.
