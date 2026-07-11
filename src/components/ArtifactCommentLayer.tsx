@@ -375,12 +375,13 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
   function save() {
     const current = popoverRef.current;
     if (current == null || current.saving) return;
+    const visualTarget = ["figure", "image", "diagram"].includes(current.anchor.target?.kind ?? "");
     const defaultQuestions: Record<NonNullable<PopoverState["action"]>, string> = {
       explain: "Explain this selection.",
       deepen: "Go deeper on this selection.",
       simplify: "Explain this selection more simply.",
       visualise: "Visualise this selection.",
-      change: "Change this part of the artifact.",
+      change: visualTarget ? "Redraw this visual." : "Change this part of the artifact.",
     };
     const body = current.body.trim() || (current.action == null ? "" : defaultQuestions[current.action]);
     if (body.length === 0) return;
@@ -389,7 +390,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
     const target = current.anchor.target;
     const intent = current.action == null ? EXPLORATION_INTENTS.explain : EXPLORATION_INTENTS[current.action];
 
-    if (current.destination === "thread" && current.action != null) {
+    if (current.destination === "thread" && current.action != null && current.action !== "change") {
       const excerpt = target?.excerpt || current.anchor.quote?.exact || target?.label || "Selected artifact content";
       const question = `${body}\n\nSource excerpt from an existing artifact (thread ${threadIdRef.current}, version ${artifactVersionRef.current}):\n${excerpt}`;
       void appStore
@@ -404,7 +405,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
       ...current.anchor,
       exploration: current.action == null ? undefined : {
         action: current.action,
-        destination: current.destination,
+        destination: current.action === "change" ? "revision" : current.destination,
         response_intent: intent,
         source_thread_id: threadIdRef.current,
         source_artifact_version: artifactVersionRef.current,
@@ -424,6 +425,11 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
         appStore.addComment(comment);
         if (current.action == null) {
           setPopover(null);
+          return;
+        }
+        if (current.action === "change") {
+          setPopover(null);
+          await appStore.applyToArtifact(threadIdRef.current, [comment.id]);
           return;
         }
         if (current.destination === "sidebar") onOpenSidebar();
@@ -486,7 +492,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
                 {popover.moreOpen && <div class="cfy-popover absolute right-0 top-full z-10 mt-1 w-36 p-1" role="menu" aria-label="More selection actions">
                   <button type="button" role="menuitem" onClick={() => goToComposer("simplify")} class="cfy-btn cfy-btn-ghost w-full justify-start">Simplify</button>
                   <button type="button" role="menuitem" onClick={() => goToComposer("visualise")} class="cfy-btn cfy-btn-ghost w-full justify-start">Visualise</button>
-                  <button type="button" role="menuitem" onClick={() => goToComposer("change")} class="cfy-btn cfy-btn-ghost w-full justify-start">Change</button>
+                  <button type="button" role="menuitem" onClick={() => goToComposer("change")} class="cfy-btn cfy-btn-ghost w-full justify-start">{["figure", "image", "diagram"].includes(popover.anchor.target?.kind ?? "") ? "Redraw" : "Change"}</button>
                   <button type="button" role="menuitem" onClick={copySelection} class="cfy-btn cfy-btn-ghost w-full justify-start">Copy</button>
                 </div>}
               </div>
@@ -501,7 +507,11 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
   if (popover == null) return <InlineExplorationCards comments={inlineAnswers} activeRun={state.activeRun} right={inlineRight} />;
 
   const actionLabels = { explain: "Explain selection", deepen: "Deepen selection", simplify: "Simplify selection", visualise: "Visualise selection", change: "Change selection" } as const;
-  const label = popover.action == null ? (popover.kind === "selection" ? "Comment on selection" : "Comment on element") : actionLabels[popover.action];
+  const label = popover.action == null
+    ? (popover.kind === "selection" ? "Comment on selection" : "Comment on element")
+    : popover.action === "change" && ["figure", "image", "diagram"].includes(popover.anchor.target?.kind ?? "")
+      ? "Redraw selected visual"
+      : actionLabels[popover.action];
 
   return (
     <div
@@ -544,7 +554,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
         }}
         class="cfy-input resize-none"
       />
-      {popover.action != null && (
+      {popover.action != null && popover.action !== "change" && (
         <fieldset class="mt-2">
           <legend class="cfy-label mb-1">Answer in</legend>
           <div class="grid grid-cols-3 gap-1" aria-label="Answer destination">
@@ -573,6 +583,11 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
           </p>
         </fieldset>
       )}
+      {popover.action === "change" && (
+        <p class="mt-2 rounded-ctl border border-warn/30 bg-warn-bg px-2 py-1.5 text-[10px] leading-snug text-warn">
+          This generates a scoped candidate and diff. Nothing changes until you review and apply it.
+        </p>
+      )}
       {popover.error != null && (
         <p class="mt-1 text-[11px] text-danger">{popover.error}</p>
       )}
@@ -590,7 +605,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
           disabled={popover.saving || (popover.action == null && popover.body.trim().length === 0)}
           class="cfy-btn cfy-btn-primary px-2.5 py-0.5"
         >
-          {popover.saving ? "Adding…" : popover.action == null ? "Add comment" : "Add request"}
+          {popover.saving ? "Adding…" : popover.action == null ? "Add comment" : popover.action === "change" ? "Generate preview" : "Add request"}
         </button>
       </div>
     </div>

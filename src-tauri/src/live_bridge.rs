@@ -159,6 +159,8 @@ async fn live_bridge() {
             crate::commands::claim_system_run_notification,
             crate::commands::get_conflict_review,
             crate::commands::publish_conflict_candidate,
+            crate::commands::reject_conflict_candidate,
+            crate::commands::restore_artifact_version,
             crate::commands::rebase_conflict,
             crate::commands::get_run_log_tail,
             crate::commands::ask_from_app,

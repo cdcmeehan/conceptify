@@ -137,6 +137,10 @@ differs from current, validated HTML is retained as
 `409` with `code: "STALE_BASE"`, `run_id`, `base_version`, and
 `current_version`. No artifact row/version or update event is created, and
 supervisor finalization preserves `conflicted` despite the CLI's nonzero exit.
+Contextual revisions use the same validated candidate store even on a current
+base (`status_reason: preview_required:<comment-id>`): this is a review state,
+not an overwrite. A stale contextual proposal becomes `stale_preview` and a
+rebase is itself retained for a fresh preview.
 
 ### Flow commands (Tauri, not HTTP — FR-4.6/4.7/4.8)
 
@@ -165,7 +169,9 @@ and are invoked by the app shell as Tauri commands (snake_case args):
   replies are never apply targets); explicit ids may be `open` or `answered`
   (never `applied`, never a reply). The run edits a working copy, marks each
   target `applied`, then publishes ONE new version via `conceptify
-  save-artifact`.
+  save-artifact`. Exception: an anchor carrying `exploration.action: "change"`
+  selects proposal mode—the comment stays open, the candidate is retained, and
+  publication is possible only through the explicit review command.
 - `get_active_run { thread_id }` → the newest non-terminal run summary
   (`{ run_id, thread_id, mode, status }`, where status is `queued`, `starting`,
   `running`, `throttled`, or `cancelling`) or `null` — the UI
@@ -193,8 +199,9 @@ and are invoked by the app shell as Tauri commands (snake_case args):
 - `get_conflict_review { run_id }` → retained candidate metadata and a semantic
   diff from newer current content to the candidate: project/thread,
   agent/model/route, captured base, current version, resolution state, and the
-  same block/hunk shape as `diff_versions`. Pending conflicts cannot be
-  dismissed from activity.
+  same block/hunk shape as `diff_versions`, plus `kind` (`revision` or
+  `stale_base`) and the selected target ids used to identify spillover. Pending
+  conflicts/revisions cannot be dismissed from activity.
 - `rebase_conflict { run_id }` → a new queued `apply` run linked through
   `retry_of_run_id`. It captures the now-current base, preserves the source
   model/profile, and synthesizes candidate intent onto current content. The
@@ -203,6 +210,12 @@ and are invoked by the app shell as Tauri commands (snake_case args):
   explicit, confirmed recovery publishes the retained candidate as a separate
   next version and records `source_run_id`, original `source_base_version`, and
   `resolution: "separate"`. It never runs automatically.
+- `reject_conflict_candidate { run_id }` → boolean. Records an explicit reject
+  and dismisses the candidate without creating an artifact version.
+- `restore_artifact_version { thread_id, version, run_id? }` → new artifact
+  version number. Copies the chosen historical content into a new latest
+  version (immutable history is retained); when undoing a reviewed revision,
+  the source request is reopened.
 - `get_run_log_tail { run_id, max_lines? }` →
   `{ run_id, log_path, lines }` (default last 30 lines) — FR-4.8 failure
   surfacing; `log_path` is always returned even when the file is unreadable.
@@ -1150,8 +1163,8 @@ element target has one primary `cfy_id`, a one-item `cfy_ids` list, and
 `multi_block: false`.
 
 An exploration request may add an `exploration` object beside `target`. It
-records the selected quick action, answer destination (`inline`, `sidebar`, or
-`thread`), source thread/version, and resolved `response_intent`. Answer runs
+records the selected quick action, destination (`inline`, `sidebar`, `thread`,
+or `revision`), source thread/version, and resolved `response_intent`. Answer runs
 honor that structured depth/language/visuals/shape profile; the action's display
 label is not treated as a brittle prompt contract. Like `target`, this additive
 metadata is stored verbatim and survives re-attachment.

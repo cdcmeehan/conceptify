@@ -393,3 +393,15 @@ new thread. Inline cards persist as anchored comments, show live answer state,
 and scroll/pulse their source target. Quick actions store a structured response
 intent (depth, language, visuals, shape), and answer agents are instructed to
 honor that profile. Cancelling the composer performs no write and starts no run.
+
+**Targeted revision (`conceptify-9lj.4`).** Change—and Redraw for semantic
+visual targets—now launches a dedicated proposal run. The agent edits only a
+temporary copy and its run-aware save is always intercepted into validated
+candidate storage; it cannot resolve the request or publish a version. The
+review compares every semantic block against current content, calls out changes
+outside the selected `cfy_ids`, and requires Apply or Reject. Apply creates one
+immutable version and marks the request applied; Reject creates none. The
+post-apply confirmation offers Undo, which creates a restoring version from the
+prior artifact and reopens the request. Stale bases keep the existing conflict
+review and re-synthesis path, with the synthesis retained for another explicit
+preview rather than auto-published.

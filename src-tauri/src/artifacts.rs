@@ -362,16 +362,16 @@ pub fn save_artifact_for_run(
     let mut response_intent_json: Option<String> = None;
     let mut selected_skills_json: Option<String> = None;
     if let Some(run_id) = source_run_id {
-        let run: Option<(String, String, Option<i64>, Option<String>, Option<String>)> = conn
+        let run: Option<(String, String, Option<i64>, Option<String>, Option<String>, Option<String>)> = conn
             .query_row(
                 "SELECT thread_id, run_class, base_artifact_version,
-                        response_intent_json, selected_skills_json
+                        response_intent_json, selected_skills_json, status_reason
                  FROM follow_up_runs WHERE id = ?1",
                 [run_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .optional()?;
-        let Some((run_thread_id, run_class, captured_base, run_intent, run_skills)) = run else {
+        let Some((run_thread_id, run_class, captured_base, run_intent, run_skills, run_reason)) = run else {
             return Err(ArtifactError::Database(
                 rusqlite::Error::QueryReturnedNoRows,
             ));
@@ -396,16 +396,25 @@ pub fn save_artifact_for_run(
                 selected_skills_json = skills;
             }
         }
-        if captured_base != current_version && resolution.is_none() {
+        let stale_base = captured_base != current_version;
+        let preview_required = run_reason.as_deref().is_some_and(|reason| reason.starts_with("preview_required:"));
+        if (stale_base || preview_required) && resolution.is_none() {
             let candidate_path = dir.join("runs").join(format!("{run_id}.candidate.html"));
             atomic_write(&candidate_path, bytes)?;
+            let reason = if stale_base && preview_required {
+                run_reason.as_deref().unwrap().replacen("preview_required:", "stale_preview:", 1)
+            } else if stale_base {
+                "stale_base".to_owned()
+            } else {
+                run_reason.as_deref().unwrap().to_owned()
+            };
             conn.execute(
                 "UPDATE follow_up_runs
-                 SET status = 'conflicted', status_reason = 'stale_base',
+                 SET status = 'conflicted', status_reason = ?4,
                      candidate_path = ?2, conflict_current_version = ?3,
                      conflict_resolution = 'pending'
                  WHERE id = ?1 AND status IN ('starting', 'running')",
-                rusqlite::params![run_id, candidate_path.to_string_lossy(), current_version],
+                rusqlite::params![run_id, candidate_path.to_string_lossy(), current_version, reason],
             )?;
             return Err(ArtifactError::Conflict {
                 run_id: run_id.to_owned(),

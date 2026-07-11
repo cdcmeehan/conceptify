@@ -287,6 +287,7 @@ pub async fn ask_follow_ups<R: Runtime>(
         },
     )
     .await?;
+
     // No completion watcher: an answer run has no thread-status side effects,
     // and its per-comment effects arrive via the PATCH route's
     // `comment-updated` events as the agent works. Dropping the `finished`
@@ -474,7 +475,22 @@ pub async fn apply_to_artifact<R: Runtime>(
     )
     .await?;
 
-    let prompt = build_apply_prompt(&PromptContext {
+    // Contextual "Change this" requests are mutation proposals: the agent may
+    // author a complete candidate, but the save path must retain it for an
+    // explicit diff review instead of publishing it immediately. The comment
+    // id in the durable reason lets the review surface the intended target and
+    // explain any spillover.
+    let preview_comment_id = loaded.targets.iter().find_map(|comment| {
+        let action = comment
+            .anchor
+            .as_ref()?
+            .get("exploration")?
+            .get("action")?
+            .as_str()?;
+        (action == "change").then(|| comment.id.clone())
+    });
+
+    let prompt_context = PromptContext {
         thread_id,
         title: &loaded.title,
         question: &loaded.question,
@@ -482,7 +498,12 @@ pub async fn apply_to_artifact<R: Runtime>(
         artifact_path: &loaded.artifact_path,
         artifact_version: loaded.artifact_version,
         comments: &loaded.targets,
-    });
+    };
+    let prompt = if preview_comment_id.is_some() {
+        build_revision_preview_prompt(&prompt_context)
+    } else {
+        build_apply_prompt(&prompt_context)
+    };
     let env = child_env().await?;
 
     let started = runs::start_run(
@@ -498,6 +519,17 @@ pub async fn apply_to_artifact<R: Runtime>(
         },
     )
     .await?;
+
+    if let Some(comment_id) = preview_comment_id {
+        let run_id = started.run_id.clone();
+        db::with_conn(&db, move |conn| {
+            conn.execute(
+                "UPDATE follow_up_runs SET status_reason = ?2 WHERE id = ?1",
+                rusqlite::params![run_id, format!("preview_required:{comment_id}")],
+            )
+        })
+        .await?;
+    }
 
     // Run started: the thread is now visibly `updating` (PRD §4 — owned by
     // the run lifecycle). Set after durable enqueue so validation/routing
@@ -561,7 +593,8 @@ pub async fn rebase_conflict<R: Runtime>(
     let loaded = db::with_conn_result(&db, move |conn| -> Result<_, FlowError> {
         let row = conn.query_row(
             "SELECT r.thread_id, p.id, p.root_path, t.title, t.initial_question,
-                    r.candidate_path, a.file_path, r.override_json, r.agent, r.model, r.route
+                    r.candidate_path, a.file_path, r.override_json, r.agent, r.model, r.route,
+                    r.status_reason
              FROM follow_up_runs r
              JOIN threads t ON t.id = r.thread_id
              JOIN projects p ON p.id = t.project_id
@@ -583,6 +616,7 @@ pub async fn rebase_conflict<R: Runtime>(
                         r.get::<_, String>(8)?,
                         r.get::<_, String>(9)?,
                         r.get::<_, Option<String>>(10)?,
+                        r.get::<_, Option<String>>(11)?,
                     ))
                 },
             )
@@ -628,6 +662,13 @@ pub async fn rebase_conflict<R: Runtime>(
         },
     )
     .await?;
+    if let Some(comment_id) = loaded.11.as_deref().and_then(|reason| reason.strip_prefix("stale_preview:")) {
+        let run_id = started.run_id.clone();
+        let reason = format!("preview_required:{comment_id}");
+        db::with_conn(&db, move |conn| {
+            conn.execute("UPDATE follow_up_runs SET status_reason = ?2 WHERE id = ?1", rusqlite::params![run_id, reason])
+        }).await?;
+    }
     {
         let source = source_run_id.to_owned();
         let new_run = started.run_id.clone();
@@ -1554,6 +1595,44 @@ Why this order: `--applied` freezes each comment at the artifact version it was 
     )
 }
 
+/// Contextual revision proposal: author the same safe working-copy mutation as
+/// apply mode, but do not resolve the comment. The run-aware save path retains
+/// this output as a candidate; only the later explicit UI acceptance publishes
+/// it and marks the request applied.
+pub(crate) fn build_revision_preview_prompt(ctx: &PromptContext) -> String {
+    format!(
+        r#"You are Conceptify's targeted artifact reviser. Produce a candidate for review; do not publish a visible version and do not resolve any comment.
+
+## Context
+- Project root (read-only): {project_root}
+- Thread: "{title}" (thread id: {thread_id})
+- Current artifact: {artifact_path} (version {version})
+
+## Scoped revision request
+{comments}
+
+## Exact contract
+1. Copy the current artifact to a temporary working file; never edit the app-owned file in place.
+2. Make the smallest change that satisfies the request at its semantic `target`/`cfy_id`. Preserve every existing `data-cfy-id`. If an unavoidable supporting change spills outside `target.cfy_ids`, keep it minimal; the review UI will identify it explicitly.
+3. For a diagram, edit its adjacent `cfy:src` source and re-render it; never hand-edit only the generated SVG.
+4. Keep the artifact self-contained and update `<meta name="cfy:version">` to {next_version}.
+5. Run exactly once as the final command:
+   conceptify save-artifact --thread {thread_id} --file <working-file>
+
+Do not run `resolve-comment` and do not use `--applied`. The save is intercepted as a proposal and requires explicit user acceptance before publication.
+{scope_mechanism} — read the project freely, but write only to the temporary working copy.
+"#,
+        project_root = ctx.project_root,
+        title = ctx.title,
+        thread_id = ctx.thread_id,
+        artifact_path = ctx.artifact_path,
+        version = ctx.artifact_version,
+        next_version = ctx.artifact_version + 1,
+        comments = comments_json(ctx.comments),
+        scope_mechanism = SCOPE_MECHANISM_PLACEHOLDER,
+    )
+}
+
 /// Inputs to the in-app ask prompt (bead `conceptify-959.1`): the freshly-created
 /// thread's identity, the reader's question, and the project root the agent
 /// researches and runs from. Unlike the follow-up prompts there are no comments
@@ -2425,6 +2504,24 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
                 .id
         }
 
+        fn add_revision_comment(&self, body: &str) -> String {
+            let conn = self.db.lock().unwrap();
+            crate::comments::create_comment(
+                &conn,
+                &self.thread_id,
+                1,
+                Some(&serde_json::json!({
+                    "v": 1, "type": "element", "cfy_id": "sec-t",
+                    "target": {
+                        "kind": "block", "label": "Version heading", "excerpt": "Version 1 token text",
+                        "cfy_ids": ["sec-t"], "multi_block": false
+                    },
+                    "exploration": { "action": "change", "destination": "revision" }
+                })),
+                body,
+            ).unwrap().comment.id
+        }
+
         /// Create a reply under `parent_id` (an answered/applied root is re-opened
         /// by this, per `create_reply`); returns the reply's id.
         fn add_reply(&self, parent_id: &str, body: &str) -> String {
@@ -2938,6 +3035,31 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
             "{prompt}"
         );
         assert!(prompt.contains("save-artifact --thread"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn contextual_change_run_is_marked_for_preview_and_never_resolves_in_prompt() {
+        let h = harness("revision-preview");
+        h.save_artifact(1);
+        let comment_id = h.add_revision_comment("Rewrite this heading");
+        h.install_fake_agent(
+            "#!/bin/sh\nprintf '%s' \"$1\" > \"$(dirname \"$0\")/prompt.txt\"\nexit 0\n",
+        );
+
+        let started = apply_to_artifact(&h.handle, &h.thread_id, vec![comment_id.clone()], None)
+            .await.unwrap();
+        let reason: Option<String> = h.db.lock().unwrap().query_row(
+            "SELECT status_reason FROM follow_up_runs WHERE id = ?1",
+            [&started.run_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(reason.as_deref(), Some(format!("preview_required:{comment_id}").as_str()));
+        assert_eq!(h.comment_status(&comment_id), "open", "proposal must not pre-apply its request");
+        assert!(wait_until(|| h.run_row(&started.run_id).0 == "completed", 15_000).await);
+        let prompt = std::fs::read_to_string(h.work_dir.join("prompt.txt")).unwrap();
+        assert!(prompt.contains("Produce a candidate for review"), "{prompt}");
+        assert!(prompt.contains("smallest change"), "{prompt}");
+        assert!(prompt.contains("do not use `--applied`"), "{prompt}");
+        assert!(!prompt.contains("resolve-comment --id"), "{prompt}");
     }
 
     #[tokio::test]

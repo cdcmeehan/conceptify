@@ -124,6 +124,8 @@ pub fn run() {
             commands::claim_system_run_notification,
             commands::get_conflict_review,
             commands::publish_conflict_candidate,
+            commands::reject_conflict_candidate,
+            commands::restore_artifact_version,
             commands::rebase_conflict,
             commands::get_run_log_tail,
             commands::ask_from_app,

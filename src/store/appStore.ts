@@ -1127,9 +1127,28 @@ class AppStore {
       finishing.targetIds.length === 1
         ? finishing.targetIds[0]
         : null;
+    const isRevisionPreview =
+      payload.status === "conflicted" &&
+      finishing?.mode === "apply" &&
+      finishing.targetIds?.some((id) => {
+        const anchor = this.state.comments.find((comment) => comment.id === id)?.anchor;
+        if (anchor == null || typeof anchor.exploration !== "object" || anchor.exploration == null) return false;
+        return (anchor.exploration as Record<string, unknown>).action === "change";
+      });
 
     if (finishing != null) {
       this.set({ activeRun: null });
+    }
+    if (isRevisionPreview) {
+      this.set({ conflictReviewRunId: payload.run_id });
+    } else if (payload.status === "conflicted") {
+      // A terminal state event may have cleared `activeRun` just before the
+      // finished event. Ask the durable review row so targeted previews still
+      // open automatically after reload/event reordering; stale-base conflicts
+      // remain in the activity tray.
+      void api.getConflictReview(payload.run_id).then((review) => {
+        if (review.kind === "revision") this.set({ conflictReviewRunId: payload.run_id });
+      }).catch(() => {});
     }
     if (
       !isGenerationRun &&

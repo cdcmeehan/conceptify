@@ -541,6 +541,8 @@ export interface ConflictReview {
   base_version: number | null;
   current_version: number;
   resolution: string;
+  kind: "revision" | "stale_base";
+  target_cfy_ids: string[];
   diff: ArtifactVersionDiff;
 }
 
@@ -550,6 +552,14 @@ export function getConflictReview(runId: string): Promise<ConflictReview> {
 
 export function publishConflictCandidate(runId: string): Promise<number> {
   return invoke<number>("publish_conflict_candidate", { run_id: runId });
+}
+
+export function rejectConflictCandidate(runId: string): Promise<boolean> {
+  return invoke<boolean>("reject_conflict_candidate", { run_id: runId });
+}
+
+export function restoreArtifactVersion(threadId: string, version: number, runId?: string): Promise<number> {
+  return invoke<number>("restore_artifact_version", { thread_id: threadId, version, run_id: runId ?? null });
 }
 
 export function rebaseConflict(runId: string): Promise<RunStarted> {

@@ -1237,6 +1237,8 @@ pub struct ConflictReviewDto {
     pub base_version: Option<i64>,
     pub current_version: i64,
     pub resolution: String,
+    pub kind: String,
+    pub target_cfy_ids: Vec<String>,
     pub diff: conceptify_types::ArtifactVersionDiffResponse,
 }
 
@@ -1250,8 +1252,8 @@ pub fn get_conflict_review(
         .query_row(
             "SELECT r.thread_id, p.id, p.name, t.title, r.agent, r.model, r.route,
                     r.base_artifact_version, r.conflict_current_version,
-                    COALESCE(r.conflict_resolution, 'pending'), r.candidate_path,
-                    a.file_path
+                    COALESCE(r.conflict_resolution, 'pending'), r.status_reason,
+                    r.candidate_path, a.file_path
              FROM follow_up_runs r
              JOIN threads t ON t.id = r.thread_id
              JOIN projects p ON p.id = t.project_id
@@ -1264,16 +1266,28 @@ pub fn get_conflict_review(
                     r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?,
                     r.get::<_, Option<String>>(6)?, r.get::<_, Option<i64>>(7)?,
-                    r.get::<_, i64>(8)?, r.get::<_, String>(9)?, r.get::<_, String>(10)?,
-                    r.get::<_, String>(11)?,
+                    r.get::<_, i64>(8)?, r.get::<_, String>(9)?, r.get::<_, Option<String>>(10)?,
+                    r.get::<_, String>(11)?, r.get::<_, String>(12)?,
                 ))
             },
         )
         .optional()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "conflict candidate not found".to_owned())?;
-    let current_html = std::fs::read_to_string(&row.11).map_err(|e| e.to_string())?;
-    let candidate_html = std::fs::read_to_string(&row.10).map_err(|e| e.to_string())?;
+    let reason = row.10.as_deref().unwrap_or("stale_base");
+    let preview_comment_id = reason.strip_prefix("preview_required:")
+        .or_else(|| reason.strip_prefix("stale_preview:"));
+    let target_cfy_ids = preview_comment_id
+        .and_then(|id| {
+            conn.query_row("SELECT anchor FROM comments WHERE id = ?1", [id], |r| r.get::<_, Option<String>>(0))
+                .optional().ok().flatten().flatten()
+        })
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|anchor| anchor.get("target")?.get("cfy_ids")?.as_array().cloned())
+        .map(|ids| ids.into_iter().filter_map(|id| id.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+    let current_html = std::fs::read_to_string(&row.12).map_err(|e| e.to_string())?;
+    let candidate_html = std::fs::read_to_string(&row.11).map_err(|e| e.to_string())?;
     let diff = crate::artifact_diff::diff_html(&row.0, row.8, row.8 + 1, &current_html, &candidate_html);
     Ok(ConflictReviewDto {
         run_id,
@@ -1287,6 +1301,8 @@ pub fn get_conflict_review(
         base_version: row.7,
         current_version: row.8,
         resolution: row.9,
+        kind: if reason.starts_with("preview_required:") { "revision" } else { "stale_base" }.to_owned(),
+        target_cfy_ids,
         diff,
     })
 }
@@ -1298,19 +1314,19 @@ pub fn publish_conflict_candidate<R: tauri::Runtime>(
     run_id: String,
 ) -> Result<i64, String> {
     let root = artifacts::artifacts_root().map_err(|e| e.to_string())?;
-    let saved = {
+    let (saved, applied_comment) = {
         let conn = db.lock().map_err(|e| e.to_string())?;
-        let row: (String, String) = conn
+        let row: (String, String, Option<String>) = conn
             .query_row(
-                "SELECT thread_id, candidate_path FROM follow_up_runs
+                "SELECT thread_id, candidate_path, status_reason FROM follow_up_runs
                  WHERE id = ?1 AND status = 'conflicted'
                    AND COALESCE(conflict_resolution, 'pending') = 'pending'",
                 [&run_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .map_err(|_| "unresolved conflict candidate not found".to_owned())?;
         let bytes = std::fs::read(&row.1).map_err(|e| e.to_string())?;
-        artifacts::save_artifact_for_run(
+        let saved = artifacts::save_artifact_for_run(
             &conn,
             &root,
             &row.0,
@@ -1318,7 +1334,20 @@ pub fn publish_conflict_candidate<R: tauri::Runtime>(
             Some(&run_id),
             Some("separate"),
         )
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        let applied = row.2.as_deref().and_then(|reason| {
+            reason.strip_prefix("preview_required:").or_else(|| reason.strip_prefix("stale_preview:"))
+        })
+            .map(|comment_id| {
+                crate::comments::update_comment(
+                    &conn,
+                    comment_id,
+                    Some(crate::comments::CommentStatus::Applied),
+                    Some("Applied after explicit revision preview."),
+                    None,
+                ).map_err(|e| e.to_string())
+            }).transpose()?;
+        (saved, applied)
     };
     use tauri::Emitter;
     let _ = app.emit(
@@ -1339,6 +1368,97 @@ pub fn publish_conflict_candidate<R: tauri::Runtime>(
                 "status": comment.status.as_str(),
             }),
         );
+    }
+    if let Some(comment) = &applied_comment {
+        let _ = app.emit("comment-updated", serde_json::json!({
+            "project_id": saved.project_id,
+            "thread_id": comment.comment.thread_id,
+            "comment_id": comment.comment.id,
+            "status": comment.comment.status.as_str(),
+        }));
+    }
+    Ok(saved.version)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn reject_conflict_candidate(
+    db: State<DbHandle>,
+    run_id: String,
+) -> Result<bool, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let changed = conn.execute(
+        "UPDATE follow_up_runs
+         SET conflict_resolution = 'rejected',
+             activity_dismissed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1 AND status = 'conflicted'
+           AND COALESCE(conflict_resolution, 'pending') = 'pending'",
+        [&run_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(changed == 1)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn restore_artifact_version<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    db: State<DbHandle>,
+    thread_id: String,
+    version: i64,
+    run_id: Option<String>,
+) -> Result<i64, String> {
+    let root = artifacts::artifacts_root().map_err(|e| e.to_string())?;
+    let (saved, reopened_comment_id) = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let source: (String, Option<String>, Option<String>) = conn.query_row(
+            "SELECT file_path, response_intent_json, selected_skills_json
+             FROM artifacts WHERE thread_id = ?1 AND version = ?2",
+            rusqlite::params![thread_id, version],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).map_err(|_| "artifact version to restore was not found".to_owned())?;
+        let bytes = std::fs::read(&source.0).map_err(|e| e.to_string())?;
+        let saved = artifacts::save_artifact_for_run(&conn, &root, &thread_id, &bytes, None, None)
+            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE artifacts SET response_intent_json = ?3, selected_skills_json = ?4
+             WHERE thread_id = ?1 AND version = ?2",
+            rusqlite::params![thread_id, saved.version, source.1, source.2],
+        ).map_err(|e| e.to_string())?;
+        let reopened = run_id.as_deref().and_then(|id| {
+            conn.query_row("SELECT status_reason FROM follow_up_runs WHERE id = ?1", [id], |r| r.get::<_, Option<String>>(0))
+                .optional().ok().flatten().flatten()
+        }).and_then(|reason| {
+            reason.strip_prefix("preview_required:")
+                .or_else(|| reason.strip_prefix("stale_preview:"))
+                .map(str::to_owned)
+        });
+        if let Some(comment_id) = &reopened {
+            conn.execute(
+                "UPDATE comments SET status = 'open', answer_html = NULL, resolved_at = NULL WHERE id = ?1",
+                [comment_id],
+            ).map_err(|e| e.to_string())?;
+        }
+        (saved, reopened)
+    };
+    use tauri::Emitter;
+    let _ = app.emit("artifact-updated", serde_json::json!({
+        "project_id": saved.project_id,
+        "thread_id": saved.thread_id,
+        "version": saved.version,
+    }));
+    for comment in &saved.reattached {
+        let _ = app.emit("comment-updated", serde_json::json!({
+            "project_id": saved.project_id,
+            "thread_id": comment.thread_id,
+            "comment_id": comment.id,
+            "status": comment.status.as_str(),
+        }));
+    }
+    if let Some(comment_id) = reopened_comment_id {
+        let _ = app.emit("comment-updated", serde_json::json!({
+            "project_id": saved.project_id,
+            "thread_id": saved.thread_id,
+            "comment_id": comment_id,
+            "status": "open",
+        }));
     }
     Ok(saved.version)
 }

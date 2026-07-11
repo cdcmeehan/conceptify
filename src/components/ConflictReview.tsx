@@ -7,8 +7,9 @@ export function ConflictReview({ runId }: { runId: string }) {
   const [review, setReview] = useState<ConflictReviewData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
-  const [busy, setBusy] = useState<"rebase" | "separate" | null>(null);
+  const [busy, setBusy] = useState<"rebase" | "separate" | "reject" | "undo" | null>(null);
   const [confirmSeparate, setConfirmSeparate] = useState(false);
+  const [appliedVersion, setAppliedVersion] = useState<number | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -40,14 +41,29 @@ export function ConflictReview({ runId }: { runId: string }) {
   }
 
   async function publishSeparate() {
-    if (!confirmSeparate) {
+    if (review?.kind !== "revision" && !confirmSeparate) {
       setConfirmSeparate(true);
       return;
     }
     setBusy("separate");
     setError(null);
     try {
-      await api.publishConflictCandidate(runId);
+      const version = await api.publishConflictCandidate(runId);
+      if (review?.kind === "revision") setAppliedVersion(version);
+      else appStore.closeConflictReview();
+      await appStore.refetchRunActivity();
+      setBusy(null);
+    } catch (reason) {
+      setError(String(reason));
+      setBusy(null);
+    }
+  }
+
+  async function reject() {
+    setBusy("reject");
+    setError(null);
+    try {
+      await api.rejectConflictCandidate(runId);
       appStore.closeConflictReview();
       await appStore.refetchRunActivity();
     } catch (reason) {
@@ -56,20 +72,37 @@ export function ConflictReview({ runId }: { runId: string }) {
     }
   }
 
+  async function undo() {
+    if (review == null) return;
+    setBusy("undo");
+    setError(null);
+    try {
+      await api.restoreArtifactVersion(review.thread_id, review.current_version, runId);
+      appStore.closeConflictReview();
+    } catch (reason) {
+      setError(String(reason));
+      setBusy(null);
+    }
+  }
+
   const change = review?.diff.changes[selected] ?? null;
+  const spillover = review?.kind === "revision"
+    ? review.diff.changes.filter((item) => item.cfy_id == null || !review.target_cfy_ids.includes(item.cfy_id)).length
+    : 0;
+  const revision = review?.kind === "revision";
 
   return (
-    <div class="absolute inset-0 z-50 flex items-center justify-center bg-black/55 p-5" role="dialog" aria-modal="true" aria-label="Review artifact conflict">
+    <div class="absolute inset-0 z-50 flex items-center justify-center bg-black/55 p-5" role="dialog" aria-modal="true" aria-label={revision ? "Review targeted revision" : "Review artifact conflict"}>
       <section class="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-card border border-line bg-paper shadow-2xl">
         <header class="flex items-start gap-3 border-b border-line px-4 py-3">
           <div class="min-w-0 flex-1">
-            <p class="cfy-label text-danger">Conflict review</p>
+            <p class={`cfy-label ${revision ? "text-accent" : "text-danger"}`}>{revision ? "Revision preview" : "Conflict review"}</p>
             <h1 class="mt-0.5 truncate font-serif text-lg font-semibold text-ink">
               {review?.thread_title ?? "Loading candidate…"}
             </h1>
             {review != null && (
               <p class="mt-1 text-xs text-muted">
-                Based on v{review.base_version ?? "none"}; v{review.current_version} is now current · {review.model} via {review.route ?? review.agent}
+                {revision ? `Proposed from v${review.base_version ?? review.current_version}` : `Based on v${review.base_version ?? "none"}; v${review.current_version} is now current`} · {review.model} via {review.route ?? review.agent}
               </p>
             )}
           </div>
@@ -95,7 +128,7 @@ export function ConflictReview({ runId }: { runId: string }) {
             </ol>
             <div class="min-w-0 flex-1 overflow-y-auto p-4">
               <div class="mb-3 rounded-ctl border border-warn/30 bg-warn-bg/45 px-3 py-2 text-xs leading-relaxed text-warn">
-                Nothing is applied automatically. Compare the retained proposal with the current artifact, then choose an explicit recovery path.
+                {revision ? "Nothing is applied automatically. Review every affected region, then apply or reject this proposal." : "Nothing is applied automatically. Compare the retained proposal with the current artifact, then choose an explicit recovery path."}
               </div>
               {change != null && (
                 <div class="grid min-h-52 grid-cols-2 overflow-hidden rounded-ctl border border-line">
@@ -104,19 +137,38 @@ export function ConflictReview({ runId }: { runId: string }) {
                 </div>
               )}
               {review.diff.degraded && <p class="mt-2 text-[11px] text-warn">Some content lacked stable ids; this comparison includes a document-level text fallback.</p>}
+              {revision && (
+                <p class={`mt-2 text-[11px] ${spillover > 0 ? "text-warn" : "text-ok"}`}>
+                  {spillover > 0
+                    ? `${spillover} changed region${spillover === 1 ? " is" : "s are"} outside the selected target. Review that spillover before applying.`
+                    : "All identified changes stay within the selected target."}
+                </p>
+              )}
             </div>
           </div>
         )}
 
         <footer class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
-          <button type="button" onClick={() => void rebase()} disabled={review == null || busy != null} class="cfy-btn cfy-btn-primary px-3 py-2 text-sm">
-            {busy === "rebase" ? "Starting synthesis…" : "Synthesize onto current"}
-          </button>
-          <button type="button" onClick={() => void publishSeparate()} disabled={review == null || busy != null} class={`cfy-btn px-3 py-2 text-sm ${confirmSeparate ? "cfy-btn-danger" : "cfy-btn-secondary"}`}>
-            {busy === "separate" ? "Publishing…" : confirmSeparate ? "Confirm separate version" : "Publish candidate separately"}
-          </button>
-          {confirmSeparate && <span class="text-[11px] text-danger">Creates a new version exactly from this candidate; current content absent from it stays absent.</span>}
-          <button type="button" onClick={() => appStore.closeConflictReview()} disabled={busy != null} class="cfy-btn cfy-btn-ghost ml-auto px-3 py-2 text-sm">Keep for later</button>
+          {appliedVersion != null ? (
+            <>
+              <span class="text-xs font-medium text-ok">Applied as v{appliedVersion}.</span>
+              <button type="button" onClick={() => void undo()} disabled={busy != null} class="cfy-btn cfy-btn-secondary px-3 py-2 text-sm">{busy === "undo" ? "Restoring…" : `Undo to v${review?.current_version}`}</button>
+              <button type="button" onClick={() => appStore.closeConflictReview()} disabled={busy != null} class="cfy-btn cfy-btn-primary ml-auto px-3 py-2 text-sm">Done</button>
+            </>
+          ) : revision ? (
+            <>
+              <button type="button" onClick={() => void publishSeparate()} disabled={review == null || busy != null} class="cfy-btn cfy-btn-primary px-3 py-2 text-sm">{busy === "separate" ? "Applying…" : "Apply as new version"}</button>
+              <button type="button" onClick={() => void reject()} disabled={review == null || busy != null} class="cfy-btn cfy-btn-secondary px-3 py-2 text-sm">{busy === "reject" ? "Rejecting…" : "Reject proposal"}</button>
+              <button type="button" onClick={() => appStore.closeConflictReview()} disabled={busy != null} class="cfy-btn cfy-btn-ghost ml-auto px-3 py-2 text-sm">Review later</button>
+            </>
+          ) : (
+            <>
+              <button type="button" onClick={() => void rebase()} disabled={review == null || busy != null} class="cfy-btn cfy-btn-primary px-3 py-2 text-sm">{busy === "rebase" ? "Starting synthesis…" : "Synthesize onto current"}</button>
+              <button type="button" onClick={() => void publishSeparate()} disabled={review == null || busy != null} class={`cfy-btn px-3 py-2 text-sm ${confirmSeparate ? "cfy-btn-danger" : "cfy-btn-secondary"}`}>{busy === "separate" ? "Publishing…" : confirmSeparate ? "Confirm separate version" : "Publish candidate separately"}</button>
+              {confirmSeparate && <span class="text-[11px] text-danger">Creates a new version exactly from this candidate; current content absent from it stays absent.</span>}
+              <button type="button" onClick={() => appStore.closeConflictReview()} disabled={busy != null} class="cfy-btn cfy-btn-ghost ml-auto px-3 py-2 text-sm">Keep for later</button>
+            </>
+          )}
         </footer>
       </section>
     </div>

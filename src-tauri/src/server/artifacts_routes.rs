@@ -490,6 +490,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_base_revision_is_retained_until_explicit_publish() {
+        let h = harness("revision-preview");
+        let first = h.router.clone().oneshot(post(&h.thread_id, &valid_html(1), Some(TOKEN))).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        {
+            let conn = h.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO follow_up_runs
+                     (id, thread_id, agent, model, mode, status, status_reason, log_path,
+                      run_class, base_artifact_version)
+                 VALUES ('preview-run', ?1, 'claude', 'm', 'apply', 'running',
+                         'preview_required:comment-1', '/r.log', 'mutation', 1)",
+                [&h.thread_id],
+            ).unwrap();
+        }
+        let candidate = valid_html(2).replace(">T</h1>", ">Scoped proposal</h1>");
+        let response = h.router.clone().oneshot(post_run(&h.thread_id, &candidate, "preview-run")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let conn = h.db.lock().unwrap();
+        let (status, reason, path): (String, String, String) = conn.query_row(
+            "SELECT status, status_reason, candidate_path FROM follow_up_runs WHERE id = 'preview-run'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(status, "conflicted");
+        assert_eq!(reason, "preview_required:comment-1");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), candidate);
+        let versions: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE thread_id = ?1", [&h.thread_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(versions, 1, "proposal must not publish before acceptance");
+    }
+
+    #[tokio::test]
     async fn stale_run_retains_candidate_and_explicit_separate_publish_recovers() {
         let h = harness("stale-candidate");
         let first = h
