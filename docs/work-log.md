@@ -587,3 +587,7 @@ real Conceptify project as inspectable history.
 - The new `local` route strips only the endpoint qualifier before passing `--model`, uses the existing Claude adapter, and sets the configured base URL plus optional auth token per run.
 - Settings now exposes the endpoint, model list, and masked key state. Existing Anthropic/OpenAI/OpenRouter decisions remain unchanged when no endpoint is configured.
 - Real subprocess tests captured exact argv/environment and proved the local secret never reaches the settings blob, run row, or log. Routing, catalog, frontend-build, check, and clippy gates are green.
+# 2026-07-11 — Phase-2 backlog audit
+
+- Re-ran the structured Codex progress gate against installed codex-cli 0.144.1 and current official source. JSONL output exists, but remains aliased `experimental-json` with no stable/versioned schema; `conceptify-dqq` was evidence-backed and re-deferred to 2026-10-01 per its acceptance criteria.
+- Replaced the `conceptify-qmy` umbrella placeholder with five concrete beads: Tier-3 scene steps, export/share bundles, global summon/menu-bar mode, vendored Tier-2 libraries, and Markmap/KaTeX polish. Each has design constraints and acceptance criteria; all are explicitly deferred to the next Phase-2 planning date rather than left as open ambiguity.

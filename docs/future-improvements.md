@@ -66,4 +66,6 @@ adapter-aware parse mode in `runs.rs` (claude `stream-json` vs codex JSONL)
 keyed off the routed adapter, so codex runs surface real progress kinds while
 the log stays human-readable. See the `codex` adapter block in settings.rs
 `default_adapters()` for the verified 0.142.0 stream shape and the reasons
-`--json` was rejected for v1.
+`--json` was rejected for v1. Re-checked on 2026-07-11 with codex-cli 0.144.1:
+official source still aliases `--json` as `experimental-json` and publishes no
+stable/versioned event contract, so `conceptify-dqq` is deferred to 2026-10-01.
