@@ -149,6 +149,8 @@ async fn live_bridge() {
             crate::commands::get_active_run,
             crate::commands::list_run_activity,
             crate::commands::dismiss_run_activity,
+            crate::commands::mark_run_activity_seen,
+            crate::commands::claim_system_run_notification,
             crate::commands::get_run_log_tail,
             crate::commands::ask_from_app,
             crate::commands::retry_ask,

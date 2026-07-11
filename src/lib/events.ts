@@ -13,6 +13,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { appStore } from "../store/appStore";
 import type { RunStatus } from "./api";
+import { notifyTerminalRun } from "./systemNotifications";
 
 interface ThreadCreatedPayload {
   project_id: string;
@@ -128,6 +129,9 @@ export function initEventListeners(): () => void {
 
     listen<RunStatePayload>("run-state-changed", (event) => {
       appStore.handleRunStateChanged(event.payload);
+      if (["completed", "failed", "timeout", "conflicted"].includes(event.payload.status)) {
+        void notifyTerminalRun(event.payload.run_id);
+      }
     }),
 
     // A headless follow-up run reached a terminal state (FR-4.8): clear the

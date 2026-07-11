@@ -15,6 +15,7 @@ import { ThreadList } from "./components/ThreadList";
 import { ThreadView } from "./components/ThreadView";
 import { SettingsView } from "./components/SettingsView";
 import { ActivityTray } from "./components/ActivityTray";
+import { initSystemNotifications } from "./lib/systemNotifications";
 import "./App.css";
 
 function App() {
@@ -30,7 +31,12 @@ function App() {
       .catch(() => {
         /* keep the system default */
       });
-    return initEventListeners();
+    const stopEvents = initEventListeners();
+    const pendingNotifications = initSystemNotifications();
+    return () => {
+      stopEvents();
+      void pendingNotifications.then((stop) => stop());
+    };
   }, []);
 
   const selectedProject =

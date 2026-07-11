@@ -7,6 +7,7 @@
     "core:default",
     "opener:default",
     "window-state:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "notification:default"
   ]
 }

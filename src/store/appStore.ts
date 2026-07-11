@@ -580,7 +580,7 @@ class AppStore {
 
   openActivityTray(): void {
     this.set({ activityTrayOpen: true });
-    void this.refetchRunActivity();
+    void this.refetchRunActivity().then(() => this.markVisibleActivitySeen());
   }
 
   closeActivityTray(): void {
@@ -590,6 +590,20 @@ class AppStore {
   async dismissRunActivity(runId: string): Promise<void> {
     await api.dismissRunActivity(runId);
     this.set({ runActivity: this.state.runActivity.filter((item) => item.run_id !== runId) });
+  }
+
+  async markVisibleActivitySeen(): Promise<void> {
+    const terminal = this.state.runActivity.filter(
+      (item) => !item.seen && !["queued", "starting", "running", "throttled", "cancelling"].includes(item.status),
+    );
+    if (terminal.length === 0) return;
+    await api.markRunActivitySeen(terminal.map((item) => item.run_id));
+    const ids = new Set(terminal.map((item) => item.run_id));
+    this.set({
+      runActivity: this.state.runActivity.map((item) =>
+        ids.has(item.run_id) ? { ...item, seen: true } : item,
+      ),
+    });
   }
 
   async clearCompletedActivity(): Promise<void> {
@@ -602,11 +616,16 @@ class AppStore {
   }
 
   async jumpToRunActivity(item: RunActivity): Promise<void> {
-    if (this.state.selectedProjectId !== item.project_id) {
-      this.selectProject(item.project_id);
-      await this.refetchThreads(item.project_id);
+    await this.jumpToProjectThread(item.project_id, item.thread_id);
+  }
+
+  async jumpToProjectThread(projectId: string, threadId: string): Promise<void> {
+    if (this.state.selectedProjectId !== projectId) {
+      this.selectProject(projectId);
+      await this.refetchThreads(projectId);
     }
-    this.selectThread(item.thread_id);
+    this.selectThread(threadId);
+    this.openActivityTray();
   }
 
   async cancelRunActivity(item: RunActivity): Promise<void> {

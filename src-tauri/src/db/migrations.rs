@@ -39,6 +39,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(FOLLOW_UP_RUNS_ROUTE),
         M::up(FOLLOW_UP_RUNS_QUEUE),
         M::up(FOLLOW_UP_RUNS_ACTIVITY),
+        M::up(FOLLOW_UP_RUNS_NOTIFICATIONS),
     ])
 }
 
@@ -387,6 +388,16 @@ CREATE INDEX idx_follow_up_runs_activity
     ON follow_up_runs(status, activity_dismissed_at, finished_at);
 ";
 
+/// Durable delivery/read markers for activity notifications
+/// (`conceptify-k9z.5`). They make the in-app unread badge survive restarts and
+/// provide an atomic at-most-once claim for optional native notifications.
+const FOLLOW_UP_RUNS_NOTIFICATIONS: &str = "
+ALTER TABLE follow_up_runs ADD COLUMN activity_seen_at TEXT NULL;
+ALTER TABLE follow_up_runs ADD COLUMN system_notified_at TEXT NULL;
+CREATE INDEX idx_follow_up_runs_unseen_activity
+    ON follow_up_runs(activity_seen_at, finished_at);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,7 +405,7 @@ mod tests {
 
     /// `user_version` after the full chain — the count of `M::up` entries in
     /// [`migrations`].
-    const LATEST: usize = 14;
+    const LATEST: usize = 15;
 
     /// Position of the durable scheduler metadata migration.
     const RUN_QUEUE: usize = 13;
@@ -403,6 +414,7 @@ mod tests {
     const ROUTE: usize = 12;
 
     const RUN_ACTIVITY: usize = 14;
+    const RUN_NOTIFICATIONS: usize = 15;
 
     /// Position of the `follow_up_runs.override_json` ALTER (the 11th
     /// migration), pinned explicitly — like `ASK_MODE` below — so appending
@@ -913,5 +925,31 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn add_notification_markers_preserves_unseen_and_unnotified_history() {
+        let mut conn = fresh_conn();
+        let m = migrations();
+        m.to_version(&mut conn, RUN_NOTIFICATIONS - 1)
+            .expect("to pre-notification schema");
+        seed_thread(&conn);
+        conn.execute(
+            "INSERT INTO follow_up_runs
+                 (id, thread_id, agent, model, mode, status, log_path)
+             VALUES ('r1', 't1', 'claude', 'm', 'answer', 'failed', '/r.log')",
+            [],
+        )
+        .unwrap();
+        m.to_version(&mut conn, RUN_NOTIFICATIONS).unwrap();
+        let markers: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT activity_seen_at, system_notified_at
+                 FROM follow_up_runs WHERE id = 'r1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(markers, (None, None));
     }
 }

@@ -1174,6 +1174,24 @@ pub fn dismiss_run_activity(db: State<DbHandle>, run_id: String) -> Result<bool,
     crate::runs::dismiss_activity(&conn, &run_id).map_err(|e| e.to_string())
 }
 
+#[tauri::command(rename_all = "snake_case")]
+pub fn mark_run_activity_seen(
+    db: State<DbHandle>,
+    run_ids: Vec<String>,
+) -> Result<usize, String> {
+    let mut conn = db.lock().map_err(|e| e.to_string())?;
+    crate::runs::mark_activity_seen(&mut conn, &run_ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn claim_system_run_notification(
+    db: State<DbHandle>,
+    run_id: String,
+) -> Result<Option<crate::runs::SystemRunNotification>, String> {
+    let mut conn = db.lock().map_err(|e| e.to_string())?;
+    crate::runs::claim_system_notification(&mut conn, &run_id).map_err(|e| e.to_string())
+}
+
 /// The tail of a run's transcript log (FR-4.8 failure surfacing). `log_path`
 /// is always returned (the full log is retained on disk for debugging); a
 /// missing/unreadable file degrades to a single explanatory line rather than

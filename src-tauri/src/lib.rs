@@ -67,6 +67,7 @@ pub fn run() {
     // the chosen path to the `ensure_project` command. Only the `open` command
     // is granted (`dialog:allow-open` in capabilities/default.json).
     builder = builder.plugin(tauri_plugin_dialog::init());
+    builder = builder.plugin(tauri_plugin_notification::init());
 
     // PRD §5.4 / §9 S2: the artifact:// scheme the viewer's sandboxed
     // iframe loads from. Cross-scheme = real origin isolation from the app
@@ -110,6 +111,8 @@ pub fn run() {
             commands::get_active_run,
             commands::list_run_activity,
             commands::dismiss_run_activity,
+            commands::mark_run_activity_seen,
+            commands::claim_system_run_notification,
             commands::get_run_log_tail,
             commands::ask_from_app,
             commands::retry_ask,

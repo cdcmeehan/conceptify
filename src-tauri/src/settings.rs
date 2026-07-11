@@ -599,6 +599,11 @@ pub struct AgentSettings {
     /// the current UI.
     #[serde(default)]
     pub run_concurrency: RunConcurrency,
+    /// Opt-in native completion/attention notifications. Permission is requested
+    /// by the frontend only when the user enables this setting; the default
+    /// in-app activity badge requires no OS permission.
+    #[serde(default)]
+    pub system_notifications: bool,
 }
 
 impl Default for AgentSettings {
@@ -613,6 +618,7 @@ impl Default for AgentSettings {
             auto_project_base_dir: None,
             enabled_providers: default_enabled_providers(),
             run_concurrency: RunConcurrency::default(),
+            system_notifications: false,
         }
     }
 }

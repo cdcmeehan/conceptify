@@ -23,7 +23,8 @@ export function ActivityTray({
 
   const activeCount = activity.filter((item) => ACTIVE.has(item.status)).length;
   const attentionCount = activity.filter((item) => ATTENTION.has(item.status)).length;
-  const badgeCount = activeCount + attentionCount;
+  const unseenCount = activity.filter((item) => !ACTIVE.has(item.status) && !item.seen).length;
+  const badgeCount = activeCount + unseenCount;
   const completedCount = activity.filter((item) =>
     item.status === "completed" || item.status === "cancelled",
   ).length;
@@ -87,7 +88,7 @@ export function ActivityTray({
         onClick={() => (open ? appStore.closeActivityTray() : appStore.openActivityTray())}
         class="fixed bottom-3 right-3 z-40 flex items-center gap-2 rounded-full border border-line bg-paper px-3 py-2 text-xs font-medium text-ink shadow-lg transition-colors hover:border-accent/50 hover:bg-hover"
         aria-expanded={open}
-        aria-label={`Activity, ${activeCount} active, ${attentionCount} need attention`}
+        aria-label={`Activity, ${activeCount} active, ${attentionCount} need attention, ${unseenCount} new`}
       >
         <span class={`h-2 w-2 rounded-full ${activeCount > 0 ? "animate-pulse bg-info" : attentionCount > 0 ? "bg-danger" : "bg-muted/50"}`} />
         Activity

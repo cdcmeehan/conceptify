@@ -40,6 +40,10 @@ import { relativeTime } from "../lib/time";
 import { providerLabel } from "../lib/models";
 import { familyOf, routeForModel, routeLabel, type RouteResult } from "../lib/routing";
 import { ModelCombobox } from "./ModelCombobox";
+import {
+  requestSystemNotificationPermission,
+  setSystemNotificationsEnabled,
+} from "../lib/systemNotifications";
 
 const APPEARANCE_OPTIONS: { value: Appearance; label: string }[] = [
   { value: "system", label: "System" },
@@ -67,6 +71,8 @@ export function SettingsView() {
   const [autoBaseDir, setAutoBaseDir] = useState("");
   const [adaptersText, setAdaptersText] = useState("");
   const [enabledProviders, setEnabledProviders] = useState<Set<string>>(new Set());
+  const [systemNotifications, setSystemNotifications] = useState(false);
+  const [notificationBusy, setNotificationBusy] = useState(false);
 
   // Catalog + OpenRouter key state (epic e7m).
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
@@ -94,6 +100,7 @@ export function SettingsView() {
     setAutoBaseDir(s.autoProjectBaseDir ?? "");
     setAdaptersText(JSON.stringify(s.adapters, null, 2));
     setEnabledProviders(new Set(s.enabledProviders));
+    setSystemNotifications(s.systemNotifications);
     setError(null);
   }
 
@@ -139,6 +146,7 @@ export function SettingsView() {
     if (saved != null && appearance !== saved.appearance) {
       setAppearance(saved.appearance);
     }
+    if (saved != null) setSystemNotificationsEnabled(saved.systemNotifications);
     appStore.closeSettings();
   }
 
@@ -194,6 +202,7 @@ export function SettingsView() {
         default: 1,
         pools: { anthropic: 2, openai: 2, openrouter: 3, manual: 1 },
       },
+      systemNotifications,
     };
   }
 
@@ -207,6 +216,7 @@ export function SettingsView() {
       await api.setAgentSettings(next);
       setSaved(next);
       setAppearance(next.appearance);
+      setSystemNotificationsEnabled(next.systemNotifications);
       setSavedFlash(true);
       window.setTimeout(() => setSavedFlash(false), 2000);
     } catch (e) {
@@ -225,6 +235,7 @@ export function SettingsView() {
       const defaults = await api.resetAgentSettings();
       populate(defaults);
       setAppearance(defaults.appearance);
+      setSystemNotificationsEnabled(defaults.systemNotifications);
       // Re-filter the pickers to the reset provider set.
       api.getModelCatalog().then(setCatalog).catch(() => {});
       setSavedFlash(true);
@@ -233,6 +244,28 @@ export function SettingsView() {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onSystemNotificationsChange(value: boolean) {
+    setError(null);
+    if (!value) {
+      setSystemNotifications(false);
+      return;
+    }
+    setNotificationBusy(true);
+    try {
+      if (await requestSystemNotificationPermission()) {
+        setSystemNotifications(true);
+      } else {
+        setError(
+          "System notifications remain off because permission was unavailable or denied. In-app activity notifications still work.",
+        );
+      }
+    } catch (e) {
+      setError(`System notifications remain off — ${String(e)}`);
+    } finally {
+      setNotificationBusy(false);
     }
   }
 
@@ -413,6 +446,35 @@ export function SettingsView() {
                   The artifact viewer keeps the system light/dark setting even when the app is
                   forced — its sandboxed frame is isolated from the app shell.
                 </p>
+              </Section>
+
+              <Section
+                title="Notifications"
+                description="In-app activity badges are always available. Native notifications are optional."
+              >
+                <label class="flex items-start gap-3 rounded-ctl border border-line bg-paper px-3 py-2.5">
+                  <input
+                    type="checkbox"
+                    checked={systemNotifications}
+                    disabled={notificationBusy}
+                    onChange={(e) =>
+                      void onSystemNotificationsChange(
+                        (e.currentTarget as HTMLInputElement).checked,
+                      )
+                    }
+                    class="mt-0.5 accent-accent"
+                  />
+                  <span class="min-w-0">
+                    <span class="block text-sm font-medium text-ink">
+                      System completion notifications
+                    </span>
+                    <span class="mt-0.5 block text-xs leading-relaxed text-muted">
+                      {notificationBusy
+                        ? "Waiting for system permission…"
+                        : "Ask for permission only when enabled. Lock-screen previews show the project, never the question, thread title, error, path, or model."}
+                    </span>
+                  </span>
+                </label>
               </Section>
 
               {/* Models (epic conceptify-e7m) */}

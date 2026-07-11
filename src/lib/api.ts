@@ -321,6 +321,7 @@ export interface RunActivity {
   status_reason: string | null;
   queue_position: number | null;
   retry_of_run_id: string | null;
+  seen: boolean;
 }
 
 export function listRunActivity(): Promise<RunActivity[]> {
@@ -329,6 +330,27 @@ export function listRunActivity(): Promise<RunActivity[]> {
 
 export function dismissRunActivity(runId: string): Promise<boolean> {
   return invoke<boolean>("dismiss_run_activity", { run_id: runId });
+}
+
+export function markRunActivitySeen(runIds: string[]): Promise<number> {
+  return invoke<number>("mark_run_activity_seen", { run_ids: runIds });
+}
+
+export interface SystemRunNotification {
+  run_id: string;
+  project_id: string;
+  project_name: string;
+  thread_id: string;
+  status: RunStatus;
+  status_reason: string | null;
+}
+
+export function claimSystemRunNotification(
+  runId: string,
+): Promise<SystemRunNotification | null> {
+  return invoke<SystemRunNotification | null>("claim_system_run_notification", {
+    run_id: runId,
+  });
 }
 
 /** Cancel a live run (FR-4.8): SIGKILLs the whole process tree; the run ends
@@ -468,6 +490,9 @@ export interface AgentSettings {
   /** Preserved by the current settings form even before its dedicated editor
    * lands; changing unrelated settings must never reset scheduler capacity. */
   runConcurrency: RunConcurrency;
+  /** Opt-in native completion/attention notifications. Permission is requested
+   * only when the user turns this on; in-app activity remains available. */
+  systemNotifications: boolean;
 }
 
 /** Read the agent settings (stored overrides merged over code defaults, or pure

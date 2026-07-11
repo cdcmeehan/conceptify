@@ -1675,6 +1675,17 @@ pub struct RunActivity {
     pub status_reason: Option<String>,
     pub queue_position: Option<i64>,
     pub retry_of_run_id: Option<String>,
+    pub seen: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemRunNotification {
+    pub run_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub thread_id: String,
+    pub status: String,
+    pub status_reason: Option<String>,
 }
 
 pub fn list_activity(conn: &Connection) -> rusqlite::Result<Vec<RunActivity>> {
@@ -1688,7 +1699,7 @@ pub fn list_activity(conn: &Connection) -> rusqlite::Result<Vec<RunActivity>> {
                       AND earlier.status = 'queued'
                       AND earlier.queue_seq <= r.queue_seq
                 ) ELSE NULL END,
-                r.retry_of_run_id
+                r.retry_of_run_id, r.activity_seen_at IS NOT NULL
          FROM follow_up_runs r
          JOIN threads t ON t.id = r.thread_id
          JOIN projects p ON p.id = t.project_id
@@ -1724,9 +1735,70 @@ pub fn list_activity(conn: &Connection) -> rusqlite::Result<Vec<RunActivity>> {
             status_reason: r.get(12)?,
             queue_position: r.get(13)?,
             retry_of_run_id: r.get(14)?,
+            seen: r.get(15)?,
         })
     })?;
     rows.collect()
+}
+
+pub fn mark_activity_seen(conn: &mut Connection, run_ids: &[String]) -> rusqlite::Result<usize> {
+    let tx = conn.transaction()?;
+    let mut changed = 0;
+    for run_id in run_ids {
+        changed += tx.execute(
+            "UPDATE follow_up_runs
+             SET activity_seen_at = COALESCE(
+                 activity_seen_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             WHERE id = ?1
+               AND status NOT IN ('queued', 'starting', 'running', 'throttled', 'cancelling')",
+            [run_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(changed)
+}
+
+/// Atomically reserves one native notification delivery. The frontend calls
+/// this only after the opt-in setting and OS permission have both been checked;
+/// marking before send gives duplicate suppression priority over retrying a
+/// notification after a process crash.
+pub fn claim_system_notification(
+    conn: &mut Connection,
+    run_id: &str,
+) -> rusqlite::Result<Option<SystemRunNotification>> {
+    let tx = conn.transaction()?;
+    let claimed = tx.execute(
+        "UPDATE follow_up_runs
+         SET system_notified_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1
+           AND system_notified_at IS NULL
+           AND status IN ('completed', 'failed', 'timeout', 'conflicted')",
+        [run_id],
+    )? == 1;
+    if !claimed {
+        tx.commit()?;
+        return Ok(None);
+    }
+    let notification = tx.query_row(
+        "SELECT r.id, p.id, p.name, t.id, r.status, r.status_reason
+         FROM follow_up_runs r
+         JOIN threads t ON t.id = r.thread_id
+         JOIN projects p ON p.id = t.project_id
+         WHERE r.id = ?1",
+        [run_id],
+        |r| {
+            Ok(SystemRunNotification {
+                run_id: r.get(0)?,
+                project_id: r.get(1)?,
+                project_name: r.get(2)?,
+                thread_id: r.get(3)?,
+                status: r.get(4)?,
+                status_reason: r.get(5)?,
+            })
+        },
+    )?;
+    tx.commit()?;
+    Ok(Some(notification))
 }
 
 pub fn dismiss_activity(conn: &Connection, run_id: &str) -> rusqlite::Result<bool> {
@@ -3212,7 +3284,7 @@ mod tests {
                 .unwrap();
             }
         }
-        let conn = h.db.lock().unwrap();
+        let mut conn = h.db.lock().unwrap();
         let activity = list_activity(&conn).unwrap();
         let ids: Vec<&str> = activity.iter().map(|item| item.run_id.as_str()).collect();
         assert!(ids.contains(&"queued-activity"));
@@ -3227,6 +3299,24 @@ mod tests {
                 .queue_position,
             Some(1)
         );
+        assert!(!activity.iter().find(|item| item.run_id == "recent").unwrap().seen);
+        mark_activity_seen(&mut conn, &["recent".to_owned()]).unwrap();
+        assert!(list_activity(&conn)
+            .unwrap()
+            .iter()
+            .find(|item| item.run_id == "recent")
+            .unwrap()
+            .seen);
+        let notice = claim_system_notification(&mut conn, "recent")
+            .unwrap()
+            .expect("first terminal delivery claims");
+        assert_eq!(notice.project_id, h.project_id);
+        assert!(claim_system_notification(&mut conn, "recent")
+            .unwrap()
+            .is_none());
+        assert!(claim_system_notification(&mut conn, "queued-activity")
+            .unwrap()
+            .is_none());
         assert!(!dismiss_activity(&conn, "queued-activity").unwrap());
         assert!(dismiss_activity(&conn, "attention").unwrap());
         assert!(!list_activity(&conn)

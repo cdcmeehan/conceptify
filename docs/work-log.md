@@ -177,3 +177,14 @@ history clears after 15 minutes, and active work can never be hidden. Browser QA
 covered the real persisted history, cross-project jump, and mocked queued versus
 admitted runs; the polite live summary reports aggregate counts without reading
 streaming progress aloud.
+
+**Background notifications and attention (`conceptify-k9z.5`).** Terminal work
+now gains a durable unread marker: completion and attention badges survive
+reload, opening the tray marks visible rows seen, and failures/conflicts remain
+actionable until explicitly dismissed. Optional Tauri system notifications are
+off by default, request OS permission only from the Settings opt-in, atomically
+claim each run once to suppress duplicate lifecycle events, and deep-link back
+to its project/thread. Lock-screen text contains only the project name and a
+generic instruction; prompt, thread title, error, path, and model stay in-app.
+Browser QA verified unread persistence, seen-on-open, retained attention, the
+settings control, and the permission-free fallback path.

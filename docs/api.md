@@ -172,6 +172,15 @@ and are invoked by the app shell as Tauri commands (snake_case args):
   `false` for an unknown or still-active run. Dismissal is durable; active runs
   cannot be hidden. The shell may call this once per row to clear recent
   completion history.
+- `mark_run_activity_seen { run_ids }` → number of terminal rows marked seen.
+  Opening the tray calls this for visible unseen terminal work; the durable
+  marker suppresses the in-app unread badge across reloads without dismissing
+  failures or conflicts that still need action. Active rows are never marked.
+- `claim_system_run_notification { run_id }` → a privacy-filtered notification
+  routing record (`run/project/thread ids`, project name, status/reason), or
+  `null`. The atomic claim succeeds once for completed/failed/timeout/conflict
+  rows, providing at-most-once native delivery across duplicate lifecycle
+  events and restarts. It is called only after opt-in and an OS permission check.
 - `get_run_log_tail { run_id, max_lines? }` →
   `{ run_id, log_path, lines }` (default last 30 lines) — FR-4.8 failure
   surfacing; `log_path` is always returned even when the file is unreadable.
@@ -425,12 +434,16 @@ settings commands are the exception (they emit `settings-changed`, above).
   defaults, or pure defaults when nothing is saved (FR-7.4 zero-config). Shape
   (camelCase): `{ adapters: { name → { command, args, cwd } }, defaultAdapter,
   models: { followUp, artifactUpdate, inAppAsk }, timeoutSecs, agentBinaryPath,
-  appearance: "system"|"light"|"dark", autoProjectBaseDir }`. `agentBinaryPath`
+  appearance: "system"|"light"|"dark", autoProjectBaseDir,
+  systemNotifications, runConcurrency }`. `agentBinaryPath`
   and `autoProjectBaseDir` are `null` when unset (code default applies).
   Built-in adapters merge **additively** on read (bead conceptify-e7m.7): a
   stored `adapters` map written before a built-in existed still yields it; user
   overrides of a built-in key and user-defined adapters win. The OpenRouter API
   key is **not** part of this shape (see `set_openrouter_api_key`).
+  `systemNotifications` defaults to `false`; the frontend requests native
+  permission only from the user's explicit enable action. In-app badges and
+  actionable activity never depend on this setting or OS permission.
 - `set_agent_settings { settings }` → `void` — persist (validated: `defaultAdapter`
   must name an existing adapter, else a user-facing error). Emits `settings-changed`.
 - `reset_agent_settings {}` → `AgentSettings` — delete the stored override so the
