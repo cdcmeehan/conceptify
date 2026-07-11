@@ -48,6 +48,7 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
   const [selectedChange, setSelectedChange] = useState(0);
   const [diffNudge, setDiffNudge] = useState(false);
   const [learningTrail, setLearningTrail] = useState<api.LearningTrail | null>(null);
+  const [synthesisLineage, setSynthesisLineage] = useState<api.SynthesisLineage | null>(null);
 
   // Register the viewer iframe with the bridge (src/lib/bridge.ts owns the
   // postMessage handshake; comment UI riding on it is 94m.3/94m.6). Stable
@@ -70,6 +71,12 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
     }
     let current = true;
     void api.getLearningTrail(threadId).then((trail) => { if (current) setLearningTrail(trail); }).catch(() => { if (current) setLearningTrail(null); });
+    return () => { current = false; };
+  }, [threadId]);
+  useEffect(() => {
+    if (threadId === "") { setSynthesisLineage(null); return; }
+    let current = true;
+    void api.getThreadSynthesis(threadId).then((lineage) => { if (current) setSynthesisLineage(lineage); }).catch(() => { if (current) setSynthesisLineage(null); });
     return () => { current = false; };
   }, [threadId]);
   const versions = state.artifactVersions;
@@ -305,6 +312,16 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
               {learningTrail.source_thread_title} · v{learningTrail.source_artifact_version}
             </button>
             <span>— {learningTrail.reason}</span>
+          </div>
+        ) : null}
+        {synthesisLineage != null ? (
+          <div class="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
+            <span class="cfy-chip bg-info-bg text-info">Synthesis</span><span>Sources:</span>
+            {synthesisLineage.sources.map((source) => {
+              const sourceThread = state.threads.find((candidate) => candidate.id === source.thread_id);
+              return <button type="button" key={source.thread_id} onClick={() => appStore.selectThread(source.thread_id)} class="font-medium text-accent-ink hover:underline">{sourceThread?.title ?? source.thread_id} ({source.cfy_ids.length} sections)</button>;
+            })}
+            <span title={synthesisLineage.instruction}>· separately generated</span>
           </div>
         ) : null}
         {(viewingOldVersion || openError != null) && (

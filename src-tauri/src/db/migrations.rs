@@ -44,6 +44,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(RESPONSE_METADATA),
         M::up(LEARNING_SUGGESTIONS),
         M::up(CONCEPT_MAP),
+        M::up(THREAD_SYNTHESES),
     ])
 }
 
@@ -484,6 +485,20 @@ CREATE TABLE concept_links (
 CREATE INDEX idx_concept_links_project ON concept_links(project_id);
 ";
 
+/// A synthesis is a new thread with immutable lineage to selected semantic
+/// sections in existing threads; sources themselves are never modified.
+const THREAD_SYNTHESES: &str = "
+CREATE TABLE thread_syntheses (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    thread_id    TEXT NOT NULL UNIQUE REFERENCES threads(id) ON DELETE CASCADE,
+    sources_json TEXT NOT NULL,
+    instruction  TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX idx_thread_syntheses_project ON thread_syntheses(project_id, created_at DESC);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,7 +506,7 @@ mod tests {
 
     /// `user_version` after the full chain — the count of `M::up` entries in
     /// [`migrations`].
-    const LATEST: usize = 19;
+    const LATEST: usize = 20;
 
     /// Position of the durable scheduler metadata migration.
     const RUN_QUEUE: usize = 13;
@@ -505,6 +520,7 @@ mod tests {
     const RESPONSE_PROFILE: usize = 17;
     const LEARNING_PATHS: usize = 18;
     const CONCEPTS: usize = 19;
+    const SYNTHESES: usize = 20;
 
     /// Position of the `follow_up_runs.override_json` ALTER (the 11th
     /// migration), pinned explicitly — like `ASK_MODE` below — so appending
@@ -1144,6 +1160,21 @@ mod tests {
         conn.execute(
             "INSERT INTO concept_links (id, project_id, from_concept_id, to_concept_id, label)
              VALUES ('l1', 'p1', 'c1', 'c2', 'enables')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn add_thread_syntheses_keeps_sources_separate() {
+        let mut conn = fresh_conn();
+        let migrations = migrations();
+        migrations.to_version(&mut conn, SYNTHESES - 1).unwrap();
+        seed_thread(&conn);
+        migrations.to_version(&mut conn, SYNTHESES).unwrap();
+        conn.execute(
+            "INSERT INTO thread_syntheses (id, project_id, thread_id, sources_json, instruction)
+             VALUES ('syn1', 'p1', 't1', '[{\"thread_id\":\"source\",\"cfy_ids\":[\"sec-a\"]}]', 'Unify the explanations')",
             [],
         )
         .unwrap();

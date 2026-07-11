@@ -287,6 +287,19 @@ Concept-map commands operate only on explicit `data-cfy-concepts` evidence:
 - `distinguish_concept { mention_id, new_name }` moves one overloaded mention
   to a separately named concept. No opaque similarity merge runs automatically.
 
+Parallel-explanation commands are semantic and non-mutating toward sources:
+
+- `compare_threads { project_id, thread_ids }` accepts two to four distinct
+  ready artifacts and returns each source question, immutable response profile,
+  explicit concepts, and bounded semantic heading sections labelled as
+  assumption/explanation/conclusion. It warns when explicit concept sets do not
+  overlap or metadata is insufficient; it never compares raw HTML.
+- `record_thread_synthesis { project_id, thread_id, sources, instruction }`
+  records selected source `cfy_ids` only after a separate destination thread
+  has been created. Sources must be different same-project threads.
+- `get_thread_synthesis { thread_id }` restores that immutable lineage so the
+  result is labelled as a synthesis and every source can be revisited.
+
 **Per-run override (`run_override?`, epic conceptify-e7m):** every run-starting
 flow command (`ask_follow_ups`, `ask_single_comment`, `apply_to_artifact`,
 `ask_from_app`) accepts an optional `run_override` object `{ adapter?, model? }`

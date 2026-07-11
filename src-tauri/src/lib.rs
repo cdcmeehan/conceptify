@@ -24,6 +24,7 @@ mod runs;
 mod server;
 mod settings;
 mod skill_catalog;
+mod synthesis;
 mod threads;
 
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -149,6 +150,9 @@ pub fn run() {
             concept_map::remove_concept_link,
             concept_map::distinguish_concept,
             concept_map::merge_concepts,
+            synthesis::compare_threads,
+            synthesis::record_thread_synthesis,
+            synthesis::get_thread_synthesis,
             runs::cancel_run,
         ])
         .setup(|app| {

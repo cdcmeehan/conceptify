@@ -250,6 +250,25 @@ export function mergeConcepts(sourceConceptId: string, targetConceptId: string):
   return invoke<void>("merge_concepts", { source_concept_id: sourceConceptId, target_concept_id: targetConceptId });
 }
 
+export interface ComparisonSection { cfy_id: string; label: string; excerpt: string; role: "assumption" | "conclusion" | "explanation"; }
+export interface ComparedThread {
+  thread_id: string; title: string; question: string; artifact_version: number;
+  profile: ResponseIntent | null; sections: ComparisonSection[]; concepts: string[];
+}
+export interface ThreadComparison { threads: ComparedThread[]; warnings: string[]; }
+export interface SynthesisSource { thread_id: string; cfy_ids: string[]; }
+export interface SynthesisLineage { thread_id: string; instruction: string; sources: SynthesisSource[]; }
+
+export function compareThreads(projectId: string, threadIds: string[]): Promise<ThreadComparison> {
+  return invoke<ThreadComparison>("compare_threads", { project_id: projectId, thread_ids: threadIds });
+}
+export function recordThreadSynthesis(projectId: string, threadId: string, sources: SynthesisSource[], instruction: string): Promise<void> {
+  return invoke<void>("record_thread_synthesis", { project_id: projectId, thread_id: threadId, sources, instruction });
+}
+export function getThreadSynthesis(threadId: string): Promise<SynthesisLineage | null> {
+  return invoke<SynthesisLineage | null>("get_thread_synthesis", { thread_id: threadId });
+}
+
 export function renameProject(id: string, name: string): Promise<void> {
   return invoke<void>("rename_project", { id, name });
 }

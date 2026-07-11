@@ -516,3 +516,20 @@ duplicates, or distinguish one overloaded mention under a new concept name.
 The read model caps large views at 500 concepts, 2,000 mentions, and 1,000
 links with a visible truncation notice. Tests cover explicit-only extraction,
 section/visual classification, migration, and incremental per-thread updates.
+
+**Parallel comparison and synthesis (`conceptify-dqb.6`).** Project home can
+compare two to four ready explanations side by side using their original
+questions, immutable response profiles, explicit concept sets, and bounded
+semantic sections. Assumptions and conclusions are identified from stable
+section metadata; profile dimensions that differ are visually called out.
+Missing concept metadata produces an uncertainty warning, while disjoint
+explicit concepts produce a clear mismatched-topic warning.
+
+Readers select exact sections from every source and edit a synthesis
+instruction before launching. The request contains only those bounded semantic
+excerpts plus source ids/versions/profiles, creates a new thread, and records
+immutable source-thread/anchor lineage before navigation. Original threads and
+artifacts are never changed. The resulting header is separately labelled as a
+synthesis and links back to each source with the selected-section count. Tests
+cover section roles/excerpts, stored profiles, compatible and mismatched concept
+sets, same-project source validation, and lineage round-tripping.

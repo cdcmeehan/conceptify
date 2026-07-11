@@ -3,6 +3,7 @@ import type { LearningSuggestion, Project, RunActivity, Thread } from "../lib/ap
 import { dismissLearningSuggestion, getProjectGoal, getTopicContext, listLearningSuggestions, recordLearningTrail, setProjectGoal, setTopicContext } from "../lib/api";
 import { appStore } from "../store/appStore";
 import { ConceptMapPanel } from "./ConceptMapPanel";
+import { ThreadComparePanel } from "./ThreadComparePanel";
 
 export function ProjectHome({ project, threads, activity }: { project: Project; threads: Thread[]; activity: RunActivity[] }) {
   const [goal, setGoal] = useState("");
@@ -14,6 +15,7 @@ export function ProjectHome({ project, threads, activity }: { project: Project; 
   const [learningSuggestions, setLearningSuggestions] = useState<LearningSuggestion[]>([]);
   const [selectedSuggestion, setSelectedSuggestion] = useState<LearningSuggestion | null>(null);
   const [conceptMapOpen, setConceptMapOpen] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
   const refreshSuggestions = () => listLearningSuggestions(project.id).then(setLearningSuggestions).catch(() => setLearningSuggestions([]));
   useEffect(() => {
     void getProjectGoal(project.id).then(setGoal).catch(() => setGoal(""));
@@ -44,7 +46,7 @@ export function ProjectHome({ project, threads, activity }: { project: Project; 
     <main class="min-w-0 flex-1 overflow-y-auto bg-well p-6" aria-label={`${project.name} project home`}>
       <div class="mx-auto max-w-3xl">
         <p class="cfy-label">Project home</p>
-        <div class="mt-1 flex items-center justify-between gap-3"><h1 class="font-serif text-2xl font-semibold text-ink">{project.name}</h1><button type="button" onClick={() => setConceptMapOpen(true)} class="cfy-btn cfy-btn-secondary">Concept map</button></div>
+        <div class="mt-1 flex items-center justify-between gap-3"><h1 class="font-serif text-2xl font-semibold text-ink">{project.name}</h1><div class="flex gap-1.5"><button type="button" onClick={() => setCompareOpen(true)} disabled={threads.filter((thread) => thread.status === "ready").length < 2} class="cfy-btn cfy-btn-secondary">Compare</button><button type="button" onClick={() => setConceptMapOpen(true)} class="cfy-btn cfy-btn-secondary">Concept map</button></div></div>
         <section class="cfy-card mt-4 p-4">
           <label class="cfy-label" for="project-goal">What are you trying to understand?</label>
           <textarea id="project-goal" value={goal} onInput={(e) => setGoal((e.currentTarget as HTMLTextAreaElement).value)} onBlur={() => void setProjectGoal(project.id, goal)} rows={2} class="cfy-input mt-2 resize-y" placeholder="Add a short goal or learning brief…" />
@@ -96,6 +98,7 @@ export function ProjectHome({ project, threads, activity }: { project: Project; 
         </section>
       </div>
       {conceptMapOpen && <ConceptMapPanel projectId={project.id} onClose={() => setConceptMapOpen(false)} />}
+      {compareOpen && <ThreadComparePanel projectId={project.id} threads={threads} onClose={() => setCompareOpen(false)} />}
     </main>
   );
 }
