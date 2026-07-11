@@ -453,3 +453,19 @@ Compare, Comment, and Redraw actions; Compare uses the structured comparison
 response profile, while all answers and revision previews retain the original
 node anchor. A browser bridge probe verified focus order, node/edge metadata,
 pointer and keyboard activation, and zero accidental slide advances.
+
+**Layered artifact structure (`conceptify-dqb.1`).** The authoring contract now
+requires STANDARD/DEEP artifacts to lead with a concise, always-visible
+orientation and core explanation, reserve native disclosures for already-
+generated optional depth, and provide a sticky semantic hash-link outline.
+Linked targets carry matching native `id` and stable `data-cfy-id` values, so
+the same document navigates correctly in a standalone browser with no bridge.
+
+The bridge enhances that baseline with active-location state, disclosure
+opening before deep-link navigation, and hash/back/forward restoration. Native
+details preserve keyboard and assistive-technology semantics; browser search
+still finds closed content, and `beforematch` opens its containing disclosure
+where supported. Print hides the outline and exposes all deep-dive bodies. The
+reference artifact browser probe verified sticky layout, initial/current
+outline state, deep-link opening, history restoration, native target ids,
+closed-content search, and coherent print rules.

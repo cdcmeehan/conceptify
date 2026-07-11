@@ -564,6 +564,80 @@
   (document.head || document.documentElement).appendChild(style);
 
   // -------------------------------------------------------------------------
+  // Layered artifact outline
+  // -------------------------------------------------------------------------
+
+  var outlineLinks = Array.prototype.slice.call(
+    document.querySelectorAll('.cfy-outline a[href^="#"]')
+  );
+
+  function targetForOutlineLink(link) {
+    var href = link && link.getAttribute("href");
+    if (!href || href.charAt(0) !== "#" || href.length < 2) return null;
+    try {
+      var id = decodeURIComponent(href.slice(1));
+      return document.getElementById(id) || byCfyId(id);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function openContainingDetails(target) {
+    for (var node = target; node; node = node.parentElement) {
+      if (node.tagName && node.tagName.toLowerCase() === "details") node.open = true;
+    }
+  }
+
+  function markOutlineLocation(target) {
+    if (!target) return;
+    for (var i = 0; i < outlineLinks.length; i += 1) {
+      var active = targetForOutlineLink(outlineLinks[i]) === target;
+      if (active) outlineLinks[i].setAttribute("aria-current", "location");
+      else outlineLinks[i].removeAttribute("aria-current");
+    }
+  }
+
+  function restoreOutlineLocation() {
+    if (!window.location.hash) return;
+    var link = { getAttribute: function () { return window.location.hash; } };
+    var target = targetForOutlineLink(link);
+    if (!target) return;
+    openContainingDetails(target);
+    markOutlineLocation(target);
+    try { target.scrollIntoView({ block: "start" }); } catch (_) { target.scrollIntoView(); }
+  }
+
+  for (var outlineIndex = 0; outlineIndex < outlineLinks.length; outlineIndex += 1) {
+    outlineLinks[outlineIndex].addEventListener("click", function () {
+      var target = targetForOutlineLink(this);
+      if (target) openContainingDetails(target);
+    });
+  }
+  window.addEventListener("hashchange", restoreOutlineLocation);
+  window.addEventListener("popstate", restoreOutlineLocation);
+  document.addEventListener("beforematch", function (ev) {
+    if (ev.target instanceof Element) openContainingDetails(ev.target);
+  });
+
+  if (outlineLinks.length > 0) {
+    restoreOutlineLocation();
+    if (!window.location.hash) markOutlineLocation(targetForOutlineLink(outlineLinks[0]));
+    if ("IntersectionObserver" in window) {
+      var outlineTargets = outlineLinks.map(targetForOutlineLink).filter(function (target) { return !!target; });
+      var outlineObserver = new IntersectionObserver(function (entries) {
+        var visible = entries.filter(function (entry) { return entry.isIntersecting; });
+        if (visible.length > 0) {
+          visible.sort(function (a, b) { return Math.abs(a.boundingClientRect.top) - Math.abs(b.boundingClientRect.top); });
+          markOutlineLocation(visible[0].target);
+        }
+      }, { rootMargin: "-10% 0px -70% 0px", threshold: 0 });
+      for (var targetIndex = 0; targetIndex < outlineTargets.length; targetIndex += 1) {
+        outlineObserver.observe(outlineTargets[targetIndex]);
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // (c) Highlight decorations
   // -------------------------------------------------------------------------
 

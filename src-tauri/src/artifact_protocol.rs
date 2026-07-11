@@ -810,6 +810,9 @@ mod tests {
         for interaction in ["tabindex", "focus-visible", "ArrowRight", "stopPropagation"] {
             assert!(BRIDGE_TAG.contains(interaction), "bridge must support diagram interaction {interaction:?}");
         }
+        for outline in ["cfy-outline", "aria-current", "hashchange", "popstate", "beforematch"] {
+            assert!(BRIDGE_TAG.contains(outline), "bridge must support layered outline {outline:?}");
+        }
         for state in ["data-cfy-hl-state", "answered", "saved"] {
             assert!(BRIDGE_TAG.contains(state), "bridge must distinguish highlight state {state:?}");
         }

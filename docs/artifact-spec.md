@@ -63,6 +63,31 @@ Artifacts MUST NOT invent their own uses of them beyond what this spec
 defines, and MUST NOT assume the injected bridge script exists — the same
 file opens bridge-less in a plain browser (§5.4).
 
+### 1.1 Layered response structure
+
+STANDARD and DEEP explanation artifacts MUST use progressive disclosure as an
+authoring structure, never by clipping generated prose after the fact:
+
+- A concise orientation and the core mental model are ordinary, always-visible
+  sections. Together they MUST answer the question coherently without requiring
+  a disclosure to be opened.
+- Optional implementation detail, edge cases, derivations, and reference
+  material MAY follow in native `<details class="cfy-details cfy-deep-dive">`
+  elements. Each has a specific `<summary>` and remains part of the document
+  text and accessibility tree through native HTML semantics.
+- A multi-section artifact MUST provide `<nav class="cfy-outline"
+  aria-label="On this page">` containing hash links to its semantic section
+  ids. Each linked section/heading MUST carry a native `id` matching its stable
+  `data-cfy-id`, so navigation also works without the bridge. Links MUST use
+  stable descriptive ids, not positional fragments.
+- The document MUST remain coherent with JavaScript disabled. Hash links use
+  native browser history; Conceptify's injected bridge only enhances them by
+  restoring disclosure state and active-location styling.
+- Print/export MUST omit the navigation chrome and expose every deep-dive body.
+
+COMPACT artifacts may omit the outline and deep-dive layer when the always-
+visible answer is already short enough to scan.
+
 ## 2. Rendering targets (FR-3.2)
 
 Every artifact MUST render correctly in **both**:

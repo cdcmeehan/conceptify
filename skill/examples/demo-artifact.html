@@ -369,6 +369,47 @@ hr::after {
   padding: 0 0.15em;
 }
 
+/* ---- Layered outline: semantic hash links, sticky but never modal -------- */
+.cfy-outline {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  margin: var(--cfy-space-4) 0 var(--cfy-space-6);
+  padding: var(--cfy-space-2) 0;
+  background: var(--cfy-paper);
+  background: color-mix(in srgb, var(--cfy-paper) 92%, transparent);
+  border-top: 1px solid var(--cfy-line);
+  border-bottom: 1px solid var(--cfy-line);
+  backdrop-filter: blur(10px);
+}
+.cfy-outline ul {
+  display: flex;
+  gap: var(--cfy-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.cfy-outline a {
+  display: block;
+  padding: 0.35rem 0.6rem;
+  border-radius: 999px;
+  color: var(--cfy-muted);
+  font-family: var(--cfy-font-sans);
+  font-size: var(--cfy-text-sm);
+  line-height: 1.25;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.cfy-outline a:hover,
+.cfy-outline a:focus-visible,
+.cfy-outline a[aria-current="location"] {
+  color: var(--cfy-ink);
+  background: var(--cfy-surface);
+  outline: 1px solid var(--cfy-line);
+}
+
 /* ---- Collapsible deep-dive: <details class="cfy-details"> ---------------
    <summary> first, then any flow content. Open state is styled;
    fully usable with JS disabled (native disclosure).                     */
@@ -742,6 +783,9 @@ pre.cfy-fallback code { padding-inline: var(--cfy-space-5); }
   .cfy-reveal { animation: none; }
   pre { white-space: pre-wrap; }
   .cfy-details { border: none; background: none; }
+  .cfy-outline { display: none; }
+  .cfy-details:not([open]) > :not(summary) { display: block; }
+  .cfy-details > summary::before { display: none; }
 }
 </style>
 <style>
@@ -760,7 +804,17 @@ pre.cfy-fallback code { padding-inline: var(--cfy-space-5); }
   double-locked box: a custom URL scheme on the outside, an origin-less iframe on the inside. This artifact walks the path
   a file takes from disk to pixels, and shows why the box is shaped the way it is.</p>
 
-  <h2 data-cfy-id="sec-mental-model">The mental model</h2>
+  <nav class="cfy-outline" aria-label="On this page">
+    <ul>
+      <li><a href="#sec-mental-model">Overview</a></li>
+      <li><a href="#sec-load-sequence">Load sequence</a></li>
+      <li><a href="#sec-csp">Policy</a></li>
+      <li><a href="#deep-allow-same-origin">Deep dive</a></li>
+      <li><a href="#sec-takeaway">Takeaway</a></li>
+    </ul>
+  </nav>
+
+  <h2 id="sec-mental-model" data-cfy-id="sec-mental-model">The mental model</h2>
 
   <p>The viewer never loads artifact files directly. Instead the Rust core registers a
   <dfn class="cfy-term">custom URL scheme</dfn> — <code>artifact://</code> — and answers each request itself: read the
@@ -822,7 +876,7 @@ handler -> iframe: CSP + bridge
     it, stamps the per-response security policy onto it, and streams it straight into WebKit.</figcaption>
   </figure>
 
-  <h2 data-cfy-id="sec-load-sequence">What happens on every load</h2>
+  <h2 id="sec-load-sequence" data-cfy-id="sec-load-sequence">What happens on every load</h2>
 
   <ol class="cfy-steps" data-cfy-id="steps-load-sequence">
     <li><strong>Resolve.</strong> The viewer asks for <code>artifact://thread/&lt;slug&gt;/artifact.v3.html</code>; the
@@ -845,7 +899,7 @@ handler -> iframe: CSP + bridge
     exactly what you want from documents meant to outlive the app that made them.</p>
   </aside>
 
-  <h2 data-cfy-id="sec-csp">The policy, line by line</h2>
+  <h2 id="sec-csp" data-cfy-id="sec-csp">The policy, line by line</h2>
 
   <p>The reference policy is small enough to read in one breath. Everything is denied by default; inline code and styles
   are allowed (the artifact is self-contained, so "inline" is everything); and exactly one CDN host is carved out for the
@@ -890,7 +944,7 @@ handler -> iframe: CSP + bridge
   <em>each other's</em>. Two artifacts loaded over the same scheme would otherwise share an origin — and with it, storage
   and the ability to script one another across history navigation. Opaque origins make every load an island.</p>
 
-  <details class="cfy-details">
+  <details class="cfy-details cfy-deep-dive" id="deep-allow-same-origin">
     <summary>Deep dive: what <code>allow-same-origin</code> would give away</summary>
     <p>Adding <code>allow-same-origin</code> to the sandbox would hand the document a real origin —
     <code>artifact://</code>'s own. From there, every artifact could read and write a shared <code>localStorage</code>,
@@ -988,7 +1042,7 @@ handler -> iframe: CSP + bridge
 
   <hr>
 
-  <h2 data-cfy-id="sec-takeaway">The takeaway</h2>
+  <h2 id="sec-takeaway" data-cfy-id="sec-takeaway">The takeaway</h2>
 
   <p>The whole design reduces to one sentence: <em>the file is permanent, the walls are per-response.</em> In practice
   that means:</p>

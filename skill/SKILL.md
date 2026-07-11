@@ -224,20 +224,30 @@ artifact must be true of *this* codebase: real file paths, real type and
 function names, real control flow. Never explain from generic knowledge
 of how such systems usually work.
 
-**Structure — hook → mental model → visuals → walkthrough → summary:**
+**Structure — orientation → core → optional depth:**
 
-1. **Hook**: `cfy-kicker` + `<h1>` + one `cfy-lede` paragraph that states
-   why the question matters and previews the answer in one or two
-   sentences.
-2. **Mental model**: the single organizing idea the reader should hold,
-   usually paired with the artifact's primary diagram. If the reader
-   remembers one section, it's this one.
-3. **Visuals**: a diagram wherever structure beats prose — flows,
+1. **Orientation**: `cfy-kicker` + `<h1>` + one `cfy-lede` paragraph that
+   states why the question matters and previews the answer in one or two
+   sentences. Add a short overview with the answer and key terms up front.
+2. **Core explanation**: the single organizing mental model, primary visual,
+   and load-bearing walkthrough. This always-visible layer must stand alone
+   with the orientation; never make a reader open a disclosure to understand
+   the answer.
+3. **Optional depth**: implementation detail, edge cases, derivations, and
+   reference material belong in specific native
+   `<details class="cfy-details cfy-deep-dive">` disclosures. This material is
+   already generated and needs no follow-up run; do not hide essential facts.
+4. **Outline**: STANDARD and DEEP artifacts with multiple sections include a
+   sticky `<nav class="cfy-outline" aria-label="On this page">` whose hash
+   links point to stable semantic section ids. Put a native `id` matching
+   `data-cfy-id` on every linked target so the outline works standalone.
+   COMPACT artifacts may omit it.
+5. **Visuals**: use a diagram wherever structure beats prose — flows,
    architectures, state machines, lifecycles, sequences. Comparisons go
    in `cfy-table` tables, processes in `cfy-steps`.
-4. **Walkthrough**: the real code, as trimmed excerpts (see below), in
+6. **Walkthrough**: present the real code, as trimmed excerpts (see below), in
    the order a request/value/event actually travels.
-5. **Summary**: a short "what to remember" close — the mental model
+7. **Summary**: close with a short "what to remember" section — the mental model
    restated plus the two or three load-bearing facts.
 
 **Quality dos and don'ts:**
@@ -273,6 +283,10 @@ reminder, not a substitute):
       it is the delegate's model, not the session's) metas.
 - [ ] First `<style>` = `design-system.css` contents verbatim; second
       `<style>` = adapter CSS from rendering.md + artifact-specific rules.
+- [ ] STANDARD/DEEP multi-section artifacts have an always-visible overview +
+      core, optional native `cfy-deep-dive` disclosures, and a `cfy-outline`
+      linking stable semantic section ids. The answer works with all details
+      closed and prints coherently with all details exposed.
 - [ ] `data-cfy-id` on every `h1`–`h4`, every figure, and every
       meaningful diagram element — semantic kebab-case ids
       (`sec-mental-model`, `fig-auth-flow.token-service`), never
