@@ -501,3 +501,18 @@ thread/version/anchor and reason. A bridge probe verified the suggestion
 gesture emits only its bounded semantic payload and cannot also comment or
 advance an artifact. Domain tests cover extraction, invalid-branch rejection,
 editing, dismissal, same-project launch validation, and durable backtracking.
+
+**Explicit concept map (`conceptify-dqb.5`).** Artifact authors can now tag
+semantic headings, visuals, diagram nodes, and next questions with a small set
+of reader-recognizable `data-cfy-concepts`. Save-time indexing replaces only
+the changed thread's latest evidence and retains every other thread, avoiding
+opaque similarity inference and project-wide rebuilds.
+
+Project home exposes a bounded, filterable Map and complete Evidence list with
+native keyboard controls. Each mention jumps to its exact thread/artifact
+anchor; filters cover concept/evidence text and section/visual/question kind.
+Readers can pin labelled directed relationships, remove them, merge explicit
+duplicates, or distinguish one overloaded mention under a new concept name.
+The read model caps large views at 500 concepts, 2,000 mentions, and 1,000
+links with a visible truncation notice. Tests cover explicit-only extraction,
+section/visual classification, migration, and incremental per-thread updates.

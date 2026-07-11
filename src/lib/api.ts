@@ -221,6 +221,35 @@ export function getLearningTrail(threadId: string): Promise<LearningTrail | null
   return invoke<LearningTrail | null>("get_learning_trail", { thread_id: threadId });
 }
 
+export interface ConceptMention {
+  id: string;
+  thread_id: string;
+  thread_title: string;
+  artifact_version: number;
+  cfy_id: string;
+  kind: "section" | "visual" | "question";
+  label: string;
+}
+export interface ConceptNode { id: string; name: string; mentions: ConceptMention[]; }
+export interface ConceptLink { id: string; from_concept_id: string; to_concept_id: string; label: string; }
+export interface ConceptMap { concepts: ConceptNode[]; links: ConceptLink[]; truncated: boolean; }
+
+export function getConceptMap(projectId: string): Promise<ConceptMap> {
+  return invoke<ConceptMap>("get_concept_map", { project_id: projectId });
+}
+export function pinConceptLink(projectId: string, fromConceptId: string, toConceptId: string, label: string): Promise<void> {
+  return invoke<void>("pin_concept_link", { project_id: projectId, from_concept_id: fromConceptId, to_concept_id: toConceptId, label });
+}
+export function removeConceptLink(id: string): Promise<boolean> {
+  return invoke<boolean>("remove_concept_link", { id });
+}
+export function distinguishConcept(mentionId: string, newName: string): Promise<void> {
+  return invoke<void>("distinguish_concept", { mention_id: mentionId, new_name: newName });
+}
+export function mergeConcepts(sourceConceptId: string, targetConceptId: string): Promise<void> {
+  return invoke<void>("merge_concepts", { source_concept_id: sourceConceptId, target_concept_id: targetConceptId });
+}
+
 export function renameProject(id: string, name: string): Promise<void> {
   return invoke<void>("rename_project", { id, name });
 }

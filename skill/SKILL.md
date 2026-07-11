@@ -256,6 +256,10 @@ of how such systems usually work.
    data-cfy-reason="…" data-cfy-branch="example|counterexample|mechanism|tradeoff|prerequisite">`
    inside `<ul class="cfy-next-questions">`. State why each follows. These are
    inert suggestions until the reader explicitly edits and launches one.
+9. **Concept evidence**: add `data-cfy-concepts="Concept A|Concept B"` to
+   meaningful headings, figures/diagram nodes, and next-question branches.
+   Use one to five reader-recognizable concepts per element. Tag only explicit
+   evidence; never spray extracted keywords or pretend similarity is a fact.
 
 **Quality dos and don'ts:**
 

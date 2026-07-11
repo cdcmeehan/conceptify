@@ -43,6 +43,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(CONFLICT_CANDIDATES),
         M::up(RESPONSE_METADATA),
         M::up(LEARNING_SUGGESTIONS),
+        M::up(CONCEPT_MAP),
     ])
 }
 
@@ -448,6 +449,41 @@ CREATE UNIQUE INDEX idx_learning_suggestions_launched_thread
     ON learning_suggestions(launched_thread_id) WHERE launched_thread_id IS NOT NULL;
 ";
 
+/// Explicit semantic concept mentions plus user-pinned relationships. The map
+/// is a derived index: each artifact save replaces only that thread's mentions.
+const CONCEPT_MAP: &str = "
+CREATE TABLE concepts (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    canonical_name TEXT NOT NULL,
+    display_name   TEXT NOT NULL,
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (project_id, canonical_name)
+);
+CREATE TABLE concept_mentions (
+    id               TEXT PRIMARY KEY,
+    concept_id       TEXT NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+    thread_id        TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    artifact_version INTEGER NOT NULL,
+    cfy_id           TEXT NOT NULL,
+    kind             TEXT NOT NULL CHECK (kind IN ('section', 'visual', 'question')),
+    label            TEXT NOT NULL,
+    UNIQUE (concept_id, thread_id, artifact_version, cfy_id)
+);
+CREATE INDEX idx_concept_mentions_thread ON concept_mentions(thread_id);
+CREATE TABLE concept_links (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    from_concept_id TEXT NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+    to_concept_id   TEXT NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+    label           TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    CHECK (from_concept_id <> to_concept_id),
+    UNIQUE (from_concept_id, to_concept_id, label)
+);
+CREATE INDEX idx_concept_links_project ON concept_links(project_id);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,7 +491,7 @@ mod tests {
 
     /// `user_version` after the full chain — the count of `M::up` entries in
     /// [`migrations`].
-    const LATEST: usize = 18;
+    const LATEST: usize = 19;
 
     /// Position of the durable scheduler metadata migration.
     const RUN_QUEUE: usize = 13;
@@ -468,6 +504,7 @@ mod tests {
     const CONFLICTS: usize = 16;
     const RESPONSE_PROFILE: usize = 17;
     const LEARNING_PATHS: usize = 18;
+    const CONCEPTS: usize = 19;
 
     /// Position of the `follow_up_runs.override_json` ALTER (the 11th
     /// migration), pinned explicitly — like `ASK_MODE` below — so appending
@@ -1085,6 +1122,28 @@ mod tests {
                   source_cfy_id, branch, question, reason)
              VALUES ('s1', 'p1', 't1', 1, 'next-example', 'example',
                      'Show an example?', 'Applies the mechanism.')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn add_concept_map_supports_mentions_and_pinned_links() {
+        let mut conn = fresh_conn();
+        let migrations = migrations();
+        migrations.to_version(&mut conn, CONCEPTS - 1).unwrap();
+        seed_thread(&conn);
+        migrations.to_version(&mut conn, CONCEPTS).unwrap();
+        conn.execute(
+            "INSERT INTO concepts (id, project_id, canonical_name, display_name)
+             VALUES ('c1', 'p1', 'ownership', 'Ownership'),
+                    ('c2', 'p1', 'borrowing', 'Borrowing')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO concept_links (id, project_id, from_concept_id, to_concept_id, label)
+             VALUES ('l1', 'p1', 'c1', 'c2', 'enables')",
             [],
         )
         .unwrap();

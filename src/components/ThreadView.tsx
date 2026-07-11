@@ -79,6 +79,12 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
   // pinned number is a read-only look at history.
   const resolvedVersion =
     state.viewerVersion === "latest" ? latestVersion : state.viewerVersion;
+  useEffect(() => {
+    const evidence = state.pendingConceptEvidence;
+    if (evidence == null || evidence.threadId !== threadId || resolvedVersion == null) return;
+    artifactBridge.scrollToAnchor({ v: 1, type: "element", cfy_id: evidence.cfyId });
+    appStore.clearPendingConceptEvidence();
+  }, [state.pendingConceptEvidence, threadId, resolvedVersion]);
   const viewingOldVersion =
     resolvedVersion != null && latestVersion != null && resolvedVersion < latestVersion;
   const previousVersion =

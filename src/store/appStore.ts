@@ -200,6 +200,7 @@ export interface AppState {
   runActivityLoading: boolean;
   activityTrayOpen: boolean;
   conflictReviewRunId: string | null;
+  pendingConceptEvidence: { threadId: string; cfyId: string } | null;
 }
 
 type Listener = () => void;
@@ -229,6 +230,7 @@ const initialState: AppState = {
   runActivityLoading: false,
   activityTrayOpen: false,
   conflictReviewRunId: null,
+  pendingConceptEvidence: null,
 };
 
 let askDraftSequence = 0;
@@ -1235,6 +1237,15 @@ class AppStore {
     void this.refetchComments(id);
     // Re-attach to a run already in flight on this thread (FR-4.8).
     void this.syncActiveRun(id);
+  }
+
+  openConceptEvidence(threadId: string, cfyId: string): void {
+    this.set({ pendingConceptEvidence: { threadId, cfyId } });
+    this.selectThread(threadId);
+  }
+
+  clearPendingConceptEvidence(): void {
+    this.set({ pendingConceptEvidence: null });
   }
 
   setShowArchived(showArchived: boolean): void {

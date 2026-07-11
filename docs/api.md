@@ -276,6 +276,17 @@ Learning-path commands are local and explicit:
 - `get_learning_trail { thread_id }` returns the source thread/version/anchor,
   branch, question, and reason for backtracking, or `null` for a root thread.
 
+Concept-map commands operate only on explicit `data-cfy-concepts` evidence:
+
+- `get_concept_map { project_id }` returns at most 500 concepts, 2,000 latest-
+  version evidence mentions, and 1,000 user-pinned links plus `truncated`.
+- `pin_concept_link { project_id, from_concept_id, to_concept_id, label }` and
+  `remove_concept_link { id }` manage explicit directed relationships.
+- `merge_concepts { source_concept_id, target_concept_id }` folds duplicate
+  evidence into the target while preserving non-self pinned relationships.
+- `distinguish_concept { mention_id, new_name }` moves one overloaded mention
+  to a separately named concept. No opaque similarity merge runs automatically.
+
 **Per-run override (`run_override?`, epic conceptify-e7m):** every run-starting
 flow command (`ask_follow_ups`, `ask_single_comment`, `apply_to_artifact`,
 `ask_from_app`) accepts an optional `run_override` object `{ adapter?, model? }`

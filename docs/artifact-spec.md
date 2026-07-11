@@ -104,6 +104,16 @@ The reason says why the branch follows from this answer. Conceptify extracts
 these hints on save for reuse on project home; generated markup never launches
 work by itself.
 
+### 1.3 Explicit concept metadata
+
+Meaningful headings, figures/diagram nodes, and next-question branches MAY
+carry `data-cfy-concepts="Concept A|Concept B"` alongside their stable
+`data-cfy-id`. Use one to five short domain concepts that a reader would
+recognize, separated by `|`; do not dump keywords or infer hidden similarity.
+Conceptify incrementally indexes the latest saved version of each thread so the
+project map can jump back to exact evidence. Users may pin relationships and
+explicitly merge duplicate concepts or distinguish an overloaded mention.
+
 ## 2. Rendering targets (FR-3.2)
 
 Every artifact MUST render correctly in **both**:

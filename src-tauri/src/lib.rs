@@ -5,6 +5,7 @@ mod artifacts;
 mod catalog;
 mod commands;
 mod comments;
+mod concept_map;
 mod context;
 mod db;
 mod flows;
@@ -143,6 +144,11 @@ pub fn run() {
             learning::dismiss_learning_suggestion,
             learning::record_learning_trail,
             learning::get_learning_trail,
+            concept_map::get_concept_map,
+            concept_map::pin_concept_link,
+            concept_map::remove_concept_link,
+            concept_map::distinguish_concept,
+            concept_map::merge_concepts,
             runs::cancel_run,
         ])
         .setup(|app| {

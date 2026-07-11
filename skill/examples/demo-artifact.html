@@ -842,7 +842,7 @@ pre.cfy-fallback code { padding-inline: var(--cfy-space-5); }
     </ul>
   </nav>
 
-  <h2 id="sec-mental-model" data-cfy-id="sec-mental-model">The mental model</h2>
+  <h2 id="sec-mental-model" data-cfy-id="sec-mental-model" data-cfy-concepts="Artifact serving|Opaque origin|Sandboxing">The mental model</h2>
 
   <p>The viewer never loads artifact files directly. Instead the Rust core registers a
   <dfn class="cfy-term">custom URL scheme</dfn> — <code>artifact://</code> — and answers each request itself: read the
@@ -869,7 +869,7 @@ iframe: Sandboxed iframe\n(opaque origin)
 disk -> handler: read bytes
 handler -> iframe: CSP + bridge
 -->
-  <figure class="cfy-diagram" data-cfy-id="fig-serve-path">
+  <figure class="cfy-diagram" data-cfy-id="fig-serve-path" data-cfy-concepts="Artifact serving|Bridge protocol">
     <svg viewBox="0 40 700 85" role="img" aria-label="Flow diagram: artifact file on disk is read by the artifact:// handler, which adds the CSP and bridge script and serves it into the sandboxed iframe.">
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -1085,10 +1085,10 @@ handler -> iframe: CSP + bridge
 
   <h2 data-cfy-id="sec-next-questions">Where to go next</h2>
   <ul class="cfy-next-questions">
-    <li data-cfy-id="next-trace-one-load" data-cfy-next-question="Can you trace one artifact load through the real Rust functions?" data-cfy-reason="Turns the serving-path mental model into a concrete code-level example." data-cfy-branch="example">
+    <li data-cfy-id="next-trace-one-load" data-cfy-next-question="Can you trace one artifact load through the real Rust functions?" data-cfy-reason="Turns the serving-path mental model into a concrete code-level example." data-cfy-branch="example" data-cfy-concepts="Artifact serving">
       <strong>Trace one real load</strong><br>Follow a request through the exact Rust functions and response construction.
     </li>
-    <li data-cfy-id="next-sandbox-tradeoff" data-cfy-next-question="What capabilities do we trade away by using an opaque-origin sandbox?" data-cfy-reason="Tests the design against its usability and security trade-offs." data-cfy-branch="tradeoff">
+    <li data-cfy-id="next-sandbox-tradeoff" data-cfy-next-question="What capabilities do we trade away by using an opaque-origin sandbox?" data-cfy-reason="Tests the design against its usability and security trade-offs." data-cfy-branch="tradeoff" data-cfy-concepts="Opaque origin|Sandboxing">
       <strong>Examine the trade-off</strong><br>Compare the containment benefit with capabilities the artifact gives up.
     </li>
   </ul>

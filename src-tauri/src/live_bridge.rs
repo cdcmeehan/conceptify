@@ -177,6 +177,15 @@ async fn live_bridge() {
             crate::skill_catalog::get_response_preferences,
             crate::skill_catalog::save_response_preference,
             crate::skill_catalog::reset_response_preference,
+            crate::learning::list_learning_suggestions,
+            crate::learning::dismiss_learning_suggestion,
+            crate::learning::record_learning_trail,
+            crate::learning::get_learning_trail,
+            crate::concept_map::get_concept_map,
+            crate::concept_map::pin_concept_link,
+            crate::concept_map::remove_concept_link,
+            crate::concept_map::distinguish_concept,
+            crate::concept_map::merge_concepts,
             crate::runs::cancel_run,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
