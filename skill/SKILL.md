@@ -249,6 +249,13 @@ of how such systems usually work.
    the order a request/value/event actually travels.
 7. **Summary**: close with a short "what to remember" section — the mental model
    restated plus the two or three load-bearing facts.
+8. **Useful next branches**: for STANDARD/DEEP artifacts, end with two to four
+   specific editable paths such as example, counterexample, mechanism,
+   trade-off, or prerequisite—not generic “more details.” Use
+   `<li data-cfy-id="next-…" data-cfy-next-question="…"
+   data-cfy-reason="…" data-cfy-branch="example|counterexample|mechanism|tradeoff|prerequisite">`
+   inside `<ul class="cfy-next-questions">`. State why each follows. These are
+   inert suggestions until the reader explicitly edits and launches one.
 
 **Quality dos and don'ts:**
 

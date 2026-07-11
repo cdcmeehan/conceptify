@@ -93,6 +93,17 @@ authoring structure, never by clipping generated prose after the fact:
 COMPACT artifacts may omit the outline and deep-dive layer when the always-
 visible answer is already short enough to scan.
 
+### 1.2 Next-question branches
+
+An artifact MAY end useful conceptual boundaries with two to four editable
+next-question branches. Each branch is an element carrying a stable
+`data-cfy-id`, `data-cfy-next-question`, `data-cfy-reason`, and
+`data-cfy-branch`. Branch is one of `example`, `counterexample`, `mechanism`,
+`tradeoff`, or `prerequisite`; generic “more detail” prompts are discouraged.
+The reason says why the branch follows from this answer. Conceptify extracts
+these hints on save for reuse on project home; generated markup never launches
+work by itself.
+
 ## 2. Rendering targets (FR-3.2)
 
 Every artifact MUST render correctly in **both**:

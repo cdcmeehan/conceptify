@@ -1315,9 +1315,9 @@ class AppStore {
     return result.id;
   }
 
-  async launchFirstQuestion(projectId: string, question: string): Promise<void> {
+  async launchFirstQuestion(projectId: string, question: string, select = true): Promise<string | null> {
     const trimmed = question.trim();
-    if (trimmed === "") return;
+    if (trimmed === "") return null;
     const preferences = await api.getResponsePreferences(projectId).catch(() => null);
     const started = await api.askFromApp(
       projectId,
@@ -1330,7 +1330,8 @@ class AppStore {
     );
     await this.refetchProjects();
     await this.refetchThreads(projectId);
-    this.selectThread(started.thread_id);
+    if (select) this.selectThread(started.thread_id);
+    return started.thread_id;
   }
 
   /**

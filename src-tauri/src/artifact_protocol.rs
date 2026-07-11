@@ -799,6 +799,7 @@ mod tests {
             "selection",
             "selection_cleared",
             "element_click",
+            "suggestion_click",
             "set_highlights",
             "scroll_to_anchor",
         ] {

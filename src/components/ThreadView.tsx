@@ -47,6 +47,7 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
   const [diffError, setDiffError] = useState<string | null>(null);
   const [selectedChange, setSelectedChange] = useState(0);
   const [diffNudge, setDiffNudge] = useState(false);
+  const [learningTrail, setLearningTrail] = useState<api.LearningTrail | null>(null);
 
   // Register the viewer iframe with the bridge (src/lib/bridge.ts owns the
   // postMessage handshake; comment UI riding on it is 94m.3/94m.6). Stable
@@ -62,6 +63,15 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
   }, []);
 
   const threadId = thread?.id ?? "";
+  useEffect(() => {
+    if (threadId === "") {
+      setLearningTrail(null);
+      return;
+    }
+    let current = true;
+    void api.getLearningTrail(threadId).then((trail) => { if (current) setLearningTrail(trail); }).catch(() => { if (current) setLearningTrail(null); });
+    return () => { current = false; };
+  }, [threadId]);
   const versions = state.artifactVersions;
   const latestVersion = versions.length > 0 ? versions[versions.length - 1].version : null;
   // The concrete version the iframe shows. "latest" tracks the newest known
@@ -281,6 +291,16 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
             ))}
           </div>
         ) : null}
+        {learningTrail != null ? (
+          <div class="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
+            <span class="cfy-chip bg-info-bg text-info">{learningTrail.branch}</span>
+            <span>Continues from</span>
+            <button type="button" onClick={() => appStore.selectThread(learningTrail.source_thread_id)} class="font-medium text-accent-ink hover:underline">
+              {learningTrail.source_thread_title} · v{learningTrail.source_artifact_version}
+            </button>
+            <span>— {learningTrail.reason}</span>
+          </div>
+        ) : null}
         {(viewingOldVersion || openError != null) && (
           <div class="mt-2 flex items-center gap-3">
             {viewingOldVersion && (
@@ -321,6 +341,7 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
               {resolvedVersion != null && (
                 <ArtifactCommentLayer
                   key={thread.id}
+                  projectId={thread.project_id}
                   threadId={thread.id}
                   artifactVersion={resolvedVersion}
                   iframeRef={iframeElRef}

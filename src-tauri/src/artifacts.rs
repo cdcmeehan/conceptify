@@ -471,6 +471,8 @@ pub fn save_artifact_for_run(
         )?;
     }
     threads::set_thread_status(&tx, thread_id, ThreadStatus::Ready)?;
+    let text = std::str::from_utf8(bytes).expect("validated artifact is UTF-8");
+    crate::learning::replace_for_artifact(&tx, &project_id, thread_id, version, text)?;
     if let (Some(run_id), Some(resolution)) = (source_run_id, resolution) {
         tx.execute(
             "UPDATE follow_up_runs
@@ -486,7 +488,6 @@ pub fn save_artifact_for_run(
     // insert so an advanced `artifact_version` satisfies the composite FK.
     // `bytes` is valid UTF-8 here (validation would have rejected otherwise).
     let reattached = if version > 1 {
-        let text = std::str::from_utf8(bytes).expect("validated artifact is UTF-8");
         crate::anchoring::reattach_thread_comments(&tx, text, thread_id, version)?
     } else {
         Vec::new()

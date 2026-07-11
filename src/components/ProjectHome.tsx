@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
-import type { Project, RunActivity, Thread } from "../lib/api";
-import { getProjectGoal, getTopicContext, setProjectGoal, setTopicContext } from "../lib/api";
+import type { LearningSuggestion, Project, RunActivity, Thread } from "../lib/api";
+import { dismissLearningSuggestion, getProjectGoal, getTopicContext, listLearningSuggestions, recordLearningTrail, setProjectGoal, setTopicContext } from "../lib/api";
 import { appStore } from "../store/appStore";
 
 export function ProjectHome({ project, threads, activity }: { project: Project; threads: Thread[]; activity: RunActivity[] }) {
@@ -10,18 +10,31 @@ export function ProjectHome({ project, threads, activity }: { project: Project; 
   const [topicContext, setTopicContextState] = useState({ notes: "", links: [] as string[], files: [] as string[] });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [learningSuggestions, setLearningSuggestions] = useState<LearningSuggestion[]>([]);
+  const [selectedSuggestion, setSelectedSuggestion] = useState<LearningSuggestion | null>(null);
+  const refreshSuggestions = () => listLearningSuggestions(project.id).then(setLearningSuggestions).catch(() => setLearningSuggestions([]));
   useEffect(() => {
     void getProjectGoal(project.id).then(setGoal).catch(() => setGoal(""));
     void getTopicContext(project.id).then((context) => { setTopicContextState(context); setTopicNotes(context.notes); }).catch(() => undefined);
+    void refreshSuggestions();
   }, [project.id]);
   const active = activity.filter((item) => item.project_id === project.id && ["queued", "starting", "running", "throttled", "cancelling"].includes(item.status));
-  const suggestions = threads.length === 0
+  const starterSuggestions = threads.length === 0
     ? ["Give me a useful overview", "Show me the architecture", "What are the key concepts?", "Create a learning path"]
     : ["What should I understand next?", "Connect the recent explanations", "Show me an important trade-off"];
   async function ask() {
     if (question.trim() === "" || busy) return;
     setBusy(true); setError(null);
-    try { await appStore.launchFirstQuestion(project.id, question); setQuestion(""); }
+    try {
+      const launchedThreadId = await appStore.launchFirstQuestion(project.id, question, selectedSuggestion == null);
+      if (selectedSuggestion != null && launchedThreadId != null) {
+        await recordLearningTrail(selectedSuggestion.id, launchedThreadId, question);
+        appStore.selectThread(launchedThreadId);
+      }
+      setQuestion("");
+      setSelectedSuggestion(null);
+      await refreshSuggestions();
+    }
     catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   }
@@ -56,7 +69,26 @@ export function ProjectHome({ project, threads, activity }: { project: Project; 
         <section class="cfy-card mt-4 p-4">
           <p class="cfy-label">Ask the next question</p>
           <textarea value={question} onInput={(e) => setQuestion((e.currentTarget as HTMLTextAreaElement).value)} rows={3} class="cfy-input mt-2 resize-y" placeholder="What would you like to understand next?" />
-          <div class="mt-2 flex flex-wrap gap-1.5">{suggestions.map((value) => <button type="button" key={value} onClick={() => setQuestion(value)} class="rounded-full border border-line px-2 py-1 text-[10px] text-muted hover:border-accent/40 hover:text-ink">{value}</button>)}</div>
+          {learningSuggestions.length > 0 ? (
+            <ul class="mt-2 grid gap-1.5 sm:grid-cols-2" aria-label="Suggested next questions">
+              {learningSuggestions.slice(0, 6).map((suggestion) => (
+                <li key={suggestion.id} class={`rounded-ctl border p-2 ${selectedSuggestion?.id === suggestion.id ? "border-accent/50 bg-accent-bg/35" : "border-line bg-paper"}`}>
+                  <button type="button" onClick={() => { setSelectedSuggestion(suggestion); setQuestion(suggestion.question); }} class="w-full text-left">
+                    <span class="cfy-chip bg-well text-muted">{suggestion.branch}</span>
+                    <span class="mt-1 block text-[11px] font-medium text-ink">{suggestion.question}</span>
+                    <span class="mt-1 block text-[9px] leading-snug text-muted">{suggestion.reason} · from {suggestion.source_thread_title}</span>
+                  </button>
+                  <div class="mt-1 flex justify-end gap-1">
+                    <button type="button" onClick={() => appStore.selectThread(suggestion.source_thread_id)} class="cfy-btn cfy-btn-ghost h-6 px-1.5 text-[9px]">View source</button>
+                    <button type="button" onClick={() => void dismissLearningSuggestion(suggestion.id).then(() => { if (selectedSuggestion?.id === suggestion.id) setSelectedSuggestion(null); return refreshSuggestions(); })} class="cfy-btn cfy-btn-ghost h-6 px-1.5 text-[9px]">Dismiss</button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div class="mt-2 flex flex-wrap gap-1.5">{starterSuggestions.map((value) => <button type="button" key={value} onClick={() => { setSelectedSuggestion(null); setQuestion(value); }} class="rounded-full border border-line px-2 py-1 text-[10px] text-muted hover:border-accent/40 hover:text-ink">{value}</button>)}</div>
+          )}
+          {selectedSuggestion != null && <p class="mt-2 text-[9px] text-muted">Edit freely before launching. This branch will link back to {selectedSuggestion.source_thread_title}; nothing runs until you choose Ask.</p>}
           {error != null && <p class="mt-2 text-xs text-danger">{error}</p>}
           <div class="mt-3 flex justify-end"><button type="button" onClick={() => void ask()} disabled={busy || question.trim() === ""} class="cfy-btn cfy-btn-primary">{busy ? "Asking…" : "Ask"}</button></div>
         </section>

@@ -42,6 +42,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(FOLLOW_UP_RUNS_NOTIFICATIONS),
         M::up(CONFLICT_CANDIDATES),
         M::up(RESPONSE_METADATA),
+        M::up(LEARNING_SUGGESTIONS),
     ])
 }
 
@@ -422,6 +423,31 @@ ALTER TABLE artifacts ADD COLUMN response_intent_json TEXT NULL;
 ALTER TABLE artifacts ADD COLUMN selected_skills_json TEXT NULL;
 ";
 
+/// Durable, editable next-question branches extracted from artifact markup.
+/// A launched row is also the source→destination trail; retaining dismissed
+/// and superseded rows makes decisions and backtracking stable across updates.
+const LEARNING_SUGGESTIONS: &str = "
+CREATE TABLE learning_suggestions (
+    id                      TEXT PRIMARY KEY,
+    project_id              TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_thread_id        TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    source_artifact_version INTEGER NOT NULL,
+    source_cfy_id           TEXT NOT NULL,
+    branch                  TEXT NOT NULL CHECK (branch IN ('example', 'counterexample', 'mechanism', 'tradeoff', 'prerequisite')),
+    question                TEXT NOT NULL,
+    reason                  TEXT NOT NULL,
+    status                  TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'dismissed', 'launched', 'superseded')),
+    launched_thread_id      TEXT NULL REFERENCES threads(id) ON DELETE SET NULL,
+    edited_question         TEXT NULL,
+    created_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (source_thread_id, source_artifact_version, source_cfy_id)
+);
+CREATE INDEX idx_learning_suggestions_project_status
+    ON learning_suggestions(project_id, status, created_at DESC);
+CREATE UNIQUE INDEX idx_learning_suggestions_launched_thread
+    ON learning_suggestions(launched_thread_id) WHERE launched_thread_id IS NOT NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,7 +455,7 @@ mod tests {
 
     /// `user_version` after the full chain — the count of `M::up` entries in
     /// [`migrations`].
-    const LATEST: usize = 17;
+    const LATEST: usize = 18;
 
     /// Position of the durable scheduler metadata migration.
     const RUN_QUEUE: usize = 13;
@@ -441,6 +467,7 @@ mod tests {
     const RUN_NOTIFICATIONS: usize = 15;
     const CONFLICTS: usize = 16;
     const RESPONSE_PROFILE: usize = 17;
+    const LEARNING_PATHS: usize = 18;
 
     /// Position of the `follow_up_runs.override_json` ALTER (the 11th
     /// migration), pinned explicitly — like `ASK_MODE` below — so appending
@@ -1043,5 +1070,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored, (intent.to_owned(), skills.to_owned()));
+    }
+
+    #[test]
+    fn add_learning_suggestions_tracks_launch_trails() {
+        let mut conn = fresh_conn();
+        let migrations = migrations();
+        migrations.to_version(&mut conn, LEARNING_PATHS - 1).unwrap();
+        seed_thread(&conn);
+        migrations.to_version(&mut conn, LEARNING_PATHS).unwrap();
+        conn.execute(
+            "INSERT INTO learning_suggestions
+                 (id, project_id, source_thread_id, source_artifact_version,
+                  source_cfy_id, branch, question, reason)
+             VALUES ('s1', 'p1', 't1', 1, 'next-example', 'example',
+                     'Show an example?', 'Applies the mechanism.')",
+            [],
+        )
+        .unwrap();
     }
 }

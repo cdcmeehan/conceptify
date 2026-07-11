@@ -8,6 +8,7 @@ mod comments;
 mod context;
 mod db;
 mod flows;
+mod learning;
 // Live-checkpoint IPC bridge (test-only, #[ignore]d + env-gated): drives the
 // real command/flow/run stack headlessly for end-to-end verification against
 // the real frontend in a plain browser. See src/live_bridge.rs +
@@ -138,6 +139,10 @@ pub fn run() {
             skill_catalog::get_response_preferences,
             skill_catalog::save_response_preference,
             skill_catalog::reset_response_preference,
+            learning::list_learning_suggestions,
+            learning::dismiss_learning_suggestion,
+            learning::record_learning_trail,
+            learning::get_learning_trail,
             runs::cancel_run,
         ])
         .setup(|app| {

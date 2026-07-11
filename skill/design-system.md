@@ -81,6 +81,7 @@ artifact-only rules).
 | `<details class="cfy-details">` | Collapsible deep-dive; `<summary>` first. Works with JS disabled. |
 | `<nav class="cfy-outline" aria-label="On this page">` | Sticky semantic-section outline for STANDARD/DEEP artifacts; use a `<ul>` of native hash links. The bridge marks the current location and restores disclosures on history navigation. |
 | `<details class="cfy-details cfy-deep-dive" id="…">` | Optional generated depth. Keep orientation/core outside; print exposes the body even when closed. |
+| `<ul class="cfy-next-questions">` | Two to four semantic next-question branches. Each `<li>` carries the `data-cfy-next-question` contract; show a specific question plus why it follows. |
 | `<figure data-cfy-id="fig-…">` + `<figcaption>` | Figure + caption (caption gets a hairline rule; bold lead-in via `<strong>`). |
 | `<figure class="cfy-diagram">` | Adds the tinted diagram frame; put inline SVG inside. Add `cfy-hand` for the hand-drawn flavor. |
 | `<div class="cfy-table-wrap">` + `<table class="cfy-table">` | Print-style table (horizontal hairlines only); `<caption>` renders below. Add `cfy-compare` when the first column is `<th scope="row">` row headers. |

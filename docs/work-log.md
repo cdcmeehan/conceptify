@@ -485,3 +485,19 @@ generation; stored v1 profiles without the additive field default safely to
 require accessible descriptions and textual/static fallbacks, preserve exact
 chart values, and explicitly reject decorative diagrams. Unsupported forms
 must be called out briefly rather than silently substituted.
+
+**Next questions and trails (`conceptify-dqb.4`).** STANDARD/DEEP artifact
+authors now provide two to four semantic next branches—example,
+counterexample, mechanism, trade-off, or prerequisite—with an editable question
+and a concise reason, rather than generic “more detail” filler. Save-time
+extraction persists these hints without another model run; a newer artifact
+supersedes only still-active hints while preserving launched/dismissed history.
+
+Suggestions are reusable from both the artifact and project home. Choosing one
+only fills an editor: no work starts until Launch/Ask, and the edited wording is
+what the new thread receives. Readers can dismiss weak branches, inspect their
+source, and backtrack from a launched thread to the exact source
+thread/version/anchor and reason. A bridge probe verified the suggestion
+gesture emits only its bounded semantic payload and cannot also comment or
+advance an artifact. Domain tests cover extraction, invalid-branch rejection,
+editing, dismissal, same-project launch validation, and durable backtracking.

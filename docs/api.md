@@ -262,6 +262,20 @@ The in-app ask flow (FR-5.1/5.2/5.3, bead 959.1/959.2) adds three more:
   while `false` means Retry re-derives the *current* settings defaults, so
   the UI only promises reuse when an override actually exists.
 
+Learning-path commands are local and explicit:
+
+- `list_learning_suggestions { project_id }` returns active semantic branches
+  extracted from saved artifacts, including source thread/version/anchor,
+  branch kind, editable question, and why it relates.
+- `dismiss_learning_suggestion { id }` hides one low-value branch without
+  launching work.
+- `record_learning_trail { suggestion_id, launched_thread_id,
+  edited_question }` marks an explicitly launched branch and stores the edited
+  wording as a durable source→destination link. Both threads must share a
+  project.
+- `get_learning_trail { thread_id }` returns the source thread/version/anchor,
+  branch, question, and reason for backtracking, or `null` for a root thread.
+
 **Per-run override (`run_override?`, epic conceptify-e7m):** every run-starting
 flow command (`ask_follow_ups`, `ask_single_comment`, `apply_to_artifact`,
 `ask_from_app`) accepts an optional `run_override` object `{ adapter?, model? }`
@@ -1836,6 +1850,7 @@ shell→artifact *commands* (its `event.source` is its own window, not
 | `selection` | `anchor` (a `text` anchor), `rect` (selection bounding rect) | A non-empty text selection reported on **gesture completion**, never mid-drag: pointer selections post once on release (`pointerup`/`pointercancel`); keyboard selections (shift+arrows, Cmd+A), which have no release, post after a ~300 ms settle debounce. `cfy_id`/`start`/`end` are present when the selection has a `data-cfy-id` ancestor; `quote` always is. |
 | `selection_cleared` | — | The previously reported selection collapsed/vanished (dismiss the popover). Also sent when the user presses Escape inside the artifact: the iframe holds keyboard focus after a drag, so the bridge translates Escape into clearing the live selection (the shell's own Escape handler can't see the key). A `set_highlights` application never re-reports the still-live selection its DOM mutations perturb (the bridge suppresses its own mutation-induced `selectionchange`). |
 | `element_click` | `anchor` (an `element` anchor), `rect` (element bounding rect) | Click, Enter, or Space on a `data-cfy-id`-bearing element (nearest such ancestor of the click target). Suppressed for clicks that end a text selection and for clicks on interactive elements (`a[href]`, `button`, form controls, `summary`, `label`, `[contenteditable]`). Anchored SVG nodes are made focusable; arrow keys move among nodes in the same diagram. Diagram activation is consumed before click-to-advance handlers, so inspecting a node cannot advance a slide-like artifact. |
+| `suggestion_click` | `cfy_id`, `question`, `reason`, `branch`, `rect` | Explicit activation of a `data-cfy-next-question` branch. The shell opens an editable launch dialog; the bridge consumes the gesture so it cannot also comment, navigate, or advance a slide. No run starts from this message alone. |
 
 ### Shell → artifact
 

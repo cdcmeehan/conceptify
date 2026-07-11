@@ -429,6 +429,20 @@
       if (sel && !sel.isCollapsed) return; // end of a selection drag, not a click
       var target = ev.target instanceof Element ? ev.target : null;
       if (!target) return;
+      var suggestion = target.closest("[data-cfy-next-question][data-cfy-id]");
+      if (suggestion) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        post({
+          type: "suggestion_click",
+          cfy_id: suggestion.getAttribute("data-cfy-id"),
+          question: suggestion.getAttribute("data-cfy-next-question") || "",
+          reason: suggestion.getAttribute("data-cfy-reason") || "Builds on this explanation.",
+          branch: suggestion.getAttribute("data-cfy-branch") || "mechanism",
+          rect: rectOf(suggestion.getBoundingClientRect()),
+        });
+        return;
+      }
       // Don't hijack genuinely interactive artifact elements.
       if (isInteractiveTarget(target)) return;
       var host = target.closest("[data-cfy-id]");

@@ -400,6 +400,34 @@ hr::after {
   outline: 1px solid var(--cfy-line);
 }
 
+/* ---- Useful next questions: durable branches, never auto-running -------- */
+.cfy-next-questions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: var(--cfy-space-3);
+  margin: var(--cfy-space-4) 0 var(--cfy-space-6);
+  padding: 0;
+  list-style: none;
+}
+.cfy-next-questions > li {
+  padding: var(--cfy-space-4);
+  border: 1px solid var(--cfy-line);
+  border-radius: var(--cfy-radius);
+  background: var(--cfy-surface);
+  cursor: pointer;
+}
+.cfy-next-questions > li::before {
+  content: attr(data-cfy-branch);
+  display: block;
+  margin-bottom: var(--cfy-space-2);
+  color: var(--cfy-accent);
+  font-family: var(--cfy-font-sans);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 /* ---- Collapsible deep-dive: <details class="cfy-details"> ---------------
    <summary> first, then any flow content. Open state is styled;
    fully usable with JS disabled (native disclosure).                     */

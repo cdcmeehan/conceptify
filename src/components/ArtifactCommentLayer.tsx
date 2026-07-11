@@ -181,11 +181,21 @@ function computeHighlights(
 }
 
 interface Props {
+  projectId: string;
   threadId: string;
   /** The concrete version currently in the viewer ("latest" already resolved). */
   artifactVersion: number;
   iframeRef: RefObject<HTMLIFrameElement | null>;
   onOpenSidebar: () => void;
+}
+
+interface PendingTrailSuggestion {
+  suggestion: api.LearningSuggestion;
+  question: string;
+  left: number;
+  top: number;
+  busy: boolean;
+  error: string | null;
 }
 
 const EXPLORATION_INTENTS: Record<NonNullable<PopoverState["action"]>, api.ResponseIntent> = {
@@ -212,9 +222,10 @@ function explorationMeta(anchor: Record<string, unknown> | null): Record<string,
   return anchor.exploration as Record<string, unknown>;
 }
 
-export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onOpenSidebar }: Props) {
+export function ArtifactCommentLayer({ projectId, threadId, artifactVersion, iframeRef, onOpenSidebar }: Props) {
   const state = useAppStore();
   const [popover, setPopover] = useState<PopoverState | null>(null);
+  const [trailSuggestion, setTrailSuggestion] = useState<PendingTrailSuggestion | null>(null);
 
   // Refs so the single, stably-registered bridge subscription always reads
   // current values (no re-subscribe churn on version switch / re-render).
@@ -313,6 +324,19 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
         case "element_click":
           if (!isDirty(popoverRef.current)) openElementToolbar(msg.anchor, msg.rect);
           break;
+        case "suggestion_click": {
+          const iframe = iframeRef.current;
+          if (iframe == null) break;
+          const position = placePopover(iframe, msg.rect, 250);
+          setPopover(null);
+          void api.listLearningSuggestions(projectId).then((suggestions) => {
+            const suggestion = suggestions.find((item) => item.source_thread_id === threadIdRef.current && item.source_cfy_id === msg.cfy_id);
+            if (suggestion != null) {
+              setTrailSuggestion({ suggestion, question: msg.question || suggestion.question, ...position, busy: false, error: null });
+            }
+          });
+          break;
+        }
         case "selection_cleared": {
           const current = popoverRef.current;
           // Once the user deliberately opens the composer, shell interactions
@@ -331,16 +355,20 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
 
   // Escape + click-away cancel (explicit gestures — win over the dirty guard).
   useEffect(() => {
-    if (popover == null) return;
+    if (popover == null && trailSuggestion == null) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.stopPropagation();
         setPopover(null);
+        setTrailSuggestion(null);
       }
     };
     const onMouseDown = (e: MouseEvent) => {
       const el = popoverElRef.current;
-      if (el != null && e.target instanceof Node && !el.contains(e.target)) setPopover(null);
+      if (el != null && e.target instanceof Node && !el.contains(e.target)) {
+        setPopover(null);
+        setTrailSuggestion(null);
+      }
     };
     window.addEventListener("keydown", onKeyDown, true);
     // Click (not mousedown) runs after a control's own handler, so destination
@@ -350,7 +378,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("click", onMouseDown);
     };
-  }, [popover != null]);
+  }, [popover != null, trailSuggestion != null]);
 
   // Autofocus the textarea when a popover opens/retargets (not on every keystroke).
   useEffect(() => {
@@ -497,12 +525,67 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
     ? 16
     : Math.max(16, window.innerWidth - iframeRef.current.getBoundingClientRect().right + 16);
 
-  if (popover == null && explorationHistory.length === 0) return null;
+  if (popover == null && trailSuggestion == null && explorationHistory.length === 0) return null;
 
   // Keep mousedowns inside the popover from bubbling out to the artifact / list
   // panes. (The capture-phase click-away listener already ignores clicks whose
   // target is inside the popover element.)
   const positionStyle = popover == null ? undefined : { left: `${popover.left}px`, top: `${popover.top}px` };
+
+  if (trailSuggestion != null) {
+    const launch = async () => {
+      if (trailSuggestion.busy || trailSuggestion.question.trim() === "") return;
+      setTrailSuggestion({ ...trailSuggestion, busy: true, error: null });
+      try {
+        const launchedThreadId = await appStore.launchFirstQuestion(projectId, trailSuggestion.question, false);
+        if (launchedThreadId != null) {
+          await api.recordLearningTrail(trailSuggestion.suggestion.id, launchedThreadId, trailSuggestion.question);
+          appStore.selectThread(launchedThreadId);
+        }
+        setTrailSuggestion(null);
+      } catch (error) {
+        setTrailSuggestion((current) => current == null ? null : { ...current, busy: false, error: String(error) });
+      }
+    };
+    return (
+      <div
+        ref={popoverElRef}
+        role="dialog"
+        aria-label="Explore next question"
+        class="cfy-popover fixed z-50 w-80 p-3"
+        style={{ left: `${trailSuggestion.left}px`, top: `${trailSuggestion.top}px` }}
+        onMouseDown={(event) => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div class="flex items-center justify-between gap-2">
+          <p class="cfy-label">Explore next · {trailSuggestion.suggestion.branch}</p>
+          <button type="button" onClick={() => setTrailSuggestion(null)} class="cfy-btn cfy-btn-ghost h-6 px-1.5 text-[10px]">Close</button>
+        </div>
+        <p class="mt-1 text-[10px] leading-snug text-muted">{trailSuggestion.suggestion.reason}</p>
+        <textarea
+          value={trailSuggestion.question}
+          rows={3}
+          onInput={(event) => setTrailSuggestion((current) => current == null ? null : { ...current, question: (event.currentTarget as HTMLTextAreaElement).value })}
+          class="cfy-input mt-2 resize-none"
+          aria-label="Edit suggested question"
+        />
+        <p class="mt-1 text-[9px] text-muted">Nothing runs until you launch. The new thread will link back here.</p>
+        {trailSuggestion.error != null && <p class="mt-1 text-[10px] text-danger">{trailSuggestion.error}</p>}
+        <div class="mt-2 flex justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => void api.dismissLearningSuggestion(trailSuggestion.suggestion.id).then(() => setTrailSuggestion(null))}
+            class="cfy-btn cfy-btn-ghost"
+          >
+            Dismiss
+          </button>
+          <button type="button" onClick={() => void launch()} disabled={trailSuggestion.busy || trailSuggestion.question.trim() === ""} class="cfy-btn cfy-btn-primary">
+            {trailSuggestion.busy ? "Launching…" : "Launch thread"}
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // Stage 1: the compact action toolbar for a fresh selection.
   if (popover?.stage === "toolbar") {

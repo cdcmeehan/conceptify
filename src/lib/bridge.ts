@@ -86,7 +86,8 @@ export type BridgeMessage =
   | { type: "ready" }
   | { type: "selection"; anchor: TextAnchor; rect: BridgeRect }
   | { type: "selection_cleared" }
-  | { type: "element_click"; anchor: ElementAnchor; rect: BridgeRect };
+  | { type: "element_click"; anchor: ElementAnchor; rect: BridgeRect }
+  | { type: "suggestion_click"; cfy_id: string; question: string; reason: string; branch: string; rect: BridgeRect };
 
 /** One decoration for `setHighlights`; `key` is the comment id (used by
  *  `scrollToAnchor` to pulse the matching decoration). */
@@ -180,6 +181,17 @@ function parseMessage(data: unknown): BridgeMessage | null {
     case "element_click":
       if (isElementAnchor(data.anchor) && isRect(data.rect)) {
         return { type: "element_click", anchor: data.anchor, rect: data.rect };
+      }
+      return null;
+    case "suggestion_click":
+      if (
+        typeof data.cfy_id === "string" &&
+        typeof data.question === "string" &&
+        typeof data.reason === "string" &&
+        typeof data.branch === "string" &&
+        isRect(data.rect)
+      ) {
+        return { type: "suggestion_click", cfy_id: data.cfy_id, question: data.question, reason: data.reason, branch: data.branch, rect: data.rect };
       }
       return null;
     default:

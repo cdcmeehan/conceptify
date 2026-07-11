@@ -175,6 +175,52 @@ export function listThreads(projectId: string): Promise<Thread[]> {
   return invoke<Thread[]>("list_threads", { project_id: projectId });
 }
 
+export interface LearningSuggestion {
+  id: string;
+  project_id: string;
+  source_thread_id: string;
+  source_thread_title: string;
+  source_artifact_version: number;
+  source_cfy_id: string;
+  branch: "example" | "counterexample" | "mechanism" | "tradeoff" | "prerequisite";
+  question: string;
+  reason: string;
+  status: "active" | "dismissed" | "launched" | "superseded";
+  launched_thread_id: string | null;
+  edited_question: string | null;
+}
+
+export interface LearningTrail {
+  suggestion_id: string;
+  source_thread_id: string;
+  source_thread_title: string;
+  source_artifact_version: number;
+  source_cfy_id: string;
+  branch: LearningSuggestion["branch"];
+  question: string;
+  reason: string;
+}
+
+export function listLearningSuggestions(projectId: string): Promise<LearningSuggestion[]> {
+  return invoke<LearningSuggestion[]>("list_learning_suggestions", { project_id: projectId });
+}
+
+export function dismissLearningSuggestion(id: string): Promise<boolean> {
+  return invoke<boolean>("dismiss_learning_suggestion", { id });
+}
+
+export function recordLearningTrail(suggestionId: string, launchedThreadId: string, editedQuestion: string): Promise<void> {
+  return invoke<void>("record_learning_trail", {
+    suggestion_id: suggestionId,
+    launched_thread_id: launchedThreadId,
+    edited_question: editedQuestion,
+  });
+}
+
+export function getLearningTrail(threadId: string): Promise<LearningTrail | null> {
+  return invoke<LearningTrail | null>("get_learning_trail", { thread_id: threadId });
+}
+
 export function renameProject(id: string, name: string): Promise<void> {
   return invoke<void>("rename_project", { id, name });
 }
