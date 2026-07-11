@@ -6,6 +6,62 @@
 
 use serde::{Deserialize, Serialize};
 
+// Artifact version diffing (bead conceptify-3nn.1)
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactDiffKind {
+    Unchanged,
+    Modified,
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextDiffKind {
+    Equal,
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextDiffHunk {
+    pub kind: TextDiffKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactBlockDiff {
+    /// `null` is the synthetic document fallback for changed visible text that
+    /// lives outside every `data-cfy-id` block.
+    pub cfy_id: Option<String>,
+    pub kind: ArtifactDiffKind,
+    /// Reordering is orthogonal to text classification. Insertion/deletion does
+    /// not mark every later block moved; this is computed from the common-id LCS.
+    pub moved: bool,
+    pub old_index: Option<usize>,
+    pub new_index: Option<usize>,
+    pub previous_cfy_id: Option<String>,
+    pub next_cfy_id: Option<String>,
+    pub old_text: Option<String>,
+    pub new_text: Option<String>,
+    pub hunks: Vec<TextDiffHunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactVersionDiffResponse {
+    pub thread_id: String,
+    pub from_version: i64,
+    pub to_version: i64,
+    /// Only changed/moved blocks. Identical versions therefore return `[]`.
+    pub changes: Vec<ArtifactBlockDiff>,
+    pub unchanged_count: usize,
+    /// True when duplicate ids or id-less changed content required a fallback.
+    pub degraded: bool,
+    pub warnings: Vec<String>,
+}
+
 /// Response shape for `GET /health` (unauthenticated, mirrored at
 /// `/api/v1/health`).
 ///

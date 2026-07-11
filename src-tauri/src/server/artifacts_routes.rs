@@ -8,11 +8,12 @@
 //! docs/artifact-spec.md §8 — implemented in `crate::artifacts`.
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Json, Router};
 use serde_json::json;
+use serde::Deserialize;
 use tauri::Emitter;
 
 use conceptify_types::{ArtifactIssue, SaveArtifactErrorResponse, SaveArtifactResponse};
@@ -34,7 +35,46 @@ pub fn router<R: tauri::Runtime>() -> Router<ApiState<R>> {
             "/threads/{thread_id}/artifact",
             axum::routing::post(save_artifact),
         )
+        .route(
+            "/threads/{thread_id}/artifacts/diff",
+            axum::routing::get(diff_versions),
+        )
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
+}
+
+#[derive(Deserialize)]
+struct DiffQuery {
+    from_version: i64,
+    to_version: i64,
+}
+
+async fn diff_versions<R: tauri::Runtime>(
+    State(state): State<ApiState<R>>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<DiffQuery>,
+) -> impl IntoResponse {
+    let tid = thread_id.clone();
+    let result = db::with_conn_result(&state.db, move |conn| {
+        crate::artifact_diff::diff_versions(conn, &tid, query.from_version, query.to_version)
+    })
+    .await;
+    match result {
+        Ok(diff) => (StatusCode::OK, Json(diff)).into_response(),
+        Err(error @ (crate::artifact_diff::DiffError::ThreadNotFound(_)
+        | crate::artifact_diff::DiffError::VersionNotFound { .. })) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+        Err(error) => {
+            eprintln!("[conceptify-server] artifact diff failed: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn save_artifact<R: tauri::Runtime>(
@@ -280,6 +320,16 @@ mod tests {
         builder.body(Body::from(body.to_owned())).unwrap()
     }
 
+    fn get_diff(thread_id: &str, from: i64, to: i64, token: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().method("GET").uri(format!(
+            "/api/v1/threads/{thread_id}/artifacts/diff?from_version={from}&to_version={to}"
+        ));
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
     fn valid_html(version: i64) -> String {
         format!(
             r#"<!doctype html>
@@ -366,6 +416,48 @@ mod tests {
         assert_eq!(payload["project_id"], h.project_id.as_str());
         assert_eq!(payload["thread_id"], h.thread_id.as_str());
         assert_eq!(payload["version"], 2);
+    }
+
+    #[tokio::test]
+    async fn diff_artifact_versions_over_http() {
+        let h = harness("diff");
+        for body in [
+            valid_html(1),
+            valid_html(2).replace(">T</h1>", ">Changed title</h1>"),
+        ] {
+            let response = h
+                .router
+                .clone()
+                .oneshot(post(&h.thread_id, &body, Some(TOKEN)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let unauthorized = h
+            .router
+            .clone()
+            .oneshot(get_diff(&h.thread_id, 1, 2, None))
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let response = h
+            .router
+            .clone()
+            .oneshot(get_diff(&h.thread_id, 1, 2, Some(TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["changes"][0]["cfy_id"], "sec-t");
+        assert_eq!(json["changes"][0]["kind"], "modified");
+
+        let missing = h
+            .router
+            .clone()
+            .oneshot(get_diff(&h.thread_id, 1, 99, Some(TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

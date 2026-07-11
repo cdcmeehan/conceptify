@@ -428,6 +428,12 @@ settings commands are the exception (they emit `settings-changed`, above).
   not surfaced. The hygiene valve for a thread stuck in `generating` with no
   artifact (and the general delete affordance).
 
+**Artifact diffing (`conceptify-3nn.1`):**
+
+- `diff_versions { thread_id, from_version, to_version }` → the same
+  `ArtifactVersionDiffResponse` as the authenticated HTTP endpoint below. It is
+  a read-only command and emits no event.
+
 **Settings (FR-7.1–7.4, beads 959.4):**
 
 - `get_agent_settings {}` → `AgentSettings` — stored overrides merged over code
@@ -942,6 +948,57 @@ comments are migrated onto the new version or flagged `moved`, and one
 Errors: `401 Unauthorized` if bearer token missing/wrong; `404` unknown
 thread; `413` body over the 60 MiB transport cap; `422` validation hard
 failure; `500` on database or disk error.
+
+---
+
+### `GET /api/v1/threads/:thread_id/artifacts/diff`
+
+Authenticated. Query parameters: `from_version` and `to_version` (integer saved
+versions). Returns only changed or moved `data-cfy-id` blocks, so identical
+versions have `changes: []`, plus `unchanged_count`, `degraded`, and `warnings`.
+Each change carries `kind` (`unchanged` only when moved, `modified`, `added`, or
+`removed`), the orthogonal `moved` flag, old/new document indices, nearest
+surviving neighbor ids, old/new normalized text, and word-level
+`equal`/`added`/`removed` hunks.
+
+Normalization compares visible descendant text, collapses Unicode whitespace
+to single spaces, and trims it. Attribute order, comments, indentation, and
+other HTML serialization noise are ignored; consequently whitespace-only code
+formatting is also considered unchanged. Reordering uses the longest common
+subsequence of ids, so insertion/deletion does not falsely mark every later
+block moved. Duplicate ids use the first occurrence with a warning. Changed
+visible text outside every `data-cfy-id` block returns one synthetic change
+with `cfy_id: null` and `degraded: true`. HTML5 error recovery makes malformed
+hand edits deterministic and non-panicking.
+
+```json
+{
+  "thread_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "from_version": 1,
+  "to_version": 2,
+  "changes": [{
+    "cfy_id": "sec-queue",
+    "kind": "modified",
+    "moved": false,
+    "old_index": 3,
+    "new_index": 3,
+    "previous_cfy_id": "sec-policy",
+    "next_cfy_id": "fig-flow",
+    "old_text": "One request runs at a time.",
+    "new_text": "Independent requests run concurrently.",
+    "hunks": [
+      { "kind": "removed", "text": "One request runs at a time." },
+      { "kind": "added", "text": "Independent requests run concurrently." }
+    ]
+  }],
+  "unchanged_count": 8,
+  "degraded": false,
+  "warnings": []
+}
+```
+
+Errors: `401` without the bearer token; `404` for an unknown thread or missing
+version; `500` for database or artifact-file read failures.
 
 ---
 

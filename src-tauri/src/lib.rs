@@ -1,5 +1,6 @@
 mod anchoring;
 mod artifact_protocol;
+mod artifact_diff;
 mod artifacts;
 mod catalog;
 mod commands;
@@ -97,6 +98,7 @@ pub fn run() {
             commands::create_project_folder,
             commands::delete_thread,
             commands::list_artifact_versions,
+            commands::diff_versions,
             commands::open_artifact_in_browser,
             commands::create_comment,
             commands::list_comments,

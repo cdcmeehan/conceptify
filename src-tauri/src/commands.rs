@@ -314,6 +314,18 @@ pub fn list_artifact_versions(
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
+#[tauri::command(rename_all = "snake_case")]
+pub fn diff_versions(
+    db: State<DbHandle>,
+    thread_id: String,
+    from_version: i64,
+    to_version: i64,
+) -> Result<conceptify_types::ArtifactVersionDiffResponse, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::artifact_diff::diff_versions(&conn, &thread_id, from_version, to_version)
+        .map_err(|e| e.to_string())
+}
+
 /// Resolve the on-disk `artifact.html` (the always-latest copy, §5.6) for a
 /// thread. Split out of the command so the DB/path logic is unit-testable
 /// without triggering a real browser launch. Errors are user-facing strings

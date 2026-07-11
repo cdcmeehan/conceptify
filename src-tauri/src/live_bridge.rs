@@ -135,6 +135,7 @@ async fn live_bridge() {
             crate::commands::create_project_folder,
             crate::commands::delete_thread,
             crate::commands::list_artifact_versions,
+            crate::commands::diff_versions,
             crate::commands::open_artifact_in_browser,
             crate::commands::create_comment,
             crate::commands::list_comments,

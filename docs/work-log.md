@@ -188,3 +188,12 @@ to its project/thread. Lock-screen text contains only the project name and a
 generic instruction; prompt, thread title, error, path, and model stay in-app.
 Browser QA verified unread persistence, seen-on-open, retained attention, the
 settings control, and the permission-free fallback path.
+
+**Artifact version diff engine (`conceptify-3nn.1`).** Saved versions can now be
+compared through matching Tauri and authenticated HTTP APIs. The engine works at
+the existing `data-cfy-id` anchoring unit, ignores serialization-only whitespace
+and attribute noise, returns word hunks for modified text, separates minimal
+reorders from insertion/deletion, and supplies neighbor ids for removed-block
+placement. Duplicate ids and changed id-less content degrade explicitly to a
+document fallback; malformed HTML is error-recovered. Tests cover every change
+class and a 150-block artifact well below the one-second budget.
