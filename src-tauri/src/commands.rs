@@ -1104,8 +1104,8 @@ impl From<crate::flows::FlowStarted> for RunStartedDto {
 
 /// Start the FR-4.6 "Ask follow-ups" batch run: ONE headless agent answers
 /// every open comment individually via `resolve-comment` (sidebar-first; the
-/// artifact is never modified in this mode). One run per thread (FR-4.9): a
-/// second start while one is active fails with a clear error.
+/// artifact is never modified in this mode). Concurrent submissions are
+/// accepted into the durable provider queue.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn ask_follow_ups<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -1135,10 +1135,8 @@ pub async fn apply_to_artifact<R: tauri::Runtime>(
         .map_err(|e| e.to_string())
 }
 
-/// The live run for a thread, if any (FR-4.8: the sidebar re-attaches to an
-/// in-flight run when the user switches back to its thread). `status` is
-/// always `running` — terminal runs leave the registry before `run-finished`
-/// is emitted, so the frontend never sees a stale "active" run here.
+/// The newest non-terminal run for a thread, if any. `status` may be queued,
+/// starting, running, throttled, or cancelling.
 #[derive(Serialize)]
 pub struct ActiveRunDto {
     pub run_id: String,
@@ -1160,7 +1158,7 @@ pub fn get_active_run(
         run_id: s.run_id,
         thread_id: s.thread_id,
         mode: s.mode,
-        status: crate::runs::RunStatus::Running.as_str().to_owned(),
+        status: s.status,
     }))
 }
 
@@ -1312,12 +1310,11 @@ pub fn get_latest_run(
 /// root was re-opened by a reply, the root itself for a fresh comment. Returns
 /// the same [`RunStartedDto`] shape as `ask_follow_ups`, with
 /// `target_comment_ids` the single root id (the actual resolve may land on a
-/// reply row). One run per thread (FR-4.9): a start while any run is active
-/// fails with a clear error.
+/// reply row). Concurrent answers are accepted into the provider queue.
 ///
 /// Errors (user-facing strings): no artifact; comment not found on this thread;
 /// the target is a reply (reply to its root instead); the target root is not
-/// open; run already active (FR-4.9); missing agent/CLI.
+/// open; missing agent/CLI.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn ask_single_comment<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,

@@ -6,15 +6,16 @@
 //! settings adapter layer (`crate::settings`, bead b12.1), spawns the agent
 //! with `tokio::process` (never tauri-plugin-shell — frontend-initiated exec
 //! is disallowed, PRD §9 S3), streams stdout/stderr into the run log and
-//! compact Tauri events, enforces the timeout, and always drives the row to a
-//! terminal state. The *flows* that use it (ask-follow-ups b12.4, apply
+//! compact Tauri events, enforces provider capacity and timeout, and always
+//! drives the row to a terminal state. The *flows* that use it (ask-follow-ups b12.4, apply
 //! b12.5, run UI b12.6, in-app ask 959.1) assemble prompts and apply
 //! thread-status policy on top; the engine stays policy-free.
 //!
 //! # Lifecycle contract
 //!
-//! [`start_run`] → row `status = 'running'` + spawned child → terminal status
-//! is exactly one of:
+//! [`start_run`] durably inserts `queued` and returns immediately. Admission
+//! drives `queued → starting → running`; provider throttling can cycle through
+//! `throttled → queued`, and cancellation uses `cancelling`. Terminal states:
 //!
 //! | status      | meaning                                                    |
 //! |-------------|------------------------------------------------------------|
@@ -61,15 +62,14 @@
 //!   streaming/waiting; the outer task treats an inner panic or I/O error as
 //!   `failed`, appends an `[run] ABNORMAL END: …` marker to the log, and
 //!   still finalizes the row.
-//! - [`reconcile_stale_runs`] runs in the app `setup` path (before the
-//!   [`RunRegistry`] is managed): any `running` row left by a crashed
-//!   previous session is marked `failed` and its log gets a trailing marker —
-//!   a crashed run never wedges the FR-4.9 per-thread guard or corrupts
-//!   thread state.
-//! - The registry (in-memory) is the source of truth for *liveness*; the DB
-//!   row is history. `start_run` reserves the thread in the registry first
-//!   (closing the TOCTOU between two concurrent starts) and double-checks the
-//!   DB `running` rows as a belt.
+//! - [`reconcile_stale_runs`] fails interrupted `starting`/`running`/
+//!   `cancelling` rows honestly as `app_interrupted`; queued and future-
+//!   throttled work survive.
+//! - [`resume_queued_runs`] rebuilds workers and mode-specific thread-status
+//!   watchers after restart without creating replacement rows.
+//! - The DB is authoritative for queue/state history. [`RunRegistry`] holds
+//!   only current-process capacity, same-thread mutation guards, PIDs and
+//!   cancellation latches.
 //!
 //! # Log format (`runs/<run-id>.log`, §5.6)
 //!
@@ -78,7 +78,7 @@
 //! finalization, abnormal ends). Plain appends — atomicity is not required
 //! for logs (the bead's contract), only that a terminal marker always lands.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -90,7 +90,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::artifacts;
 use crate::db::{self, DbHandle};
@@ -136,6 +136,15 @@ pub enum RunMode {
 }
 
 impl RunMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "answer" => Some(Self::Answer),
+            "apply" => Some(Self::Apply),
+            "ask" => Some(Self::Ask),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             RunMode::Answer => "answer",
@@ -152,15 +161,28 @@ impl RunMode {
             RunMode::Ask => Purpose::InAppAsk,
         }
     }
+
+    pub fn run_class(self) -> crate::run_queue::RunClass {
+        match self {
+            RunMode::Answer => crate::run_queue::RunClass::Exploration,
+            RunMode::Apply | RunMode::Ask => crate::run_queue::RunClass::Mutation,
+        }
+    }
 }
 
 /// Terminal (and initial) states of a run row. `follow_up_runs.status` is
 /// free-form TEXT by design (see the migration's doc comment); this enum is
 /// the authoritative value set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // non-terminal variants are durable DB/event values
 pub enum RunStatus {
+    Queued,
+    Starting,
     Running,
+    Throttled,
+    Cancelling,
     Completed,
+    Conflicted,
     Failed,
     Cancelled,
     TimedOut,
@@ -169,8 +191,13 @@ pub enum RunStatus {
 impl RunStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            RunStatus::Queued => "queued",
+            RunStatus::Starting => "starting",
             RunStatus::Running => "running",
+            RunStatus::Throttled => "throttled",
+            RunStatus::Cancelling => "cancelling",
             RunStatus::Completed => "completed",
+            RunStatus::Conflicted => "conflicted",
             RunStatus::Failed => "failed",
             RunStatus::Cancelled => "cancelled",
             RunStatus::TimedOut => "timeout",
@@ -200,6 +227,9 @@ pub struct StartRun {
     /// on the row, and persists the override itself in `override_json` so a
     /// retry can re-apply it (bead `conceptify-e7m.1`).
     pub run_override: Option<RunOverride>,
+    /// Original attempt when this submission is an explicit retry. Immutable
+    /// lineage; retries never mutate or replace their source row.
+    pub retry_of_run_id: Option<String>,
 }
 
 /// Handle returned by [`start_run`]. Dropping it does **not** affect the run
@@ -234,10 +264,6 @@ pub enum RunError {
     #[error("thread not found: {0}")]
     ThreadNotFound(String),
 
-    /// The FR-4.9 concurrency guard: one active run per thread.
-    #[error("thread {thread_id} already has an active run ({run_id})")]
-    AlreadyRunning { thread_id: String, run_id: String },
-
     /// Cancel target is not in the live registry (already finished, or never
     /// existed).
     #[error("run {0} is not active")]
@@ -257,12 +283,14 @@ pub enum RunError {
 }
 
 // ---------------------------------------------------------------------------
-// Registry (managed state) — liveness source of truth, FR-4.9 guard
+// Registry (managed state) — current-process capacity + process controls
 // ---------------------------------------------------------------------------
 
 /// One live run's control block.
 struct ActiveRun {
     thread_id: String,
+    provider_pool: String,
+    run_class: crate::run_queue::RunClass,
     /// Set right after spawn; `None` only in the tiny reserve→spawn window.
     pid: Option<u32>,
     /// Cancel latch: set by [`RunRegistry::cancel`], read by the supervisor
@@ -273,9 +301,28 @@ struct ActiveRun {
 /// In-memory map `run_id → ActiveRun`, held in Tauri managed state
 /// (`app.manage(RunRegistry::default())` in `lib.rs`). Source of truth for
 /// *liveness* — the DB rows are history. Cheap to clone (Arc inside).
-#[derive(Clone, Default)]
+#[derive(Default)]
+struct AdmissionState {
+    active_by_pool: HashMap<String, usize>,
+    mutation_threads: HashSet<String>,
+    last_project_by_pool: HashMap<String, String>,
+}
+
+#[derive(Clone)]
 pub struct RunRegistry {
     inner: Arc<Mutex<HashMap<String, ActiveRun>>>,
+    admission: Arc<tokio::sync::Mutex<AdmissionState>>,
+    notify: Arc<Notify>,
+}
+
+impl Default for RunRegistry {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            admission: Arc::new(tokio::sync::Mutex::new(AdmissionState::default())),
+            notify: Arc::new(Notify::new()),
+        }
+    }
 }
 
 impl RunRegistry {
@@ -285,40 +332,90 @@ impl RunRegistry {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Atomically claim the per-thread slot (FR-4.9). Checking and inserting
-    /// under one lock closes the race between two concurrent `start_run`s on
-    /// the same thread. Returns the run's cancel latch.
-    fn reserve(&self, run_id: &str, thread_id: &str) -> Result<Arc<AtomicBool>, RunError> {
-        let mut map = self.lock();
-        if let Some((existing, _)) = map.iter().find(|(_, a)| a.thread_id == thread_id) {
-            return Err(RunError::AlreadyRunning {
-                thread_id: thread_id.to_owned(),
-                run_id: existing.clone(),
-            });
-        }
-        let flag = Arc::new(AtomicBool::new(false));
-        map.insert(
-            run_id.to_owned(),
-            ActiveRun {
-                thread_id: thread_id.to_owned(),
-                pid: None,
-                cancel_requested: flag.clone(),
-            },
-        );
-        Ok(flag)
-    }
-
     fn set_pid(&self, run_id: &str, pid: Option<u32>) {
         if let Some(active) = self.lock().get_mut(run_id) {
             active.pid = pid;
         }
     }
 
-    fn remove(&self, run_id: &str) {
-        self.lock().remove(run_id);
+    async fn try_admit(
+        &self,
+        db: &DbHandle,
+        run_id: &str,
+        provider_pool: &str,
+        capacity: usize,
+    ) -> Result<Option<Arc<AtomicBool>>, RunError> {
+        let mut admission = self.admission.lock().await;
+        let active_in_pool = admission
+            .active_by_pool
+            .get(provider_pool)
+            .copied()
+            .unwrap_or(0);
+        let mutation_threads = admission.mutation_threads.clone();
+        let last_project = admission.last_project_by_pool.get(provider_pool).cloned();
+        let pool = provider_pool.to_owned();
+        let claimant = run_id.to_owned();
+        let admitted = db::with_conn(db, move |conn| {
+            crate::run_queue::admit_next(
+                conn,
+                &pool,
+                capacity,
+                active_in_pool,
+                &mutation_threads,
+                last_project.as_deref(),
+                Some(&claimant),
+            )
+        })
+        .await?;
+        let Some(admitted) = admitted else {
+            return Ok(None);
+        };
+
+        *admission
+            .active_by_pool
+            .entry(admitted.provider_pool.clone())
+            .or_insert(0) += 1;
+        if admitted.run_class == crate::run_queue::RunClass::Mutation {
+            admission
+                .mutation_threads
+                .insert(admitted.thread_id.clone());
+        }
+        admission
+            .last_project_by_pool
+            .insert(admitted.provider_pool.clone(), admitted.project_id.clone());
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.lock().insert(
+            admitted.id,
+            ActiveRun {
+                thread_id: admitted.thread_id,
+                provider_pool: admitted.provider_pool,
+                run_class: admitted.run_class,
+                pid: None,
+                cancel_requested: cancel_flag.clone(),
+            },
+        );
+        Ok(Some(cancel_flag))
     }
 
-    /// The live run for `thread_id`, if any (FR-4.9 guard / FR-4.8 UI).
+    async fn release(&self, run_id: &str) {
+        let active = self.lock().remove(run_id);
+        if let Some(active) = active {
+            let mut admission = self.admission.lock().await;
+            if let Some(count) = admission.active_by_pool.get_mut(&active.provider_pool) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    admission.active_by_pool.remove(&active.provider_pool);
+                }
+            }
+            if active.run_class == crate::run_queue::RunClass::Mutation {
+                admission.mutation_threads.remove(&active.thread_id);
+            }
+        }
+        self.notify.notify_waiters();
+    }
+
+    /// One executing run for `thread_id`, if any (legacy single-run UI helper).
     pub fn active_run_for_thread(&self, thread_id: &str) -> Option<String> {
         self.lock()
             .iter()
@@ -365,11 +462,41 @@ pub fn active_run_for_thread<R: Runtime>(
 /// FR-4.8). Thin wrapper over [`RunRegistry::cancel`]; Rust-side callers use
 /// the registry directly.
 #[tauri::command(rename_all = "snake_case")]
-pub fn cancel_run(
+pub async fn cancel_run(
+    db: tauri::State<'_, DbHandle>,
     registry: tauri::State<'_, RunRegistry>,
     run_id: String,
 ) -> Result<(), String> {
-    registry.cancel(&run_id).map_err(|e| e.to_string())
+    cancel_durable(db.inner(), registry.inner(), &run_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub async fn cancel_durable(
+    db: &DbHandle,
+    registry: &RunRegistry,
+    run_id: &str,
+) -> Result<(), RunError> {
+    let id = run_id.to_owned();
+    let transition = db::with_conn(db, move |conn| crate::run_queue::request_cancel(conn, &id))
+        .await?;
+    match transition {
+        crate::run_queue::CancelTransition::CancelledBeforeSpawn => {
+            registry.notify.notify_waiters();
+            Ok(())
+        }
+        crate::run_queue::CancelTransition::Cancelling => {
+            // Admission owns an in-memory control block before a row can enter
+            // starting/running. If finalization won after the DB read, the row
+            // is already terminal and cancellation is effectively complete.
+            match registry.cancel(run_id) {
+                Ok(()) | Err(RunError::NotActive(_)) => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
+        crate::run_queue::CancelTransition::AlreadyTerminal => Ok(()),
+        crate::run_queue::CancelTransition::NotFound => Err(RunError::NotActive(run_id.to_owned())),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -384,31 +511,285 @@ pub fn cancel_run(
 /// how many rows were reconciled.
 pub fn reconcile_stale_runs(conn: &Connection) -> Result<usize, rusqlite::Error> {
     let stale: Vec<(String, String)> = conn
-        .prepare("SELECT id, log_path FROM follow_up_runs WHERE status = 'running'")?
+        .prepare(
+            "SELECT id, log_path FROM follow_up_runs
+             WHERE status IN ('starting', 'running', 'cancelling')",
+        )?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<_, _>>()?;
-    if stale.is_empty() {
-        return Ok(0);
-    }
-
-    conn.execute(
-        "UPDATE follow_up_runs
-         SET status = 'failed',
-             finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE status = 'running'",
-        [],
-    )?;
+    let reconciled = crate::run_queue::reconcile_after_restart(conn)?;
 
     for (id, log_path) in &stale {
         append_log(
             Path::new(log_path),
             &format!(
-                "[run] ABNORMAL END: run {id} was still 'running' at app startup \
-                 (previous session crashed or was killed); marked failed"
+                "[run] ABNORMAL END: run {id} was still executing at app startup \
+                 (previous session crashed or was killed); marked failed/app_interrupted"
             ),
         );
     }
-    Ok(stale.len())
+    debug_assert_eq!(stale.len(), reconciled.interrupted);
+    Ok(reconciled.interrupted)
+}
+
+#[derive(Debug)]
+struct PersistedQueuedRun {
+    id: String,
+    thread_id: String,
+    agent: String,
+    model: String,
+    mode: String,
+    prompt: String,
+    env_json: String,
+    override_json: Option<String>,
+    route: String,
+    provider_pool: String,
+    log_path: String,
+    retry_of_run_id: Option<String>,
+}
+
+/// Recreate workers for durable queued/throttled rows after boot
+/// reconciliation. Running/starting/cancelling rows were failed before this is
+/// called; queued payloads are never duplicated or assigned a new run id.
+pub async fn resume_queued_runs<R: Runtime>(app_handle: AppHandle<R>) -> Result<usize, RunError> {
+    let db = app_handle.state::<DbHandle>().inner().clone();
+    let registry = app_handle.state::<RunRegistry>().inner().clone();
+    let rows = db::with_conn(&db, |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, thread_id, agent, model, mode, prompt, env_json,
+                    override_json, route, provider_pool, log_path, retry_of_run_id
+             FROM follow_up_runs
+             WHERE status IN ('queued', 'throttled')
+             ORDER BY queue_seq ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PersistedQueuedRun {
+                id: r.get(0)?,
+                thread_id: r.get(1)?,
+                agent: r.get(2)?,
+                model: r.get(3)?,
+                mode: r.get(4)?,
+                prompt: r.get(5)?,
+                env_json: r.get(6)?,
+                override_json: r.get(7)?,
+                route: r.get(8)?,
+                provider_pool: r.get(9)?,
+                log_path: r.get(10)?,
+                retry_of_run_id: r.get(11)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+    })
+    .await?;
+    let count = rows.len();
+
+    for row in rows {
+        let run_id = row.id.clone();
+        match prepare_persisted(&db, row).await {
+            Ok(prepared) => {
+                let app = app_handle.clone();
+                let db = db.clone();
+                let registry = registry.clone();
+                let thread_id = prepared.req.thread_id.clone();
+                let mode = prepared.req.mode;
+                let (done_tx, done_rx) = oneshot::channel();
+                crate::flows::attach_recovered_run_watcher(
+                    app_handle.clone(),
+                    thread_id,
+                    mode,
+                    done_rx,
+                );
+                tauri::async_runtime::spawn(async move {
+                    execute_when_admitted(app, db, registry, run_id, prepared, done_tx).await;
+                });
+            }
+            Err(e) => {
+                let id = run_id.clone();
+                let reason = format!("resume_prepare_failed:{e}");
+                db::with_conn(&db, move |conn| {
+                    conn.execute(
+                        "UPDATE follow_up_runs
+                         SET status = 'failed', status_reason = ?2,
+                             finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                         WHERE id = ?1 AND status IN ('queued', 'throttled')",
+                        rusqlite::params![id, reason],
+                    )
+                })
+                .await?;
+            }
+        }
+    }
+    Ok(count)
+}
+
+async fn resume_one<R: Runtime>(
+    app_handle: AppHandle<R>,
+    run_id: String,
+    done_tx: oneshot::Sender<FinishedRun>,
+) {
+    let db = app_handle.state::<DbHandle>().inner().clone();
+    let registry = app_handle.state::<RunRegistry>().inner().clone();
+    let id = run_id.clone();
+    let row = db::with_conn(&db, move |conn| {
+        conn.query_row(
+            "SELECT id, thread_id, agent, model, mode, prompt, env_json,
+                    override_json, route, provider_pool, log_path, retry_of_run_id
+             FROM follow_up_runs WHERE id = ?1 AND status IN ('queued', 'throttled')",
+            [&id],
+            |r| {
+                Ok(PersistedQueuedRun {
+                    id: r.get(0)?,
+                    thread_id: r.get(1)?,
+                    agent: r.get(2)?,
+                    model: r.get(3)?,
+                    mode: r.get(4)?,
+                    prompt: r.get(5)?,
+                    env_json: r.get(6)?,
+                    override_json: r.get(7)?,
+                    route: r.get(8)?,
+                    provider_pool: r.get(9)?,
+                    log_path: r.get(10)?,
+                    retry_of_run_id: r.get(11)?,
+                })
+            },
+        )
+    })
+    .await;
+    let row = match row {
+        Ok(row) => row,
+        Err(e) => {
+            eprintln!("[conceptify-runs] failed to reload throttled run {run_id}: {e}");
+            return;
+        }
+    };
+    let thread_id = row.thread_id.clone();
+    let log_path = PathBuf::from(&row.log_path);
+    match prepare_persisted(&db, row).await {
+        Ok(prepared) => {
+            execute_when_admitted(app_handle, db, registry, run_id, prepared, done_tx).await;
+        }
+        Err(e) => {
+            mark_run_failed(&db, &run_id).await;
+            let _ = done_tx.send(FinishedRun {
+                run_id,
+                thread_id,
+                status: RunStatus::Failed,
+                exit_code: None,
+                log_path,
+            });
+            eprintln!("[conceptify-runs] failed to prepare throttled run: {e}");
+        }
+    }
+}
+
+async fn prepare_persisted(
+    db: &DbHandle,
+    row: PersistedQueuedRun,
+) -> Result<PreparedExec, RunError> {
+    let mode = RunMode::parse(&row.mode).ok_or_else(|| {
+        RunError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid persisted run mode '{}'", row.mode),
+        ))
+    })?;
+    let thread_id = row.thread_id.clone();
+    let loaded = db::with_conn_result(db, move |conn| -> Result<Loaded, RunError> {
+        let data = conn
+            .query_row(
+                "SELECT p.id, p.root_path, t.slug,
+                        (SELECT MAX(a.version) FROM artifacts a WHERE a.thread_id = t.id)
+                 FROM threads t JOIN projects p ON p.id = t.project_id
+                 WHERE t.id = ?1",
+                [&thread_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((project_id, root_path, slug, base_artifact_version)) = data else {
+            return Err(RunError::ThreadNotFound(thread_id));
+        };
+        Ok(Loaded {
+            project_id,
+            root_path,
+            slug,
+            base_artifact_version,
+            settings: settings::get_settings(conn)?,
+            openrouter_key: settings::get_openrouter_api_key(conn)?,
+        })
+    })
+    .await?;
+
+    let routing_override = RunOverride {
+        adapter: (row.route == "manual").then_some(row.agent.clone()),
+        model: Some(row.model.clone()),
+    };
+    let route = routing::route_run(
+        &loaded.settings,
+        mode.purpose(),
+        Some(&routing_override),
+        crate::catalog::provider_of,
+        loaded.openrouter_key.as_deref(),
+    )?;
+    if route.adapter != row.agent || route.model != row.model {
+        return Err(RunError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "persisted route no longer resolves to the recorded agent/model",
+        )));
+    }
+    let invocation = loaded.settings.resolve_with_override(
+        mode.purpose(),
+        Path::new(&loaded.root_path),
+        &row.prompt,
+        Some(&RunOverride {
+            adapter: Some(row.agent.clone()),
+            model: Some(row.model.clone()),
+        }),
+    )?;
+    let command = invocation.program.clone();
+    let override_path = loaded.settings.agent_binary_path.clone();
+    let program = tokio::task::spawn_blocking(move || {
+        settings::resolve_agent_binary(&command, override_path.as_deref())
+    })
+    .await
+    .expect("agent binary lookup task panicked")?;
+    if !Path::new(&invocation.cwd).is_dir() {
+        return Err(RunError::CwdMissing(invocation.cwd));
+    }
+    let env = serde_json::from_str::<Vec<(String, String)>>(&row.env_json).map_err(|e| {
+        RunError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid persisted run env: {e}"),
+        ))
+    })?;
+    let run_override = row
+        .override_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<RunOverride>(json).ok());
+    Ok(PreparedExec {
+        req: StartRun {
+            thread_id: row.thread_id,
+            mode,
+            prompt: row.prompt.clone(),
+            env,
+            run_override,
+            retry_of_run_id: row.retry_of_run_id,
+        },
+        route,
+        invocation,
+        program,
+        log_path: PathBuf::from(row.log_path),
+        timeout: Duration::from_secs(loaded.settings.timeout_secs.max(1)),
+        agent: row.agent,
+        model: row.model,
+        provider_pool: row.provider_pool,
+        prompt_chars: row.prompt.chars().count(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +801,7 @@ struct Loaded {
     project_id: String,
     root_path: String,
     slug: String,
+    base_artifact_version: Option<i64>,
     settings: settings::AgentSettings,
     /// The stored OpenRouter key (bead e7m.7), consumed only by an
     /// openrouter-routed run. **Secret**: reaches the child exclusively via
@@ -428,18 +810,30 @@ struct Loaded {
     openrouter_key: Option<String>,
 }
 
+struct PreparedExec {
+    req: StartRun,
+    route: routing::RouteDecision,
+    invocation: settings::ResolvedInvocation,
+    program: PathBuf,
+    log_path: PathBuf,
+    timeout: Duration,
+    agent: String,
+    model: String,
+    provider_pool: String,
+    prompt_chars: usize,
+}
+
 /// Start a headless agent run for a thread (PRD §5.1, §5.5 surface 2).
 ///
-/// Sequence: registry reservation (FR-4.9 guard, atomic) → thread/project +
-/// settings/OpenRouter-key load + DB `running` double-check (one connection
-/// lock) → provider routing (`crate::routing`, bead e7m.7: model → adapter +
+/// Sequence: thread/project/settings load → provider routing
+/// (`crate::routing`, bead e7m.7: model → adapter +
 /// per-run env + route tag; missing-key/unroutable-model fail fast here) →
 /// invocation resolution (pure) + binary lookup (cached login-shell `which`)
-/// → `follow_up_runs` row inserted (`running`) → child spawned
+/// → durable `queued` row inserted → immediate return → provider/mutation
+/// admission → child spawned
 /// (`process_group(0)`, `kill_on_drop`, cwd = adapter template's cwd —
-/// project root by default) → supervisor task takes over. Any failure past
-/// the row insert marks the row `failed` before returning the error; any
-/// failure at all releases the reservation.
+/// project root by default) → supervisor task takes over. Failures past
+/// enqueue remain honest terminal history and always release capacity.
 ///
 /// Requires `DbHandle` and [`RunRegistry`] in managed state.
 pub async fn start_run<R: Runtime>(
@@ -450,17 +844,7 @@ pub async fn start_run<R: Runtime>(
     let registry = app_handle.state::<RunRegistry>().inner().clone();
 
     let run_id = uuid::Uuid::new_v4().to_string();
-    let cancel_flag = registry.reserve(&run_id, &req.thread_id)?;
-
-    match start_reserved(app_handle, &db, &registry, &run_id, &cancel_flag, req).await {
-        Ok(started) => Ok(started),
-        Err(e) => {
-            // Every failure path releases the FR-4.9 slot; row cleanup (if it
-            // was inserted) already happened inside start_reserved.
-            registry.remove(&run_id);
-            Err(e)
-        }
-    }
+    start_reserved(app_handle, &db, &registry, &run_id, req).await
 }
 
 /// The fallible body of [`start_run`], run while holding a registry
@@ -470,18 +854,15 @@ async fn start_reserved<R: Runtime>(
     db: &DbHandle,
     registry: &RunRegistry,
     run_id: &str,
-    cancel_flag: &Arc<AtomicBool>,
     req: StartRun,
 ) -> Result<StartedRun, RunError> {
-    // -- Load thread/project + settings, and belt-check the DB for a running
-    //    row (the registry reservation is the real guard; after boot
-    //    reconciliation a 'running' row can only belong to a live run of this
-    //    process, which the reservation already caught).
+    // -- Load thread/project, captured base, settings, and route secret.
     let thread_id = req.thread_id.clone();
     let loaded = db::with_conn_result(db, move |conn| -> Result<Loaded, RunError> {
         let row = conn
             .query_row(
-                "SELECT p.id, p.root_path, t.slug
+                "SELECT p.id, p.root_path, t.slug,
+                        (SELECT MAX(a.version) FROM artifacts a WHERE a.thread_id = t.id)
                  FROM threads t JOIN projects p ON p.id = t.project_id
                  WHERE t.id = ?1",
                 [&thread_id],
@@ -490,28 +871,14 @@ async fn start_reserved<R: Runtime>(
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
+                        r.get::<_, Option<i64>>(3)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((project_id, root_path, slug)) = row else {
+        let Some((project_id, root_path, slug, base_artifact_version)) = row else {
             return Err(RunError::ThreadNotFound(thread_id));
         };
-
-        if let Some(existing) = conn
-            .query_row(
-                "SELECT id FROM follow_up_runs
-                 WHERE thread_id = ?1 AND status = 'running' LIMIT 1",
-                [&thread_id],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            return Err(RunError::AlreadyRunning {
-                thread_id,
-                run_id: existing,
-            });
-        }
 
         let settings = settings::get_settings(conn)?;
         let openrouter_key = settings::get_openrouter_api_key(conn)?;
@@ -519,6 +886,7 @@ async fn start_reserved<R: Runtime>(
             project_id,
             root_path,
             slug,
+            base_artifact_version,
             settings,
             openrouter_key,
         })
@@ -601,9 +969,14 @@ async fn start_reserved<R: Runtime>(
         std::fs::create_dir_all(parent)?;
     }
 
-    // -- Row first (status running), then spawn: an attempted-but-unspawnable
-    //    run is honest history (marked failed below), and the reverse order
-    //    could leave a live process with no row.
+    // -- Durable queue row first. The prompt and non-secret flow env are enough
+    //    to reconstruct this work after restart; route secrets are deliberately
+    //    re-read from settings only when execution starts.
+    let provider_pool = route.tag.as_str().to_owned();
+    let run_class = req.mode.run_class();
+    let env_json = serde_json::to_string(&req.env).expect("run env always serializes");
+    let prompt_chars = prompt.chars().count();
+    let retry_of_run_id = req.retry_of_run_id.clone();
     {
         let (run_id, thread_id, agent, model, mode, log_path_str, override_json, route_tag) = (
             run_id.to_owned(),
@@ -615,64 +988,218 @@ async fn start_reserved<R: Runtime>(
             override_json,
             route.tag.as_str(),
         );
+        let provider_pool = provider_pool.clone();
+        let prompt = prompt.clone();
+        let base_artifact_version = loaded.base_artifact_version;
         db::with_conn(db, move |conn| {
-            conn.execute(
-                "INSERT INTO follow_up_runs
-                     (id, thread_id, agent, model, mode, status, log_path, override_json, route)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8)",
-                rusqlite::params![
-                    run_id,
-                    thread_id,
-                    agent,
-                    model,
+            crate::run_queue::enqueue(
+                conn,
+                &crate::run_queue::NewQueuedRun {
+                    id: &run_id,
+                    thread_id: &thread_id,
+                    agent: &agent,
+                    model: &model,
                     mode,
-                    log_path_str,
-                    override_json,
-                    route_tag
-                ],
+                    log_path: &log_path_str,
+                    override_json: override_json.as_deref(),
+                    route: route_tag,
+                    run_class,
+                    provider_pool: &provider_pool,
+                    prompt: &prompt,
+                    env_json: &env_json,
+                    base_artifact_version,
+                    retry_of_run_id: retry_of_run_id.as_deref(),
+                },
             )
         })
         .await?;
     }
 
-    // Route visibility in the log header (bead e7m.7): tag + base-url note,
-    // NEVER env values — the OpenRouter token must not appear in any logged or
-    // persisted representation of the invocation (test-proven below).
-    let route_note = match route.tag {
+    append_log(&log_path, &format!("[run] queued {run_id} at {}", now_iso()));
+    let (done_tx, done_rx) = oneshot::channel();
+    let started_thread_id = req.thread_id.clone();
+    let prepared = PreparedExec {
+        req,
+        route,
+        invocation,
+        program,
+        log_path: log_path.clone(),
+        timeout,
+        agent,
+        model,
+        provider_pool,
+        prompt_chars,
+    };
+    let app = app_handle.clone();
+    let db = db.clone();
+    let registry = registry.clone();
+    let worker_run_id = run_id.to_owned();
+    tauri::async_runtime::spawn(async move {
+        execute_when_admitted(app, db, registry, worker_run_id, prepared, done_tx).await;
+    });
+
+    Ok(StartedRun {
+        run_id: run_id.to_owned(),
+        thread_id: started_thread_id,
+        finished: done_rx,
+    })
+}
+
+async fn execute_when_admitted<R: Runtime>(
+    app_handle: AppHandle<R>,
+    db: DbHandle,
+    registry: RunRegistry,
+    run_id: String,
+    prepared: PreparedExec,
+    done_tx: oneshot::Sender<FinishedRun>,
+) {
+    let cancel_flag = loop {
+        let notified = registry.notify.notified();
+        let pool = prepared.provider_pool.clone();
+        let capacity = match db::with_conn_result(&db, move |conn| -> Result<usize, RunError> {
+            Ok(settings::get_settings(conn)?.run_concurrency.limit_for(&pool))
+        })
+        .await
+        {
+            Ok(limit) => limit,
+            Err(e) => {
+                append_log(&prepared.log_path, &format!("[run] capacity lookup failed: {e}"));
+                mark_run_failed(&db, &run_id).await;
+                let _ = done_tx.send(FinishedRun {
+                    run_id,
+                    thread_id: prepared.req.thread_id,
+                    status: RunStatus::Failed,
+                    exit_code: None,
+                    log_path: prepared.log_path,
+                });
+                return;
+            }
+        };
+        match registry
+            .try_admit(&db, &run_id, &prepared.provider_pool, capacity)
+            .await
+        {
+            Ok(Some(flag)) => break flag,
+            Ok(None) => {
+                let id = run_id.clone();
+                let status = db::with_conn(&db, move |conn| {
+                    conn.query_row(
+                        "SELECT status FROM follow_up_runs WHERE id = ?1",
+                        [&id],
+                        |r| r.get::<_, String>(0),
+                    )
+                })
+                .await;
+                if matches!(status.as_deref(), Ok("cancelled")) {
+                    append_log(
+                        &prepared.log_path,
+                        &format!("[run] finalized: cancelled at {}", now_iso()),
+                    );
+                    let _ = app_handle.emit(
+                        "run-finished",
+                        &RunFinishedEvent {
+                            run_id: &run_id,
+                            thread_id: &prepared.req.thread_id,
+                            status: RunStatus::Cancelled.as_str(),
+                        },
+                    );
+                    let _ = done_tx.send(FinishedRun {
+                        run_id,
+                        thread_id: prepared.req.thread_id,
+                        status: RunStatus::Cancelled,
+                        exit_code: None,
+                        log_path: prepared.log_path,
+                    });
+                    return;
+                }
+                tokio::select! {
+                    _ = notified => {},
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                }
+            }
+            Err(e) => {
+                append_log(&prepared.log_path, &format!("[run] queue admission failed: {e}"));
+                mark_run_failed(&db, &run_id).await;
+                let _ = done_tx.send(FinishedRun {
+                    run_id,
+                    thread_id: prepared.req.thread_id,
+                    status: RunStatus::Failed,
+                    exit_code: None,
+                    log_path: prepared.log_path,
+                });
+                return;
+            }
+        }
+    };
+
+    let id = run_id.clone();
+    let began = db::with_conn(&db, move |conn| {
+        conn.execute(
+            "UPDATE follow_up_runs SET status = 'running'
+             WHERE id = ?1 AND status = 'starting'",
+            [&id],
+        )
+    })
+    .await
+    .unwrap_or(0);
+    if began != 1 {
+        let id = run_id.clone();
+        let _ = db::with_conn(&db, move |conn| {
+            conn.execute(
+                "UPDATE follow_up_runs
+                 SET status = 'cancelled',
+                     finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1 AND status = 'cancelling'",
+                [&id],
+            )
+        })
+        .await;
+        registry.release(&run_id).await;
+        let _ = done_tx.send(FinishedRun {
+            run_id,
+            thread_id: prepared.req.thread_id,
+            status: RunStatus::Cancelled,
+            exit_code: None,
+            log_path: prepared.log_path,
+        });
+        return;
+    }
+
+    let route_note = match prepared.route.tag {
         routing::RouteTag::Openrouter => {
             format!(" route=openrouter base_url={}", routing::OPENROUTER_BASE_URL)
         }
         tag => format!(" route={}", tag.as_str()),
     };
     append_log(
-        &log_path,
+        &prepared.log_path,
         &format!(
-            "[run] started {run_id} at {} mode={} agent={agent} model={model}{route_note} program={} cwd={} timeout={}s prompt_chars={}",
+            "[run] started {run_id} at {} mode={} agent={} model={}{route_note} program={} cwd={} timeout={}s prompt_chars={}",
             now_iso(),
-            req.mode.as_str(),
-            program.display(),
-            invocation.cwd,
-            timeout.as_secs(),
-            prompt.chars().count(),
+            prepared.req.mode.as_str(),
+            prepared.agent,
+            prepared.model,
+            prepared.program.display(),
+            prepared.invocation.cwd,
+            prepared.timeout.as_secs(),
+            prepared.prompt_chars,
         ),
     );
 
-    // -- Spawn. Direct exec of the resolved argv — no shell anywhere near the
-    //    prompt (PRD §9 S3; see settings.rs substitution safety).
-    let mut cmd = tokio::process::Command::new(&program);
-    cmd.args(&invocation.args)
-        .current_dir(&invocation.cwd)
+    let mut cmd = tokio::process::Command::new(&prepared.program);
+    cmd.args(&prepared.invocation.args)
+        .current_dir(&prepared.invocation.cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    for (key, value) in &req.env {
+    for (key, value) in &prepared.req.env {
         cmd.env(key, value);
     }
     // Route env last (last-writer-wins over the flow env): the OpenRouter
     // route's ANTHROPIC_* triple, empty for every other route. Values may be
     // secrets — they go ONLY into the child's env, never into logs/rows/events.
-    for (key, value) in &route.env {
+    for (key, value) in &prepared.route.env {
         cmd.env(key, value);
     }
     #[cfg(unix)]
@@ -682,19 +1209,27 @@ async fn start_reserved<R: Runtime>(
         Ok(child) => child,
         Err(e) => {
             append_log(
-                &log_path,
+                &prepared.log_path,
                 &format!(
                     "[run] ABNORMAL END: failed to spawn '{}': {e}",
-                    program.display()
+                    prepared.program.display()
                 ),
             );
-            mark_run_failed(db, run_id).await;
-            return Err(RunError::Io(e));
+            mark_run_failed(&db, &run_id).await;
+            registry.release(&run_id).await;
+            let _ = done_tx.send(FinishedRun {
+                run_id,
+                thread_id: prepared.req.thread_id,
+                status: RunStatus::Failed,
+                exit_code: None,
+                log_path: prepared.log_path,
+            });
+            return;
         }
     };
 
     let pid = child.id();
-    registry.set_pid(run_id, pid);
+    registry.set_pid(&run_id, pid);
     // Close the reserve→spawn cancel race: if cancel() latched the flag while
     // pid was still None, deliver the kill now.
     if cancel_flag.load(Ordering::SeqCst) {
@@ -703,27 +1238,20 @@ async fn start_reserved<R: Runtime>(
         }
     }
 
-    let (done_tx, done_rx) = oneshot::channel();
     let ctx = RunCtx {
-        app_handle: app_handle.clone(),
-        db: db.clone(),
-        registry: registry.clone(),
-        run_id: run_id.to_owned(),
-        thread_id: req.thread_id.clone(),
-        log_path: log_path.clone(),
-        cancel_flag: cancel_flag.clone(),
+        app_handle,
+        db,
+        registry,
+        run_id,
+        thread_id: prepared.req.thread_id,
+        log_path: prepared.log_path,
+        cancel_flag,
     };
-    spawn_supervisor(ctx, child, timeout, done_tx);
-
-    Ok(StartedRun {
-        run_id: run_id.to_owned(),
-        thread_id: req.thread_id,
-        finished: done_rx,
-    })
+    spawn_supervisor(ctx, child, prepared.timeout, done_tx);
 }
 
-/// Best-effort `running → failed` for rows whose process never (properly)
-/// started. Guarded on `status = 'running'` so it can never regress an
+/// Best-effort non-terminal → failed for rows whose process never (properly)
+/// started. Guarded so it can never regress an
 /// already-terminal row.
 async fn mark_run_failed(db: &DbHandle, run_id: &str) {
     let run_id = run_id.to_owned();
@@ -732,7 +1260,7 @@ async fn mark_run_failed(db: &DbHandle, run_id: &str) {
             "UPDATE follow_up_runs
              SET status = 'failed',
                  finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1 AND status = 'running'",
+             WHERE id = ?1 AND status IN ('queued', 'starting', 'running', 'throttled')",
             [&run_id],
         )
     })
@@ -793,6 +1321,7 @@ struct SupOutcome {
     timed_out: bool,
     exit_code: Option<i32>,
     exit_success: bool,
+    throttle_until: Option<String>,
 }
 
 /// Two-layer supervision (N4): the inner task streams/waits and can fail or
@@ -818,6 +1347,34 @@ fn spawn_supervisor<R: Runtime>(
                 // made the child exit (and even in the exit-vs-cancel photo
                 // finish, the user asked for cancelled and should read
                 // cancelled).
+                if !ctx.cancel_flag.load(Ordering::SeqCst)
+                    && !out.timed_out
+                    && !out.exit_success
+                    && out.throttle_until.is_some()
+                {
+                    let until = out.throttle_until.expect("checked above");
+                    let id = ctx.run_id.clone();
+                    let until_for_db = until.clone();
+                    let throttled = db::with_conn(&ctx.db, move |conn| {
+                        crate::run_queue::throttle(
+                            conn,
+                            &id,
+                            &until_for_db,
+                            "provider_rate_limit",
+                        )
+                    })
+                    .await
+                    .unwrap_or(false);
+                    if throttled {
+                        append_log(
+                            &ctx.log_path,
+                            &format!("[run] provider throttled; queued until {until}"),
+                        );
+                        ctx.registry.release(&ctx.run_id).await;
+                        resume_one(ctx.app_handle.clone(), ctx.run_id.clone(), done_tx).await;
+                        return;
+                    }
+                }
                 let status = if ctx.cancel_flag.load(Ordering::SeqCst) {
                     RunStatus::Cancelled
                 } else if out.timed_out {
@@ -888,11 +1445,15 @@ async fn supervise<R: Runtime>(
     let sleep = tokio::time::sleep(timeout);
     tokio::pin!(sleep);
     let mut timed_out = false;
+    let mut throttle_until: Option<String> = None;
 
     loop {
         tokio::select! {
             maybe_line = rx.recv() => match maybe_line {
                 Some((is_err, line)) => {
+                    if let Some(until) = detect_throttle(&line) {
+                        throttle_until = Some(until);
+                    }
                     let tag = if is_err { "[err]" } else { "[out]" };
                     let _ = writeln!(log, "{tag} {line}");
                     if !is_err {
@@ -940,6 +1501,7 @@ async fn supervise<R: Runtime>(
                 timed_out,
                 exit_code: exit.code(),
                 exit_success: exit.success(),
+                throttle_until,
             })
         }
         Ok(Err(e)) => Err(e),
@@ -956,6 +1518,7 @@ async fn supervise<R: Runtime>(
                 timed_out: true,
                 exit_code: None,
                 exit_success: false,
+                throttle_until,
             })
         }
     }
@@ -977,7 +1540,7 @@ where
 }
 
 /// Single finalization path for every run: persist the terminal status
-/// (before releasing the registry slot, so the FR-4.9 guard and the DB never
+/// (before releasing provider/mutation capacity, so the registry and DB never
 /// disagree in the observable order), free the slot, append the trailing log
 /// marker, emit `run-finished`, resolve the flow hook.
 async fn finalize<R: Runtime>(
@@ -1013,7 +1576,7 @@ async fn finalize<R: Runtime>(
         );
     }
 
-    ctx.registry.remove(&ctx.run_id);
+    ctx.registry.release(&ctx.run_id).await;
     append_log(
         &ctx.log_path,
         &format!("[run] finalized: {} at {}", status.as_str(), now_iso()),
@@ -1056,6 +1619,44 @@ fn kill_group(pid: u32) {
 fn kill_group(_pid: u32) {
     // Non-unix: rely on kill_on_drop (direct child only). The app ships on
     // macOS; this stub only keeps the crate compiling elsewhere.
+}
+
+/// Recognize retryable provider throttling without treating Claude's ordinary
+/// `status: allowed` heartbeat as a limit. Structured reset timestamps win;
+/// plain CLI 429/rate-limit errors receive a short bounded fallback delay.
+fn detect_throttle(line: &str) -> Option<String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+        if value.get("type").and_then(|v| v.as_str()) == Some("rate_limit_event") {
+            let info = value.get("rate_limit_info")?;
+            let status = info.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if status.eq_ignore_ascii_case("allowed") {
+                return None;
+            }
+            if let Some(epoch) = info.get("resetsAt").and_then(|v| v.as_i64()) {
+                if let Some(at) = chrono::DateTime::from_timestamp(epoch, 0) {
+                    return Some(at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
+                }
+            }
+            return Some(
+                (chrono::Utc::now() + chrono::Duration::seconds(30))
+                    .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                    .to_string(),
+            );
+        }
+    }
+
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.split(|c: char| !c.is_ascii_digit()).any(|part| part == "429")
+    {
+        return Some(
+            (chrono::Utc::now() + chrono::Duration::seconds(30))
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+        );
+    }
+    None
 }
 
 /// Minimal stream-json classification (deliberately shallow — the bead's
@@ -1266,6 +1867,7 @@ mod tests {
             );
             s.default_adapter = "fake".to_owned();
             s.timeout_secs = timeout_secs;
+            s.run_concurrency.pools.insert("manual".to_owned(), 2);
             let conn = self.db.lock().unwrap();
             crate::settings::update_settings(&conn, &s).unwrap();
         }
@@ -1302,6 +1904,7 @@ mod tests {
                     prompt: prompt.to_owned(),
                     env: Vec::new(),
                     run_override,
+                    retry_of_run_id: None,
                 },
             )
             .await
@@ -1452,9 +2055,30 @@ mod tests {
     }
 
     #[test]
+    fn throttle_detection_ignores_allowed_and_honors_structured_reset() {
+        assert!(detect_throttle(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1783222800}}"#
+        )
+        .is_none());
+        assert_eq!(
+            detect_throttle(
+                r#"{"type":"rate_limit_event","rate_limit_info":{"status":"limited","resetsAt":1783222800}}"#
+            )
+            .as_deref(),
+            Some("2026-07-05T03:40:00.000Z")
+        );
+        assert!(detect_throttle("HTTP 429 Too Many Requests").is_some());
+    }
+
+    #[test]
     fn run_status_strings_are_stable() {
+        assert_eq!(RunStatus::Queued.as_str(), "queued");
+        assert_eq!(RunStatus::Starting.as_str(), "starting");
         assert_eq!(RunStatus::Running.as_str(), "running");
+        assert_eq!(RunStatus::Throttled.as_str(), "throttled");
+        assert_eq!(RunStatus::Cancelling.as_str(), "cancelling");
         assert_eq!(RunStatus::Completed.as_str(), "completed");
+        assert_eq!(RunStatus::Conflicted.as_str(), "conflicted");
         assert_eq!(RunStatus::Failed.as_str(), "failed");
         assert_eq!(RunStatus::Cancelled.as_str(), "cancelled");
         assert_eq!(RunStatus::TimedOut.as_str(), "timeout");
@@ -1493,7 +2117,10 @@ mod tests {
         // Row exists as running with the right mode/agent while in flight (it
         // may already be terminal if the script raced us — accept both).
         let (status_now, mode, agent, _) = h.run_row(&run_id);
-        assert!(status_now == "running" || status_now == "completed");
+        assert!(
+            matches!(status_now.as_str(), "queued" | "starting" | "running" | "completed"),
+            "unexpected initial state: {status_now}"
+        );
         assert_eq!(mode, "answer");
         assert_eq!(agent, "fake");
 
@@ -1921,6 +2548,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_throttle_requeues_releases_capacity_and_retries_same_row() {
+        let h = harness("throttle-retry");
+        let reset = chrono::Utc::now().timestamp() + 1;
+        h.install_fake_agent(
+            &format!(
+                "#!/bin/sh\n\
+                 marker=\"$1.marker\"\n\
+                 if [ ! -f \"$marker\" ]; then\n\
+                   touch \"$marker\"\n\
+                   echo '{{\"type\":\"rate_limit_event\",\"rate_limit_info\":{{\"status\":\"limited\",\"resetsAt\":{reset}}}}}' >&2\n\
+                   exit 75\n\
+                 fi\n\
+                 echo resumed-after-throttle\n\
+                 exit 0\n"
+            ),
+            60,
+        );
+        let marker = h.work_dir.join("throttle-attempt");
+        let started = h
+            .start(RunMode::Answer, marker.to_str().unwrap())
+            .await
+            .unwrap();
+        let run_id = started.run_id.clone();
+        assert!(
+            wait_until(
+                || matches!(h.run_row(&run_id).0.as_str(), "throttled" | "queued"),
+                5_000,
+            )
+            .await,
+            "failed attempt should become durable throttled/queued work"
+        );
+        let fin = tokio::time::timeout(Duration::from_secs(10), started.finished)
+            .await
+            .expect("throttled retry should become eligible")
+            .expect("completion sender");
+        assert_eq!(fin.status, RunStatus::Completed);
+        assert_eq!(h.run_row(&run_id).0, "completed");
+        let log = std::fs::read_to_string(fin.log_path).unwrap();
+        assert!(log.contains("provider throttled; queued until"), "{log}");
+        assert!(log.contains("resumed-after-throttle"), "{log}");
+    }
+
+    #[tokio::test]
     async fn timeout_kills_process_group_and_marks_timeout() {
         let h = harness("timeout");
         h.install_fake_agent(
@@ -2025,7 +2695,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_active_run_per_thread_guard() {
+    async fn exploration_runs_overlap_on_the_same_thread() {
         let h = harness("guard");
         h.install_fake_agent(
             "#!/bin/sh\n\
@@ -2037,34 +2707,122 @@ mod tests {
         let first = h.start(RunMode::Answer, "p").await.unwrap();
         let first_id = first.run_id.clone();
 
-        // FR-4.9: second start on the same thread is a structured error
-        // naming the live run.
-        let err = h.start(RunMode::Answer, "p2").await.unwrap_err();
-        match err {
-            RunError::AlreadyRunning { thread_id, run_id } => {
-                assert_eq!(thread_id, h.thread_id);
-                assert_eq!(run_id, first_id);
-            }
-            other => panic!("expected AlreadyRunning, got {other:?}"),
-        }
-        // The rejected attempt inserted no row.
-        let count: i64 = {
-            let conn = h.db.lock().unwrap();
-            conn.query_row(
-                "SELECT count(*) FROM follow_up_runs WHERE thread_id = ?1",
-                [&h.thread_id],
-                |r| r.get(0),
+        let second = h.start(RunMode::Answer, "p2").await.unwrap();
+        let second_id = second.run_id.clone();
+        assert!(
+            wait_until(
+                || {
+                    let conn = h.db.lock().unwrap();
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM follow_up_runs
+                         WHERE thread_id = ?1 AND status = 'running'",
+                        [&h.thread_id],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap()
+                        == 2
+                },
+                5000,
             )
-            .unwrap()
-        };
-        assert_eq!(count, 1);
+            .await,
+            "both exploration runs should execute concurrently"
+        );
 
-        // Guard releases after the run finishes.
         h.registry().cancel(&first_id).unwrap();
+        h.registry().cancel(&second_id).unwrap();
         finished(first).await;
-        let second = h.start(RunMode::Answer, "p3").await.unwrap();
-        h.registry().cancel(&second.run_id).unwrap();
         finished(second).await;
+    }
+
+    #[tokio::test]
+    async fn same_thread_mutations_serialize_while_capacity_is_available() {
+        let h = harness("mutation-serial");
+        h.install_fake_agent("#!/bin/sh\necho started\nsleep 30\n", 600);
+        let first = h.start(RunMode::Apply, "first").await.unwrap();
+        let second = h.start(RunMode::Apply, "second").await.unwrap();
+        let first_id = first.run_id.clone();
+        let second_id = second.run_id.clone();
+
+        assert!(
+            wait_until(
+                || {
+                    h.run_row(&first_id).0 == "running" && h.run_row(&second_id).0 == "queued"
+                },
+                5_000,
+            )
+            .await,
+            "second mutation should wait despite spare provider capacity"
+        );
+        cancel_durable(&h.db, &h.registry(), &first_id).await.unwrap();
+        assert_eq!(finished(first).await.status, RunStatus::Cancelled);
+        assert!(
+            wait_until(|| h.run_row(&second_id).0 == "running", 5_000).await,
+            "releasing the mutation guard should admit the next mutation"
+        );
+        cancel_durable(&h.db, &h.registry(), &second_id).await.unwrap();
+        assert_eq!(finished(second).await.status, RunStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn queued_work_observes_provider_limit_changes_without_restart() {
+        let h = harness("dynamic-capacity");
+        h.install_fake_agent("#!/bin/sh\nsleep 30\n", 600);
+        {
+            let conn = h.db.lock().unwrap();
+            let mut settings = settings::get_settings(&conn).unwrap();
+            settings.run_concurrency.pools.insert("manual".to_owned(), 1);
+            settings::update_settings(&conn, &settings).unwrap();
+        }
+        let first = h.start(RunMode::Answer, "first").await.unwrap();
+        let second = h.start(RunMode::Answer, "second").await.unwrap();
+        let first_id = first.run_id.clone();
+        let second_id = second.run_id.clone();
+        assert!(
+            wait_until(
+                || h.run_row(&first_id).0 == "running" && h.run_row(&second_id).0 == "queued",
+                5_000,
+            )
+            .await
+        );
+
+        {
+            let conn = h.db.lock().unwrap();
+            let mut settings = settings::get_settings(&conn).unwrap();
+            settings.run_concurrency.pools.insert("manual".to_owned(), 2);
+            settings::update_settings(&conn, &settings).unwrap();
+        }
+        assert!(
+            wait_until(|| h.run_row(&second_id).0 == "running", 5_000).await,
+            "queued worker should observe the increased generic pool limit"
+        );
+        for id in [&first_id, &second_id] {
+            cancel_durable(&h.db, &h.registry(), id).await.unwrap();
+        }
+        assert_eq!(finished(first).await.status, RunStatus::Cancelled);
+        assert_eq!(finished(second).await.status, RunStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancelling_queued_work_finishes_without_spawning_and_keeps_capacity_owner() {
+        let h = harness("cancel-queued");
+        h.install_fake_agent("#!/bin/sh\nsleep 30\n", 600);
+        {
+            let conn = h.db.lock().unwrap();
+            let mut settings = settings::get_settings(&conn).unwrap();
+            settings.run_concurrency.pools.insert("manual".to_owned(), 1);
+            settings::update_settings(&conn, &settings).unwrap();
+        }
+        let owner = h.start(RunMode::Answer, "owner").await.unwrap();
+        let queued = h.start(RunMode::Answer, "queued").await.unwrap();
+        let owner_id = owner.run_id.clone();
+        let queued_id = queued.run_id.clone();
+        assert!(wait_until(|| h.run_row(&queued_id).0 == "queued", 5_000).await);
+        cancel_durable(&h.db, &h.registry(), &queued_id).await.unwrap();
+        assert_eq!(finished(queued).await.status, RunStatus::Cancelled);
+        assert_eq!(h.run_row(&queued_id).0, "cancelled");
+        assert_eq!(h.run_row(&owner_id).0, "running");
+        cancel_durable(&h.db, &h.registry(), &owner_id).await.unwrap();
+        assert_eq!(finished(owner).await.status, RunStatus::Cancelled);
     }
 
     #[tokio::test]
@@ -2073,8 +2831,9 @@ mod tests {
         // Absolute path → resolve_agent_binary returns it as-is; spawn fails.
         h.install_adapter_command("/nonexistent-conceptify/agent-zzz", 60);
 
-        let err = h.start(RunMode::Answer, "p").await.unwrap_err();
-        assert!(matches!(err, RunError::Io(_)), "{err:?}");
+        let attempt = h.start(RunMode::Answer, "p").await.unwrap();
+        let first_id = attempt.run_id.clone();
+        assert_eq!(finished(attempt).await.status, RunStatus::Failed);
 
         // The attempted run is honest history: row exists, terminal 'failed'.
         let (run_id, status, finished_at, log_path): (String, String, Option<String>, String) = {
@@ -2088,15 +2847,16 @@ mod tests {
             .unwrap()
         };
         assert_eq!(status, "failed");
+        assert_eq!(run_id, first_id);
         assert!(finished_at.is_some());
         let log = std::fs::read_to_string(&log_path).unwrap();
         assert!(log.contains("[run] ABNORMAL END: failed to spawn"), "{log}");
 
-        // Guard released — a (still-broken) retry gets a fresh attempt, not
-        // AlreadyRunning.
-        let err2 = h.start(RunMode::Answer, "p").await.unwrap_err();
-        assert!(matches!(err2, RunError::Io(_)), "{err2:?}");
-        let _ = run_id;
+        // Capacity released — a still-broken retry creates and finalizes a
+        // fresh auditable attempt.
+        let retry = h.start(RunMode::Answer, "p").await.unwrap();
+        assert_ne!(retry.run_id, run_id);
+        assert_eq!(finished(retry).await.status, RunStatus::Failed);
         assert_eq!(h.registry().active_run_for_thread(&h.thread_id), None);
     }
 
@@ -2141,12 +2901,116 @@ mod tests {
                 prompt: "p".to_owned(),
                 env: Vec::new(),
                 run_override: None,
+                retry_of_run_id: None,
             },
         )
         .await
         .unwrap_err();
         assert!(matches!(err, RunError::ThreadNotFound(_)), "{err:?}");
         assert_eq!(h.registry().active_run_for_thread("no-such-thread"), None);
+    }
+
+    #[tokio::test]
+    async fn queued_run_resumes_after_restart_without_duplicate_row() {
+        let h = harness("resume-queued");
+        h.install_fake_agent("#!/bin/sh\necho resumed\nexit 0\n", 60);
+        let log_path = shared_artifacts_root()
+            .join(&h.project_id)
+            .join("threads/run-test/runs/resumed.log");
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        {
+            let conn = h.db.lock().unwrap();
+            crate::run_queue::enqueue(
+                &conn,
+                &crate::run_queue::NewQueuedRun {
+                    id: "resume-1",
+                    thread_id: &h.thread_id,
+                    agent: "fake",
+                    model: "claude-haiku-4-5",
+                    mode: "answer",
+                    log_path: log_path.to_str().unwrap(),
+                    override_json: None,
+                    route: "manual",
+                    run_class: crate::run_queue::RunClass::Exploration,
+                    provider_pool: "manual",
+                    prompt: "persisted prompt",
+                    env_json: "[]",
+                    base_artifact_version: None,
+                    retry_of_run_id: None,
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(resume_queued_runs(h.handle.clone()).await.unwrap(), 1);
+        assert!(wait_until(|| h.run_row("resume-1").0 == "completed", 15_000).await);
+        let count: i64 = h
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM follow_up_runs WHERE id = 'resume-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "restart resumes the original row, never duplicates it");
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert!(log.contains("[out] resumed"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn resumed_ask_restores_failure_watcher_and_does_not_strand_thread() {
+        let h = harness("resume-ask-failure");
+        h.install_fake_agent("#!/bin/sh\nexit 3\n", 60);
+        let log_path = shared_artifacts_root()
+            .join(&h.project_id)
+            .join("threads/run-test/runs/resumed-ask.log");
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        {
+            let conn = h.db.lock().unwrap();
+            crate::run_queue::enqueue(
+                &conn,
+                &crate::run_queue::NewQueuedRun {
+                    id: "resume-ask",
+                    thread_id: &h.thread_id,
+                    agent: "fake",
+                    model: "claude-sonnet-5",
+                    mode: "ask",
+                    log_path: log_path.to_str().unwrap(),
+                    override_json: None,
+                    route: "manual",
+                    run_class: crate::run_queue::RunClass::Mutation,
+                    provider_pool: "manual",
+                    prompt: "persisted ask",
+                    env_json: "[]",
+                    base_artifact_version: None,
+                    retry_of_run_id: None,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(resume_queued_runs(h.handle.clone()).await.unwrap(), 1);
+        assert!(wait_until(|| h.run_row("resume-ask").0 == "failed", 15_000).await);
+        assert!(
+            wait_until(
+                || {
+                    h.db
+                        .lock()
+                        .unwrap()
+                        .query_row(
+                            "SELECT status FROM threads WHERE id = ?1",
+                            [&h.thread_id],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .unwrap()
+                        == "error"
+                },
+                5_000,
+            )
+            .await,
+            "recovered watcher should transition generating → error"
+        );
     }
 
     // -- boot reconciliation (N4) --------------------------------------------
@@ -2190,7 +3054,7 @@ mod tests {
         let log = std::fs::read_to_string(&log_path).unwrap();
         assert!(log.contains("[out] partial transcript"), "{log}");
         assert!(
-            log.contains("[run] ABNORMAL END: run stale-1 was still 'running' at app startup"),
+            log.contains("[run] ABNORMAL END: run stale-1 was still executing at app startup"),
             "{log}"
         );
 

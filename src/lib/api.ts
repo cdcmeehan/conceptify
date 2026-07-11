@@ -206,7 +206,17 @@ export interface RunOverride {
 /** Terminal + initial run states (docs/api.md "Run events"). `failed` and
  *  `timeout` are the same error class for UI purposes; the distinction only
  *  changes the message. */
-export type RunStatus = "running" | "completed" | "failed" | "cancelled" | "timeout";
+export type RunStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "throttled"
+  | "cancelling"
+  | "completed"
+  | "conflicted"
+  | "failed"
+  | "cancelled"
+  | "timeout";
 
 /**
  * A successfully started flow run. `target_comment_ids` are the comments this
@@ -225,8 +235,8 @@ export interface RunStarted {
 /**
  * Start the FR-4.6 "Ask follow-ups" batch run: one headless agent answers every
  * open comment individually via `resolve-comment`; the artifact is untouched.
- * Rejects (with a user-facing message) when the thread has no artifact, no open
- * comments, or already has an active run (FR-4.9).
+ * Rejects when the thread has no artifact or no open comments. Concurrent
+ * submissions are accepted into the durable provider queue.
  */
 export function askFollowUps(
   threadId: string,
@@ -244,12 +254,11 @@ export function askFollowUps(
  * Start the "Ask now" single-comment answer run (epic conceptify-6xi): one
  * headless agent answers just this one root comment's latest open message via
  * `resolve-comment`; the artifact is untouched. Same `RunStarted` shape and
- * FR-4.9 one-run-per-thread guard as {@link askFollowUps}, but scoped to a
- * single root (`target_comment_ids` is `[rootCommentId]`; the resolve may land
+ * same durable queue as {@link askFollowUps}, but scoped to a single root
+ * (`target_comment_ids` is `[rootCommentId]`; the resolve may land
  * on a reply row when the root was re-opened by a reply). Rejects (with a
  * user-facing message) when the thread has no artifact, the comment isn't found,
- * the target is a reply, the target root isn't open, a run is already active
- * (FR-4.9), or the agent/CLI is missing.
+ * the target is a reply, the target root isn't open, or the agent/CLI is missing.
  */
 export function askSingleComment(
   threadId: string,
@@ -281,8 +290,8 @@ export function applyToArtifact(
   });
 }
 
-/** The live run for a thread, or `null`. `status` is always `"running"` —
- *  finished runs leave the registry before `run-finished` fires. Carries no
+/** The newest non-terminal run for a thread, or `null`. Status may be queued,
+ *  starting, running, throttled, or cancelling. Carries no
  *  target ids (not persisted): a re-attached run renders indeterminate
  *  progress. */
 export interface ActiveRun {

@@ -2193,6 +2193,7 @@ mod tests {
                     adapter: Some("codex".to_owned()),
                     model: Some("gpt-5.4-mini".to_owned()),
                 }),
+                retry_of_run_id: None,
             },
         )
         .await

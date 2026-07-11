@@ -15,6 +15,7 @@ mod flows;
 mod live_bridge;
 mod projects;
 mod routing;
+mod run_queue;
 mod runs;
 mod server;
 mod settings;
@@ -143,6 +144,22 @@ pub fn run() {
             // FR-4.9 guard + cancel routing, consumed by start_run and the
             // cancel_run command.
             app.manage(runs::RunRegistry::default());
+
+            // Recreate scheduler workers for durable queued/throttled rows.
+            // Preparation and execution stay off the boot critical path; any
+            // invalid payload is failed honestly by the resume routine.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    match runs::resume_queued_runs(handle).await {
+                        Ok(count) if count > 0 => {
+                            eprintln!("[conceptify-runs] resumed {count} queued run(s)")
+                        }
+                        Ok(_) => {}
+                        Err(e) => eprintln!("[conceptify-runs] queue resume failed: {e}"),
+                    }
+                });
+            }
 
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(server::start(app_handle));

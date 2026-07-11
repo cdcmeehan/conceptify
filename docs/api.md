@@ -85,9 +85,14 @@ as `comment-resolved`: one event covers all comment mutations (consistent with
 
 ### Run events (headless agent runs)
 
-`run-progress` / `run-finished` come from the headless agent-run engine
+`run-progress` / `run-finished` come from the durable headless run scheduler
 (`src-tauri/src/runs.rs`, PRD §5.1 agent spawner / FR-4.8), not from an HTTP
-endpoint — they fire while a background `follow_up_runs` row is in flight.
+endpoint. Submission creates a `queued` row before returning; provider-aware
+admission drives `queued → starting → running`. A genuine provider limit moves
+the same row through `throttled → queued` after `not_before`, releasing its
+worker slot. Queued/throttled rows resume after app restart; interrupted
+starting/running work fails with `status_reason = app_interrupted` and is never
+replayed implicitly.
 
 - `run-progress` — one per agent **stdout** line (the `claude` adapter emits
   `--output-format stream-json`, one JSON object per line). `kind` is the
@@ -103,7 +108,8 @@ endpoint — they fire while a background `follow_up_runs` row is in flight.
   shows only genuine limiting; the display filtering/formatting policy lives
   there (one place), never in the core.
 - `run-finished` — exactly once per run, emitted **after** the DB row reached
-  its terminal state. `status` is one of `completed` (exit 0), `failed`
+  its terminal state. `status` is one of `completed` (exit 0), `conflicted`
+  (a stale mutation result retained without publication), `failed`
   (nonzero exit / spawn failure / abnormal supervision end), `cancelled`
   (user cancel), `timeout` (the FR-5.3 timeout killed the process group).
   Treat `failed` and `timeout` uniformly as the FR-5.3 error class.
@@ -113,8 +119,10 @@ The full transcript of every run is retained at
 (§5.6), with `[out]`/`[err]` stream tags and `[run]` lifecycle markers.
 Cancellation is exposed to the frontend as the `cancel_run` Tauri command
 (`invoke('cancel_run', { run_id })`), which SIGKILLs the run's whole process
-group. One run per thread at a time (FR-4.9): starting a second returns a
-structured error naming the live run.
+group. Cancelling queued/throttled work marks it terminal without spawning;
+cancelling running work releases capacity only after the process is reaped.
+Exploration runs may overlap on one thread. Mutations for the same thread are
+serialized and retain their captured base version for conflict checks.
 
 ### Flow commands (Tauri, not HTTP — FR-4.6/4.7/4.8)
 
@@ -127,8 +135,7 @@ and are invoked by the app shell as Tauri commands (snake_case args):
   this mode. Targets are open roots only (a root re-opened by a reply is
   included; its replies ride along as that root's exchange history, not as
   separate targets — epic conceptify-6xi); `target_comment_ids` is the root
-  ids. Errors (user-facing strings): no artifact, no open comments, run
-  already active (FR-4.9).
+  ids. Errors (user-facing strings): no artifact or no open comments.
 - `ask_single_comment { thread_id, root_comment_id, run_override? }` → same shape with
   `mode: "answer"` — epic conceptify-6xi "Ask now": fire a single-root answer
   run immediately without gathering the batch. The target must be a **root**
@@ -137,7 +144,7 @@ and are invoked by the app shell as Tauri commands (snake_case args):
   message in that root's chain, so the actual `resolve-comment` may land on a
   reply row. Errors (user-facing strings): no artifact; comment not found on
   this thread; target is a reply (reply to its root instead); target root not
-  open; run already active (FR-4.9).
+  open.
 - `apply_to_artifact { thread_id, comment_ids, run_override? }` → same shape with
   `mode: "apply"` — FR-4.7: `comment_ids` empty targets every **answered root**
   (roots only — `resolve-comment --applied` on a reply is rejected, so answered
@@ -145,8 +152,9 @@ and are invoked by the app shell as Tauri commands (snake_case args):
   (never `applied`, never a reply). The run edits a working copy, marks each
   target `applied`, then publishes ONE new version via `conceptify
   save-artifact`.
-- `get_active_run { thread_id }` → the live run summary
-  (`{ run_id, thread_id, mode, status: "running" }`) or `null` — the UI
+- `get_active_run { thread_id }` → the newest non-terminal run summary
+  (`{ run_id, thread_id, mode, status }`, where status is `queued`, `starting`,
+  `running`, `throttled`, or `cancelling`) or `null` — the UI
   re-attaches to an in-flight run on thread switch. Target ids are not
   persisted, so a re-attached run renders indeterminate progress.
 - `get_run_log_tail { run_id, max_lines? }` →

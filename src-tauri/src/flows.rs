@@ -150,6 +150,7 @@ pub struct ActiveRunSummary {
     pub run_id: String,
     pub thread_id: String,
     pub mode: String,
+    pub status: String,
 }
 
 /// Errors from starting a flow. Command wrappers stringify these; the strings
@@ -226,9 +227,8 @@ struct LoadedFlow<T> {
 /// reply chain rides along as its exchange history in the prompt, not as a
 /// separate target. A root re-opened by a user reply is naturally included.
 ///
-/// Guards: the thread must have a saved artifact and ≥ 1 open root; the
-/// engine's FR-4.9 reservation rejects a second run on the same thread
-/// (surfaced as [`RunError::AlreadyRunning`]). Thread status is untouched —
+/// Guards: the thread must have a saved artifact and ≥ 1 open root. Concurrent
+/// exploration is accepted into the durable provider queue. Thread status is untouched —
 /// answers are sidebar-only, and failures are the run UI's to surface
 /// (FR-5.3-lite: no `error` status from follow-up runs).
 pub async fn ask_follow_ups<R: Runtime>(
@@ -281,6 +281,7 @@ pub async fn ask_follow_ups<R: Runtime>(
             prompt,
             env,
             run_override,
+            retry_of_run_id: None,
         },
     )
     .await?;
@@ -310,8 +311,8 @@ pub async fn ask_follow_ups<R: Runtime>(
 /// per-exchange resolve line points the agent at the reply's id when the latest
 /// unanswered message is a reply.
 ///
-/// Guards/side effects match the batch flow exactly: the FR-4.9 one-run-per-
-/// thread reservation rejects a concurrent run, thread status is untouched, and
+/// Guards/side effects match the batch flow exactly: concurrent answers queue,
+/// thread status is untouched, and
 /// there is no completion watcher (per-comment effects arrive via
 /// `comment-updated`). `target_comment_ids` is the single root id (for the
 /// FR-4.8 run block); the actual resolve may land on a reply row.
@@ -386,6 +387,7 @@ pub async fn ask_single_comment<R: Runtime>(
             prompt,
             env,
             run_override,
+            retry_of_run_id: None,
         },
     )
     .await?;
@@ -484,13 +486,14 @@ pub async fn apply_to_artifact<R: Runtime>(
             prompt,
             env,
             run_override,
+            retry_of_run_id: None,
         },
     )
     .await?;
 
     // Run started: the thread is now visibly `updating` (PRD §4 — owned by
-    // the run lifecycle). Set *after* start_run so a rejected start (FR-4.9
-    // guard, spawn failure) leaves the status untouched.
+    // the run lifecycle). Set after durable enqueue so validation/routing
+    // failures leave the status untouched.
     {
         let tid = thread_id.to_owned();
         db::with_conn(&db, move |conn| {
@@ -559,6 +562,50 @@ async fn revert_updating<R: Runtime>(
             "[conceptify-flows] failed to restore thread {thread_id} from updating: {e}"
         ),
     }
+}
+
+/// Reattach the mode-specific thread-status watcher for a durable queued run
+/// reconstructed after app restart. The original in-memory watcher died with
+/// the process; without this replacement, a failed resumed ask/apply could
+/// strand its thread in `generating`/`updating` even though the run row became
+/// terminal.
+pub(crate) fn attach_recovered_run_watcher<R: Runtime>(
+    app_handle: AppHandle<R>,
+    thread_id: String,
+    mode: RunMode,
+    finished: tokio::sync::oneshot::Receiver<runs::FinishedRun>,
+) {
+    if mode == RunMode::Answer {
+        return;
+    }
+    let db = app_handle.state::<DbHandle>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = finished.await;
+        let tid = thread_id.clone();
+        let project_id = db::with_conn(&db, move |conn| {
+            conn.query_row(
+                "SELECT project_id FROM threads WHERE id = ?1",
+                [&tid],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(project_id) = project_id else {
+            return;
+        };
+        match mode {
+            RunMode::Answer => {}
+            RunMode::Apply => {
+                revert_updating(&app_handle, &db, &project_id, &thread_id).await;
+            }
+            RunMode::Ask => {
+                error_thread_if_generating(&app_handle, &db, &project_id, &thread_id).await;
+            }
+        }
+    });
 }
 
 #[derive(Serialize, Clone)]
@@ -657,6 +704,7 @@ pub async fn ask_from_app<R: Runtime>(
         question,
         &project_root,
         run_override,
+        None,
     )
     .await
     {
@@ -680,6 +728,7 @@ struct RetryLoad {
     title: String,
     question: String,
     run_override: Option<RunOverride>,
+    retry_of_run_id: String,
 }
 
 /// Retry a failed in-app ask (FR-5.3): re-spawn the SAME question into the SAME
@@ -703,7 +752,7 @@ pub async fn retry_ask<R: Runtime>(
         // frontend, so retry is robust across app restarts. A NULL
         // (override-free run) or an unparseable blob → None → current defaults;
         // a real override is re-applied verbatim.
-        let run_override = load_latest_run_override(conn, &tid)?;
+        let (retry_of_run_id, run_override) = load_latest_retry_source(conn, &tid)?;
         Ok(RetryLoad {
             project_id: ctx.project.id,
             project_root: ctx.project.root_path,
@@ -711,6 +760,7 @@ pub async fn retry_ask<R: Runtime>(
             title: ctx.thread.title,
             question: ctx.thread.initial_question,
             run_override,
+            retry_of_run_id,
         })
     })
     .await?;
@@ -721,6 +771,7 @@ pub async fn retry_ask<R: Runtime>(
         title,
         question,
         run_override,
+        retry_of_run_id,
     } = loaded;
 
     // Show the thread `generating` again immediately (Retry is a fresh
@@ -746,6 +797,7 @@ pub async fn retry_ask<R: Runtime>(
         &question,
         &project_root,
         run_override,
+        Some(retry_of_run_id),
     )
     .await
     {
@@ -764,22 +816,21 @@ pub async fn retry_ask<R: Runtime>(
 /// [`RunOverride`]. A malformed blob degrades to `None` (retry re-derives
 /// current defaults) rather than failing the retry — the override is a
 /// convenience, never load-bearing for correctness.
-fn load_latest_run_override(
+fn load_latest_retry_source(
     conn: &Connection,
     thread_id: &str,
-) -> Result<Option<RunOverride>, rusqlite::Error> {
-    let raw: Option<Option<String>> = conn
+) -> Result<(String, Option<RunOverride>), rusqlite::Error> {
+    let (run_id, raw): (String, Option<String>) = conn
         .query_row(
-            "SELECT override_json FROM follow_up_runs
+            "SELECT id, override_json FROM follow_up_runs
              WHERE thread_id = ?1 ORDER BY started_at DESC, id DESC LIMIT 1",
             [thread_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(raw
-        .flatten()
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+    let run_override = raw
         .and_then(|json| serde_json::from_str::<RunOverride>(&json).ok())
-        .filter(|o| !o.is_empty()))
+        .filter(|o| !o.is_empty());
+    Ok((run_id, run_override))
 }
 
 /// Assemble the ask prompt, prepare the child env, start the generation run,
@@ -796,6 +847,7 @@ async fn try_spawn_ask<R: Runtime>(
     question: &str,
     project_root: &str,
     run_override: Option<RunOverride>,
+    retry_of_run_id: Option<String>,
 ) -> Result<AskStarted, FlowError> {
     let prompt = build_ask_prompt(&AskPromptContext {
         thread_id,
@@ -814,6 +866,7 @@ async fn try_spawn_ask<R: Runtime>(
             prompt,
             env,
             run_override,
+            retry_of_run_id,
         },
     )
     .await?;
@@ -920,22 +973,25 @@ fn derive_title(title: Option<&str>, question: &str) -> String {
 /// `get_active_run` command (UI re-attaching to a run after a thread switch).
 pub fn active_run_summary(
     conn: &Connection,
-    registry: &RunRegistry,
+    _registry: &RunRegistry,
     thread_id: &str,
 ) -> Result<Option<ActiveRunSummary>, rusqlite::Error> {
-    let Some(run_id) = registry.active_run_for_thread(thread_id) else {
-        return Ok(None);
-    };
-    let mode: String = conn.query_row(
-        "SELECT mode FROM follow_up_runs WHERE id = ?1",
-        [&run_id],
-        |r| r.get(0),
-    )?;
-    Ok(Some(ActiveRunSummary {
-        run_id,
-        thread_id: thread_id.to_owned(),
-        mode,
-    }))
+    conn.query_row(
+        "SELECT id, mode, status FROM follow_up_runs
+         WHERE thread_id = ?1
+           AND status IN ('queued', 'starting', 'running', 'throttled', 'cancelling')
+         ORDER BY queue_seq DESC, started_at DESC, id DESC LIMIT 1",
+        [thread_id],
+        |r| {
+            Ok(ActiveRunSummary {
+                run_id: r.get(0)?,
+                thread_id: thread_id.to_owned(),
+                mode: r.get(1)?,
+                status: r.get(2)?,
+            })
+        },
+    )
+    .optional()
 }
 
 /// The most recent run row for a thread (most recent `started_at`), or `None`
@@ -2249,24 +2305,21 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
         let err = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap_err();
         assert!(matches!(err, FlowError::NoOpenComments), "{err:?}");
 
-        // FR-4.9: while a run is active, both flows are rejected with the
-        // engine's structured AlreadyRunning.
+        // Concurrent exploration submissions are accepted immediately. The
+        // fake/manual pool has capacity one, so the second is durably queued.
         h.add_comment("q1");
         h.install_fake_agent("#!/bin/sh\nsleep 30\n");
         let started = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap();
 
-        let err = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap_err();
-        assert!(
-            matches!(err, FlowError::Run(RunError::AlreadyRunning { .. })),
-            "{err:?}"
-        );
+        let queued = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap();
+        assert_eq!(h.run_row(&queued.run_id).0, "queued");
         let err = apply_to_artifact(&h.handle, &h.thread_id, vec![], None)
             .await
             .unwrap_err();
         assert!(
             matches!(
                 err,
-                FlowError::Run(RunError::AlreadyRunning { .. }) | FlowError::NoTargetComments
+                FlowError::NoTargetComments
             ),
             "{err:?}"
         );
@@ -2277,18 +2330,25 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
             let summary = active_run_summary(&conn, &h.registry(), &h.thread_id)
                 .unwrap()
                 .expect("run should be active");
-            assert_eq!(summary.run_id, started.run_id);
+            assert_eq!(summary.run_id, queued.run_id);
             assert_eq!(summary.mode, "answer");
+            assert_eq!(summary.status, "queued");
             assert!(active_run_summary(&conn, &h.registry(), "other-thread")
                 .unwrap()
                 .is_none());
         }
 
-        h.registry().cancel(&started.run_id).unwrap();
+        runs::cancel_durable(&h.db, &h.registry(), &queued.run_id)
+            .await
+            .unwrap();
+        assert!(wait_until(|| h.run_row(&queued.run_id).0 == "cancelled", 15_000).await);
+        runs::cancel_durable(&h.db, &h.registry(), &started.run_id)
+            .await
+            .unwrap();
         let run_id = started.run_id.clone();
         assert!(wait_until(|| h.run_row(&run_id).0 == "cancelled", 15_000).await);
 
-        // Guard released: a new ask starts cleanly (and is cancelled to clean up).
+        // Released capacity admits a new ask cleanly.
         h.install_fake_agent("#!/bin/sh\nexit 0\n");
         let again = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap();
         let run_id = again.run_id.clone();
@@ -2399,28 +2459,24 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
             .unwrap_err();
         assert!(matches!(err, FlowError::CommentNotOpen(_)), "{err:?}");
 
-        // FR-4.9: with a run active on this thread, a second Ask now — and a
-        // batch — are rejected with the engine's structured AlreadyRunning.
+        // A second Ask now and a batch are accepted into the durable queue;
+        // they do not overwrite or reject the active exploration.
         h.install_fake_agent("#!/bin/sh\nsleep 30\n");
         let started = ask_single_comment(&h.handle, &h.thread_id, &root, None)
             .await
             .unwrap();
         assert_eq!(started.target_comment_ids, vec![root.clone()]);
 
-        let err = ask_single_comment(&h.handle, &h.thread_id, &root, None)
+        let second = ask_single_comment(&h.handle, &h.thread_id, &root, None)
             .await
-            .unwrap_err();
-        assert!(
-            matches!(err, FlowError::Run(RunError::AlreadyRunning { .. })),
-            "{err:?}"
-        );
-        let err = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap_err();
-        assert!(
-            matches!(err, FlowError::Run(RunError::AlreadyRunning { .. })),
-            "{err:?}"
-        );
+            .unwrap();
+        let batch = ask_follow_ups(&h.handle, &h.thread_id, None).await.unwrap();
+        assert_eq!(h.run_row(&second.run_id).0, "queued");
+        assert_eq!(h.run_row(&batch.run_id).0, "queued");
 
-        h.registry().cancel(&started.run_id).unwrap();
+        for id in [&second.run_id, &batch.run_id, &started.run_id] {
+            runs::cancel_durable(&h.db, &h.registry(), id).await.unwrap();
+        }
         let run_id = started.run_id.clone();
         assert!(wait_until(|| h.run_row(&run_id).0 == "cancelled", 15_000).await);
 
@@ -2744,6 +2800,17 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
         assert_eq!(retry.thread_id, thread_id, "retry re-uses the same thread");
         assert_ne!(retry.run_id, first.run_id, "retry spawns a NEW run row");
         assert_eq!(h.run_count(&thread_id), 2);
+        let retry_of: Option<String> = h
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT retry_of_run_id FROM follow_up_runs WHERE id = ?1",
+                [&retry.run_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(retry_of.as_deref(), Some(first.run_id.as_str()));
 
         // Thread went back to `generating`, with a thread-updated event.
         assert_eq!(h.thread_status_of(&thread_id), "generating");
@@ -2856,4 +2923,3 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
         );
     }
 }
-
