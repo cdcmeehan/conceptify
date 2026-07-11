@@ -1149,6 +1149,13 @@ host; the exact quote is always retained as the cross-block fallback. A whole
 element target has one primary `cfy_id`, a one-item `cfy_ids` list, and
 `multi_block: false`.
 
+An exploration request may add an `exploration` object beside `target`. It
+records the selected quick action, answer destination (`inline`, `sidebar`, or
+`thread`), source thread/version, and resolved `response_intent`. Answer runs
+honor that structured depth/language/visuals/shape profile; the action's display
+label is not treated as a brittle prompt contract. Like `target`, this additive
+metadata is stored verbatim and survives re-attachment.
+
 **`type: "text"`** (text selection). Primary = the nearest ancestor
 `data-cfy-id` (`cfy_id`) plus `start`/`end` character offsets within that
 element's normalized text content (precise definition: "visible text" under

@@ -323,6 +323,7 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
                   threadId={thread.id}
                   artifactVersion={resolvedVersion}
                   iframeRef={iframeElRef}
+                  onOpenSidebar={() => setSidebarOpen(true)}
                 />
               )}
             </>

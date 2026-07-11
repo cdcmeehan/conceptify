@@ -378,3 +378,18 @@ Every action is a native keyboard-reachable control and advances to an anchored
 request composer with a useful default request that can be submitted as-is or
 edited. The enlarged toolbar keeps the existing viewport-edge clamp and
 above/below flip, so scrolled selections remain usable.
+
+**Semantic targets (`conceptify-9lj.2`).** Text and element anchors now carry a
+bounded semantic summary for text, blocks, code, figures, images, and diagrams:
+a readable label/excerpt, up to eight stable `data-cfy-id` values, and explicit
+multi-block state. The original id/offset/quote selectors remain authoritative,
+so existing re-attachment and visible “Reference moved” behavior are preserved;
+the extra context survives storage and anchor rewrites verbatim.
+
+**Anchored exploration (`conceptify-9lj.3`).** Explain, deepen, simplify, and
+visualise open a pinned-target composer with an explicit destination: a compact
+answer beside the artifact, the existing Comments conversation, or a durable
+new thread. Inline cards persist as anchored comments, show live answer state,
+and scroll/pulse their source target. Quick actions store a structured response
+intent (depth, language, visuals, shape), and answer agents are instructed to
+honor that profile. Cancelling the composer performs no write and starts no run.

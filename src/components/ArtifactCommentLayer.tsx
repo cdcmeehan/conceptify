@@ -100,6 +100,7 @@ interface PopoverState {
   copied: boolean;
   error: string | null;
   action: "explain" | "deepen" | "simplify" | "visualise" | "change" | null;
+  destination: "inline" | "sidebar" | "thread";
   moreOpen: boolean;
 }
 
@@ -175,9 +176,23 @@ interface Props {
   /** The concrete version currently in the viewer ("latest" already resolved). */
   artifactVersion: number;
   iframeRef: RefObject<HTMLIFrameElement | null>;
+  onOpenSidebar: () => void;
 }
 
-export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: Props) {
+const EXPLORATION_INTENTS: Record<NonNullable<PopoverState["action"]>, api.ResponseIntent> = {
+  explain: { version: 1, depth: "balanced", language: "familiar", visuals: "auto", shape: "auto" },
+  deepen: { version: 1, depth: "deep", language: "domain_native", visuals: "auto", shape: "walkthrough" },
+  simplify: { version: 1, depth: "balanced", language: "plain", visuals: "avoid", shape: "walkthrough" },
+  visualise: { version: 1, depth: "balanced", language: "familiar", visuals: "prefer", shape: "auto" },
+  change: { version: 1, depth: "balanced", language: "familiar", visuals: "auto", shape: "auto" },
+};
+
+function explorationMeta(anchor: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (anchor == null || typeof anchor.exploration !== "object" || anchor.exploration == null) return null;
+  return anchor.exploration as Record<string, unknown>;
+}
+
+export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onOpenSidebar }: Props) {
   const state = useAppStore();
   const [popover, setPopover] = useState<PopoverState | null>(null);
 
@@ -232,6 +247,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
         copied: false,
         error: null,
         action: null,
+        destination: "inline",
         moreOpen: false,
       });
     };
@@ -256,6 +272,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
         copied: false,
         error: null,
         action: null,
+        destination: "sidebar",
         moreOpen: false,
       });
     };
@@ -369,34 +386,76 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
     if (body.length === 0) return;
 
     setPopover({ ...current, saving: true, error: null });
-    api
-      .createComment({
+    const target = current.anchor.target;
+    const intent = current.action == null ? EXPLORATION_INTENTS.explain : EXPLORATION_INTENTS[current.action];
+
+    if (current.destination === "thread" && current.action != null) {
+      const excerpt = target?.excerpt || current.anchor.quote?.exact || target?.label || "Selected artifact content";
+      const question = `${body}\n\nSource excerpt from an existing artifact (thread ${threadIdRef.current}, version ${artifactVersionRef.current}):\n${excerpt}`;
+      void appStore
+        .askFromApp(target?.label ? `Explore: ${target.label}`.slice(0, 80) : null, question, null, intent)
+        .catch((e) => {
+          setPopover((prev) => (prev != null ? { ...prev, saving: false, error: String(e) } : prev));
+        });
+      return;
+    }
+
+    const anchor = {
+      ...current.anchor,
+      exploration: current.action == null ? undefined : {
+        action: current.action,
+        destination: current.destination,
+        response_intent: intent,
+        source_thread_id: threadIdRef.current,
+        source_artifact_version: artifactVersionRef.current,
+      },
+    } as unknown as Record<string, unknown>;
+
+    api.createComment({
         threadId: threadIdRef.current,
         artifactVersion: artifactVersionRef.current,
-        anchor: current.anchor as unknown as Record<string, unknown>,
+        anchor,
         body,
       })
-      .then((comment) => {
+      .then(async (comment) => {
         // Store update recomputes `highlights` → the new comment's highlight is
         // commanded onto the artifact in the same tick. Dismiss the popover
         // (clears the shell's pending-selection state).
         appStore.addComment(comment);
+        if (current.action == null) {
+          setPopover(null);
+          return;
+        }
+        if (current.destination === "sidebar") onOpenSidebar();
+        // The comment is already durable at this point. Dismiss before starting
+        // the answer run so a rejected run cannot leave a resubmittable composer
+        // that would create a duplicate; the persisted row exposes retry in the
+        // Comments sidebar.
         setPopover(null);
+        await appStore.askSingleComment(threadIdRef.current, comment.id);
       })
       .catch((e) => {
         setPopover((prev) => (prev != null ? { ...prev, saving: false, error: String(e) } : prev));
       });
   }
 
-  if (popover == null) return null;
+  const inlineAnswers = state.comments.filter((comment) => {
+    const meta = explorationMeta(comment.anchor);
+    return comment.parent_id == null && comment.artifact_version === artifactVersion && meta?.destination === "inline";
+  }).slice(-3);
+  const inlineRight = iframeRef.current == null
+    ? 16
+    : Math.max(16, window.innerWidth - iframeRef.current.getBoundingClientRect().right + 16);
+
+  if (popover == null && inlineAnswers.length === 0) return null;
 
   // Keep mousedowns inside the popover from bubbling out to the artifact / list
   // panes. (The capture-phase click-away listener already ignores clicks whose
   // target is inside the popover element.)
-  const positionStyle = { left: `${popover.left}px`, top: `${popover.top}px` };
+  const positionStyle = popover == null ? undefined : { left: `${popover.left}px`, top: `${popover.top}px` };
 
   // Stage 1: the compact action toolbar for a fresh selection.
-  if (popover.stage === "toolbar") {
+  if (popover?.stage === "toolbar") {
     const preview = popover.anchor.target?.label || popover.anchor.target?.excerpt || popover.anchor.quote?.exact?.trim() || "Selected content";
     return (
       <div
@@ -439,6 +498,8 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
   }
 
   // Stage 2: the comment composer.
+  if (popover == null) return <InlineExplorationCards comments={inlineAnswers} activeRun={state.activeRun} right={inlineRight} />;
+
   const actionLabels = { explain: "Explain selection", deepen: "Deepen selection", simplify: "Simplify selection", visualise: "Visualise selection", change: "Change selection" } as const;
   const label = popover.action == null ? (popover.kind === "selection" ? "Comment on selection" : "Comment on element") : actionLabels[popover.action];
 
@@ -452,6 +513,15 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
       onMouseDown={(e) => e.stopPropagation()}
     >
       <p class="cfy-label mb-1.5">{label}</p>
+      <div class="mb-2 rounded-ctl border border-line bg-well px-2 py-1.5">
+        <p class="truncate text-[11px] font-medium text-ink">
+          {popover.anchor.target?.label || popover.anchor.quote?.exact || popover.anchor.cfy_id || "Selected content"}
+        </p>
+        <p class="mt-0.5 line-clamp-2 text-[10px] leading-snug text-muted">
+          Included from artifact v{artifactVersion}
+          {popover.anchor.target?.kind ? ` · ${popover.anchor.target.kind}` : ""}
+        </p>
+      </div>
       <textarea
         ref={textareaRef}
         value={popover.body}
@@ -474,6 +544,35 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
         }}
         class="cfy-input resize-none"
       />
+      {popover.action != null && (
+        <fieldset class="mt-2">
+          <legend class="cfy-label mb-1">Answer in</legend>
+          <div class="grid grid-cols-3 gap-1" aria-label="Answer destination">
+            {([
+              ["inline", "Here"],
+              ["sidebar", "Sidebar"],
+              ["thread", "New thread"],
+            ] as const).map(([value, text]) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={popover.destination === value}
+                onClick={() => setPopover((prev) => prev == null ? null : { ...prev, destination: value })}
+                class={`cfy-btn px-1 py-1 text-[10px] ${popover.destination === value ? "cfy-btn-accent" : "cfy-btn-secondary"}`}
+              >
+                {text}
+              </button>
+            ))}
+          </div>
+          <p class="mt-1 text-[9px] leading-snug text-muted">
+            {popover.destination === "inline"
+              ? "A compact answer stays linked to this target."
+              : popover.destination === "sidebar"
+                ? "Continue the anchored exchange in Comments."
+                : "Create a durable exploration thread from this context."}
+          </p>
+        </fieldset>
+      )}
       {popover.error != null && (
         <p class="mt-1 text-[11px] text-danger">{popover.error}</p>
       )}
@@ -495,5 +594,54 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
         </button>
       </div>
     </div>
+  );
+}
+
+function InlineExplorationCards({
+  comments,
+  activeRun,
+  right,
+}: {
+  comments: api.Comment[];
+  activeRun: import("../store/appStore").ActiveRunState | null;
+  right: number;
+}) {
+  return (
+    <aside class="fixed bottom-4 z-40 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2" style={{ right: `${right}px` }} aria-label="Inline exploration answers">
+      {comments.map((comment) => {
+        const anchor = comment.anchor as unknown as Anchor;
+        const target = anchor.target;
+        const answering = activeRun?.mode === "answer" && activeRun.targetIds?.includes(comment.id);
+        return (
+          <article key={comment.id} class="cfy-card overflow-hidden shadow-lg">
+            <button
+              type="button"
+              onClick={() => artifactBridge.scrollToAnchor(anchor, comment.id)}
+              class="flex w-full items-start justify-between gap-2 border-b border-line bg-well px-3 py-2 text-left hover:bg-hover"
+              title="Show the anchored target"
+            >
+              <span class="min-w-0">
+                <span class="cfy-label block">{String(explorationMeta(comment.anchor)?.action || "Explore")}</span>
+                <span class="mt-0.5 block truncate text-[11px] text-muted">{target?.label || target?.excerpt || comment.body}</span>
+              </span>
+              <span class="cfy-chip shrink-0 bg-accent-bg text-[9px] text-accent-ink">Show target</span>
+            </button>
+            <div class="px-3 py-2">
+              {comment.answer_html ? (
+                <div class="cfy-answer select-text text-xs leading-relaxed text-ink" dangerouslySetInnerHTML={{ __html: comment.answer_html }} />
+              ) : (
+                <div class="flex items-center gap-2 text-[11px] text-muted">
+                  {answering && <span class="h-2 w-2 animate-pulse rounded-full bg-info" aria-hidden="true" />}
+                  <span>{answering ? "Answering…" : comment.status === "open" ? "Waiting to answer" : "Answer unavailable"}</span>
+                  {answering && (
+                    <button type="button" onClick={() => appStore.cancelActiveRun()} class="cfy-btn cfy-btn-ghost ml-auto px-1.5 py-0.5 text-[10px]">Cancel</button>
+                  )}
+                </div>
+              )}
+            </div>
+          </article>
+        );
+      })}
+    </aside>
   );
 }

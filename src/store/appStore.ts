@@ -1004,11 +1004,12 @@ class AppStore {
     title: string | null,
     question: string,
     runOverride?: RunOverride | null,
+    responseIntent?: api.ResponseIntent,
   ): Promise<void> {
     const projectId = this.state.selectedProjectId;
     if (projectId == null) throw new Error("select a project first");
 
-    const started = await api.askFromApp(projectId, title, question, runOverride);
+    const started = await api.askFromApp(projectId, title, question, runOverride, responseIntent);
     // Make the new thread appear, then select it. `selectThread` clears viewer
     // state (incl. activeRun), so record the ask run AFTER selecting.
     await this.refetchThreads(projectId);

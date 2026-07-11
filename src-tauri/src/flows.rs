@@ -1466,7 +1466,7 @@ A reader left comments (follow-up questions) on an explanation artifact, and may
 - Artifact file (read-only in this mode): {artifact_path} (version {version})
 
 ## Exchanges to answer
-Each exchange below is one conversation under a root comment: the reader's original comment with its `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole), any answer already given, then any follow-up replies in order. Every message is labelled with its own comment id and `[status]`; the last line of each exchange names the single message to answer now.
+Each exchange below is one conversation under a root comment: the reader's original comment with its `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole), any answer already given, then any follow-up replies in order. An anchor may include `exploration.response_intent`; when present, honor its depth, language, visuals, and shape as the answer profile rather than guessing from a canned prompt. Every message is labelled with its own comment id and `[status]`; the last line of each exchange names the single message to answer now.
 
 {exchanges}
 
@@ -1765,7 +1765,7 @@ A reader left comments (follow-up questions) on an explanation artifact, and may
 - Artifact file (read-only in this mode): /Users/chris/Documents/conceptify/artifacts/p1/threads/oauth/artifact.v1.html (version 1)
 
 ## Exchanges to answer
-Each exchange below is one conversation under a root comment: the reader's original comment with its `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole), any answer already given, then any follow-up replies in order. Every message is labelled with its own comment id and `[status]`; the last line of each exchange names the single message to answer now.
+Each exchange below is one conversation under a root comment: the reader's original comment with its `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole), any answer already given, then any follow-up replies in order. An anchor may include `exploration.response_intent`; when present, honor its depth, language, visuals, and shape as the answer profile rather than guessing from a canned prompt. Every message is labelled with its own comment id and `[status]`; the last line of each exchange names the single message to answer now.
 
 ### Exchange 1 — root comment c-anchored
 - anchor: {"cfy_id":"sec-flow","end":9,"quote":{"exact":"token","prefix":"the ","suffix":" is"},"start":4,"type":"text","v":1}
@@ -1794,6 +1794,28 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
 - If the file ~/.claude/skills/conceptify/references/follow-ups.md exists, read it before answering — it holds the house rules for follow-up answers.
 "#;
         assert_eq!(prompt, expected);
+    }
+
+    #[test]
+    fn answer_prompt_carries_exploration_profile_and_destination() {
+        let mut root = fixture_comment("c-explore", true, CommentStatus::Open);
+        root.anchor.as_mut().unwrap()["exploration"] = serde_json::json!({
+            "action": "deepen",
+            "destination": "inline",
+            "response_intent": {
+                "version": 1,
+                "depth": "deep",
+                "language": "domain_native",
+                "visuals": "auto",
+                "shape": "walkthrough"
+            }
+        });
+        let exchanges = vec![exchange(root)];
+        let prompt = build_answer_prompt(&fixture_answer_ctx(&exchanges));
+        assert!(prompt.contains("exploration.response_intent"));
+        assert!(prompt.contains("\"destination\":\"inline\""));
+        assert!(prompt.contains("\"depth\":\"deep\""));
+        assert!(prompt.contains("\"shape\":\"walkthrough\""));
     }
 
     #[test]
@@ -1853,7 +1875,7 @@ A reader left comments (follow-up questions) on an explanation artifact, and may
 - Artifact file (read-only in this mode): /Users/chris/Documents/conceptify/artifacts/p1/threads/oauth/artifact.v1.html (version 1)
 
 ## Exchanges to answer
-Each exchange below is one conversation under a root comment: the reader's original comment with its `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole), any answer already given, then any follow-up replies in order. Every message is labelled with its own comment id and `[status]`; the last line of each exchange names the single message to answer now.
+Each exchange below is one conversation under a root comment: the reader's original comment with its `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole), any answer already given, then any follow-up replies in order. An anchor may include `exploration.response_intent`; when present, honor its depth, language, visuals, and shape as the answer profile rather than guessing from a canned prompt. Every message is labelled with its own comment id and `[status]`; the last line of each exchange names the single message to answer now.
 
 ### Exchange 1 — root comment c-root
 - anchor: {"cfy_id":"sec-flow","end":9,"quote":{"exact":"token","prefix":"the ","suffix":" is"},"start":4,"type":"text","v":1}
@@ -2105,7 +2127,7 @@ A reader left comments (follow-up questions) on an explanation artifact, and may
 - Artifact file (read-only in this mode): /Users/chris/Documents/conceptify/artifacts/p1/threads/oauth/artifact.v1.html (version 1)
 
 ## Exchanges to answer
-Each exchange below is one conversation under a root comment: the reader's original comment with its `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole), any answer already given, then any follow-up replies in order. Every message is labelled with its own comment id and `[status]`; the last line of each exchange names the single message to answer now.
+Each exchange below is one conversation under a root comment: the reader's original comment with its `anchor` (where it points in the artifact — `cfy_id` is the target element's `data-cfy-id`, `quote.exact` is the anchored text; a null anchor is a direct question about the artifact as a whole), any answer already given, then any follow-up replies in order. An anchor may include `exploration.response_intent`; when present, honor its depth, language, visuals, and shape as the answer profile rather than guessing from a canned prompt. Every message is labelled with its own comment id and `[status]`; the last line of each exchange names the single message to answer now.
 
 ### Exchange 1 — root comment c-anchored
 - anchor: {"cfy_id":"sec-flow","end":9,"quote":{"exact":"token","prefix":"the ","suffix":" is"},"start":4,"type":"text","v":1}

@@ -83,6 +83,17 @@ function anchorExcerpt(
   anchor: Record<string, unknown> | null,
 ): { kind: "direct" | "quote" | "element"; text: string } {
   if (anchor == null) return { kind: "direct", text: "Direct question" };
+  const target = anchor.target;
+  if (target != null && typeof target === "object") {
+    const label = (target as Record<string, unknown>).label;
+    const excerpt = (target as Record<string, unknown>).excerpt;
+    if (typeof label === "string" && label.trim().length > 0) {
+      return { kind: "quote", text: label.trim() };
+    }
+    if (typeof excerpt === "string" && excerpt.trim().length > 0) {
+      return { kind: "quote", text: excerpt.trim() };
+    }
+  }
   const quote = anchor.quote;
   if (quote != null && typeof quote === "object") {
     const exact = (quote as Record<string, unknown>).exact;
