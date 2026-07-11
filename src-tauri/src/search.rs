@@ -2,6 +2,8 @@
 
 use rusqlite::{params, Connection};
 use scraper::{Html, Selector};
+use conceptify_types::{SearchHit, SearchHitKind, SearchResponse};
+use tauri::State;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactBlock {
@@ -116,6 +118,81 @@ pub fn rebuild_artifacts(conn: &Connection) -> rusqlite::Result<usize> {
     Ok(count)
 }
 
+fn match_query(input: &str) -> Option<String> {
+    let terms: Vec<String> = input
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '-'))
+        .filter(|term| !term.is_empty())
+        .take(12)
+        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+        .collect();
+    (!terms.is_empty()).then(|| terms.join(" AND "))
+}
+
+pub fn query(
+    conn: &Connection,
+    input: &str,
+    project_filter: Option<&str>,
+    limit: usize,
+) -> rusqlite::Result<SearchResponse> {
+    let Some(fts_query) = match_query(input) else {
+        return Ok(SearchResponse::default());
+    };
+    let limit = limit.clamp(1, 100) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT kind, entity_id, project_id, thread_id, artifact_version, block_id,
+                highlight(search_index, 7, '<mark>', '</mark>'),
+                snippet(search_index, 8, '<mark>', '</mark>', ' … ', 24),
+                bm25(search_index, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 8.0, 1.0)
+         FROM search_index
+         WHERE search_index MATCH ?1 AND (?2 IS NULL OR project_id = ?2)
+         ORDER BY 9 ASC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![fts_query, project_filter, limit], |row| {
+        let kind_text: String = row.get(0)?;
+        let kind = match kind_text.as_str() {
+            "project" => SearchHitKind::Project,
+            "thread" => SearchHitKind::Thread,
+            "artifact" => SearchHitKind::Artifact,
+            "comment" => SearchHitKind::Comment,
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        };
+        Ok(SearchHit {
+            kind,
+            entity_id: row.get(1)?,
+            project_id: row.get(2)?,
+            thread_id: row.get(3)?,
+            artifact_version: row.get(4)?,
+            block_id: row.get(5)?,
+            title: row.get(6)?,
+            snippet: row.get(7)?,
+            rank: row.get(8)?,
+        })
+    })?;
+    let mut response = SearchResponse::default();
+    for hit in rows {
+        let hit = hit?;
+        match hit.kind {
+            SearchHitKind::Project => response.projects.push(hit),
+            SearchHitKind::Thread => response.threads.push(hit),
+            SearchHitKind::Artifact => response.artifacts.push(hit),
+            SearchHitKind::Comment => response.comments.push(hit),
+        }
+    }
+    Ok(response)
+}
+
+#[tauri::command]
+pub fn search(
+    db: State<crate::db::DbHandle>,
+    query: String,
+    project_filter: Option<String>,
+    limit: Option<usize>,
+) -> Result<SearchResponse, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    self::query(&conn, &query, project_filter.as_deref(), limit.unwrap_or(40))
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +213,36 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE VIRTUAL TABLE fts_probe USING fts5(body)", [])
             .expect("bundled SQLite must include FTS5");
+    }
+
+    fn search_conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::migrations().to_latest(&mut conn).unwrap();
+        conn.execute("INSERT INTO projects (id,name,root_path) VALUES ('p1','Compiler Lab','/tmp/p1')", []).unwrap();
+        conn.execute("INSERT INTO projects (id,name,root_path) VALUES ('p2','Other','/tmp/p2')", []).unwrap();
+        conn.execute("INSERT INTO threads (id,project_id,title,slug,initial_question,status) VALUES ('t1','p1','Lexer Pipeline','lexer','tokens and parsing','ready')", []).unwrap();
+        conn.execute("INSERT INTO threads (id,project_id,title,slug,initial_question,status) VALUES ('t2','p2','Other Thread','other','lexer only in body','ready')", []).unwrap();
+        conn
+    }
+
+    #[test]
+    fn grouped_ranked_results_include_navigation_and_highlights() {
+        let conn = search_conn();
+        replace_artifact(&conn, "p1", "t1", 3, "<section data-cfy-id='dfa'><h2>State machine</h2><p>The lexer emits tokens.</p></section>").unwrap();
+        let result = query(&conn, "lex", Some("p1"), 20).unwrap();
+        assert_eq!(result.threads[0].entity_id, "t1");
+        assert!(result.threads[0].title.contains("<mark>Lexer</mark>"));
+        assert_eq!(result.artifacts[0].artifact_version, Some(3));
+        assert_eq!(result.artifacts[0].block_id.as_deref(), Some("dfa"));
+        assert!(result.artifacts[0].snippet.contains("<mark>lexer</mark>"));
+        assert!(result.threads[0].rank <= result.artifacts[0].rank);
+    }
+
+    #[test]
+    fn hostile_and_empty_queries_never_reach_fts_syntax() {
+        let conn = search_conn();
+        for input in ["", "   ", "\" (( NEAR(foo", "lexer OR * ]"] {
+            query(&conn, input, None, 10).expect("sanitized query");
+        }
     }
 }

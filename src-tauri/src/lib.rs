@@ -154,6 +154,7 @@ pub fn run() {
             synthesis::compare_threads,
             synthesis::record_thread_synthesis,
             synthesis::get_thread_synthesis,
+            search::search,
             runs::cancel_run,
         ])
         .setup(|app| {

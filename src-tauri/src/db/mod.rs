@@ -12,7 +12,7 @@
 //! runs, settings. Artifact HTML bodies live on disk as plain files (§5.6);
 //! this layer only ever stores their paths.
 
-mod migrations;
+pub(crate) mod migrations;
 
 use std::sync::{Arc, Mutex};
 

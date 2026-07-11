@@ -66,6 +66,16 @@ webview updates live instead of polling. The frontend subscribes with
 visible refresh < 500ms): the frontend reloads the artifact iframe for
 `thread_id` at `version` when it arrives.
 
+## Search
+
+`GET /api/v1/search?q=<text>&project_id=<optional>&limit=<optional>` returns
+grouped `projects`, `threads`, `artifacts`, and `comments` arrays. Each hit
+contains `projectId`, optional `threadId`, optional `artifactVersion` and
+`blockId`, a marker-highlighted title/snippet, and its BM25 rank. `limit`
+defaults to 40 and is capped at 100. Input is treated as literal prefix terms;
+FTS operators and unbalanced punctuation are never interpreted as syntax.
+An empty query returns four empty arrays.
+
 `comment-updated` is the live-sidebar trigger for every mutation to a comment —
 status transitions (the M5 `resolve-comment` flow), landing `answer_html`, and
 the `anchor_state` "reference moved" flip. Besides `PATCH /comments/:id`, the
