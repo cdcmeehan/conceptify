@@ -10,7 +10,7 @@
 /** The route a model resolves to, mirroring routing.rs `RouteTag` plus an
  *  `unroutable` display state (routing.rs returns `SettingsError::UnroutableModel`
  *  for these — we render a warning rather than a route). */
-export type RouteTag = "anthropic" | "openai" | "openrouter" | "unroutable";
+export type RouteTag = "anthropic" | "openai" | "openrouter" | "local" | "unroutable";
 
 export interface RouteResult {
   tag: RouteTag;
@@ -26,6 +26,7 @@ const ROUTE_LABELS: Record<RouteTag, string> = {
   anthropic: "via claude CLI",
   openai: "via codex CLI",
   openrouter: "via OpenRouter",
+  local: "via local endpoint",
   unroutable: "no route",
 };
 
@@ -74,6 +75,7 @@ export function routeForModel(
   }
 
   // 1. Slash-form id is an OpenRouter slug.
+  if (model.startsWith("local/") && model.length > 6) return { tag: "local", needsKey: false };
   if (model.includes("/")) return { tag: "openrouter", needsKey: true };
 
   // 2. Exact catalog family.

@@ -95,7 +95,7 @@ export function QuickSwitcher() {
   }
 
   return <>
-    <button ref={triggerRef} type="button" onClick={() => setOpen(true)} class="fixed bottom-3 left-3 z-30 flex items-center gap-2 rounded-ctl border border-line bg-paper/95 px-2.5 py-1.5 text-[11px] font-medium text-muted shadow-sm backdrop-blur hover:border-accent/40 hover:text-ink" aria-keyshortcuts="Meta+K Control+K">
+    <button ref={triggerRef} type="button" onClick={() => setOpen(true)} class="fixed bottom-14 left-3 z-30 flex items-center gap-2 rounded-ctl border border-line bg-paper/95 px-2.5 py-1.5 text-[11px] font-medium text-muted shadow-sm backdrop-blur hover:border-accent/40 hover:text-ink" aria-keyshortcuts="Meta+K Control+K">
       <span aria-hidden="true">⌕</span> Search <kbd class="rounded border border-line px-1 font-mono text-[9px]">⌘K</kbd>
     </button>
     {open && <div class="fixed inset-0 z-[70] flex items-start justify-center bg-ink/25 px-4 pt-[12vh] backdrop-blur-[2px]" onMouseDown={(event) => { if (event.currentTarget === event.target) close(); }}>

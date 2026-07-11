@@ -29,18 +29,18 @@ pub fn router<R: tauri::Runtime>() -> Router<ApiState<R>> {
 }
 
 /// Read the enabled provider suites from settings (merged over code defaults).
-async fn enabled_providers<R: tauri::Runtime>(
+async fn agent_settings<R: tauri::Runtime>(
     state: &ApiState<R>,
-) -> Result<std::collections::BTreeSet<String>, String> {
+) -> Result<crate::settings::AgentSettings, String> {
     db::with_conn_result(&state.db, |conn| {
-        settings::get_settings(conn).map(|s| s.enabled_providers)
+        settings::get_settings(conn)
     })
     .await
     .map_err(|e| e.to_string())
 }
 
 async fn get_models<R: tauri::Runtime>(State(state): State<ApiState<R>>) -> impl IntoResponse {
-    let enabled = match enabled_providers(&state).await {
+    let settings = match agent_settings(&state).await {
         Ok(e) => e,
         Err(e) => {
             eprintln!("[conceptify-server] catalog get_models settings error: {e}");
@@ -52,14 +52,16 @@ async fn get_models<R: tauri::Runtime>(State(state): State<ApiState<R>>) -> impl
         }
     };
     let (cat, source) = catalog::load_for_serving();
-    Json(catalog::build_response(&cat, source, &enabled)).into_response()
+    let mut response = catalog::build_response(&cat, source, &settings.enabled_providers);
+    catalog::add_local_endpoint(&mut response, settings.local_endpoint.as_ref(), &settings.enabled_providers);
+    Json(response).into_response()
 }
 
 async fn refresh<R: tauri::Runtime>(State(state): State<ApiState<R>>) -> impl IntoResponse {
     // Force a re-fetch first (failure-silent — falls back to cache/snapshot).
     let (cat, source) = catalog::refresh_now().await;
 
-    let enabled = match enabled_providers(&state).await {
+    let settings = match agent_settings(&state).await {
         Ok(e) => e,
         Err(e) => {
             eprintln!("[conceptify-server] catalog refresh settings error: {e}");
@@ -76,5 +78,7 @@ async fn refresh<R: tauri::Runtime>(State(state): State<ApiState<R>>) -> impl In
         eprintln!("[conceptify-server] failed to emit catalog-refreshed event: {e}");
     }
 
-    Json(catalog::build_response(&cat, source, &enabled)).into_response()
+    let mut response = catalog::build_response(&cat, source, &settings.enabled_providers);
+    catalog::add_local_endpoint(&mut response, settings.local_endpoint.as_ref(), &settings.enabled_providers);
+    Json(response).into_response()
 }

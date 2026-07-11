@@ -1055,6 +1055,7 @@ pub struct AgentOptionsDto {
     /// openrouter-runnable models can actually run. The key itself is stored
     /// outside the settings blob and is never returned by any command.
     pub open_router_key_set: bool,
+    pub local_endpoint_key_set: bool,
 }
 
 /// Expose the available adapters + per-purpose default models to the frontend
@@ -1067,6 +1068,8 @@ pub fn get_agent_options(db: State<DbHandle>) -> Result<AgentOptionsDto, String>
     let s = crate::settings::get_settings(&conn).map_err(|e| e.to_string())?;
     let open_router_key_set =
         crate::settings::has_openrouter_api_key(&conn).map_err(|e| e.to_string())?;
+    let local_endpoint_key_set = crate::settings::get_local_endpoint_api_key(&conn)
+        .map_err(|e| e.to_string())?.is_some();
     Ok(AgentOptionsDto {
         adapters: s.adapters.keys().cloned().collect(),
         default_adapter: s.default_adapter,
@@ -1076,6 +1079,7 @@ pub fn get_agent_options(db: State<DbHandle>) -> Result<AgentOptionsDto, String>
             in_app_ask: s.models.in_app_ask,
         },
         open_router_key_set,
+        local_endpoint_key_set,
     })
 }
 
@@ -1096,6 +1100,19 @@ pub fn set_openrouter_api_key<R: tauri::Runtime>(
         let conn = db.lock().map_err(|e| e.to_string())?;
         crate::settings::set_openrouter_api_key(&conn, key.as_deref())
             .map_err(|e| e.to_string())?;
+    }
+    use tauri::Emitter;
+    let _ = app.emit("settings-changed", &());
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_local_endpoint_api_key<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>, db: State<DbHandle>, key: Option<String>,
+) -> Result<(), String> {
+    {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        crate::settings::set_local_endpoint_api_key(&conn, key.as_deref()).map_err(|e| e.to_string())?;
     }
     use tauri::Emitter;
     let _ = app.emit("settings-changed", &());
@@ -1686,14 +1703,15 @@ pub async fn ask_single_comment<R: tauri::Runtime>(
 /// succeeds. The background startup refresh (see `lib.rs`) keeps the cache warm.
 #[tauri::command(rename_all = "snake_case")]
 pub fn get_model_catalog(db: State<DbHandle>) -> Result<conceptify_types::CatalogResponse, String> {
-    let enabled = {
+    let settings = {
         let conn = db.lock().map_err(|e| e.to_string())?;
         crate::settings::get_settings(&conn)
             .map_err(|e| e.to_string())?
-            .enabled_providers
     };
     let (cat, source) = crate::catalog::load_for_serving();
-    Ok(crate::catalog::build_response(&cat, source, &enabled))
+    let mut response = crate::catalog::build_response(&cat, source, &settings.enabled_providers);
+    crate::catalog::add_local_endpoint(&mut response, settings.local_endpoint.as_ref(), &settings.enabled_providers);
+    Ok(response)
 }
 
 /// Force a live re-fetch of the model catalog (the Settings "refresh now"
@@ -1706,15 +1724,16 @@ pub async fn refresh_model_catalog<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<conceptify_types::CatalogResponse, String> {
     let (cat, source) = crate::catalog::refresh_now().await;
-    let enabled = {
+    let settings = {
         use tauri::Manager;
         let db = app.state::<DbHandle>();
         let conn = db.lock().map_err(|e| e.to_string())?;
         crate::settings::get_settings(&conn)
             .map_err(|e| e.to_string())?
-            .enabled_providers
     };
     use tauri::Emitter;
     let _ = app.emit("catalog-refreshed", &());
-    Ok(crate::catalog::build_response(&cat, source, &enabled))
+    let mut response = crate::catalog::build_response(&cat, source, &settings.enabled_providers);
+    crate::catalog::add_local_endpoint(&mut response, settings.local_endpoint.as_ref(), &settings.enabled_providers);
+    Ok(response)
 }

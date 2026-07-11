@@ -113,6 +113,7 @@ const ROUTE_WORD: Record<RouteTag, string> = {
   anthropic: "claude",
   openai: "codex",
   openrouter: "OpenRouter",
+  local: "local",
   unroutable: "no route",
 };
 

@@ -492,6 +492,31 @@ pub fn build_response(
     }
 }
 
+pub fn add_local_endpoint(
+    response: &mut CatalogResponse,
+    endpoint: Option<&crate::settings::LocalEndpoint>,
+    enabled: &BTreeSet<String>,
+) {
+    let Some(endpoint) = endpoint else { return; };
+    response.providers.retain(|provider| provider.provider != "local");
+    response.providers.push(CatalogProvider {
+        provider: "local".into(),
+        model_count: endpoint.models.len(),
+        enabled: enabled.contains("local"),
+    });
+    if enabled.contains("local") {
+        response.models.extend(endpoint.models.iter().map(|model| CatalogModel {
+            id: format!("local/{model}"),
+            provider: "local".into(),
+            display_name: format!("{} · {model}", endpoint.name.trim()),
+            context_window: None,
+            openrouter_runnable: false,
+        }));
+        response.models.sort_by(|a, b| a.provider.cmp(&b.provider).then_with(|| a.id.cmp(&b.id)));
+    }
+    response.providers.sort_by(|a, b| a.provider.cmp(&b.provider));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +556,22 @@ mod tests {
         "litellm_provider": "anthropic"
       }
     }"#;
+
+    #[test]
+    fn configured_local_models_join_catalog_under_explicit_ids() {
+        let mut response = build_response(&CachedCatalog {
+            fetched_at: "now".into(), models: vec![],
+        }, "snapshot", &BTreeSet::from(["local".into()]));
+        let endpoint = crate::settings::LocalEndpoint {
+            name: "Studio GPU".into(),
+            base_url: "http://127.0.0.1:4000".into(),
+            models: vec!["llama-3.3".into(), "qwen-coder".into()],
+        };
+        add_local_endpoint(&mut response, Some(&endpoint), &BTreeSet::from(["local".into()]));
+        assert_eq!(response.models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), vec!["local/llama-3.3", "local/qwen-coder"]);
+        assert_eq!(response.providers[0].provider, "local");
+        assert!(response.providers[0].enabled);
+    }
 
     const OPENROUTER_FIXTURE: &str = r#"{
       "data": [

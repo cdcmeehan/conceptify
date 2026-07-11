@@ -767,7 +767,7 @@ export interface LatestRun {
   /** Resolved model the run actually used (epic e7m retry-surface display). */
   model: string;
   /** Route tag recorded on the row; `null` on pre-routing rows. */
-  route: "anthropic" | "openai" | "openrouter" | "manual" | null;
+  route: "anthropic" | "openai" | "openrouter" | "local" | "manual" | null;
   /** True iff a per-run override was recorded — Retry re-applies it verbatim;
    *  false means Retry re-derives the current settings defaults. */
   overridden: boolean;
@@ -816,6 +816,7 @@ export interface AgentSettings {
   /** Which adapter runs; must be a key of `adapters` (backend-validated). */
   defaultAdapter: string;
   models: PurposeModels;
+  localEndpoint: { name: string; baseUrl: string; models: string[] } | null;
   /** Agent run timeout in seconds (default 1800 = 30 min). */
   timeoutSecs: number;
   /** Absolute-path override for the agent binary; `null`/empty = auto (FR-7.3). */
@@ -930,6 +931,7 @@ export interface AgentOptions {
   /** Whether an OpenRouter API key is stored (bead e7m.7) — the only
    *  key-derived fact that ever reaches the frontend. */
   openRouterKeySet: boolean;
+  localEndpointKeySet: boolean;
 }
 
 export function getAgentOptions(): Promise<AgentOptions> {
@@ -943,4 +945,8 @@ export function getAgentOptions(): Promise<AgentOptions> {
  *  backend rejects an empty/whitespace-only key. */
 export function setOpenRouterApiKey(key: string | null): Promise<void> {
   return invoke<void>("set_openrouter_api_key", { key });
+}
+
+export function setLocalEndpointApiKey(key: string | null): Promise<void> {
+  return invoke<void>("set_local_endpoint_api_key", { key });
 }

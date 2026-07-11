@@ -76,6 +76,15 @@ defaults to 40 and is capped at 100. Input is treated as literal prefix terms;
 FTS operators and unbalanced punctuation are never interpreted as syntax.
 An empty query returns four empty arrays.
 
+## Local model gateway
+
+Agent settings may include `localEndpoint: { name, baseUrl, models[] }`.
+Configured models appear in catalogs and pickers as `local/<model>` and route
+through the Claude CLI with `ANTHROPIC_BASE_URL` set to the gateway. The optional
+gateway key is stored separately through `set_local_endpoint_api_key`; no read
+surface returns it. When omitted, Conceptify supplies a non-secret local token
+for gateways that do not enforce authentication.
+
 `comment-updated` is the live-sidebar trigger for every mutation to a comment —
 status transitions (the M5 `resolve-comment` flow), landing `answer_html`, and
 the `anchor_state` "reference moved" flip. Besides `PATCH /comments/:id`, the

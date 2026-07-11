@@ -151,6 +151,7 @@ const SETTINGS_KEY: &str = "agent_settings";
 /// and run row (test-proven in `runs::tests`). Revisit Keychain only if the app
 /// ever syncs its DB off-machine.
 const OPENROUTER_KEY_SETTINGS_KEY: &str = "openrouter_api_key";
+const LOCAL_ENDPOINT_KEY_SETTINGS_KEY: &str = "local_endpoint_api_key";
 
 // --- Defaults (single source of truth, shared by `Default` + serde) ---------
 
@@ -482,6 +483,19 @@ pub struct PurposeModels {
     pub in_app_ask: String,
 }
 
+/// One Anthropic-compatible local gateway. Model ids are user-entered because
+/// many Ollama/vLLM/LiteLLM installations do not expose discovery publicly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalEndpoint {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
 impl Default for PurposeModels {
     fn default() -> Self {
         Self {
@@ -576,6 +590,8 @@ pub struct AgentSettings {
     /// Per-purpose model ids.
     #[serde(default)]
     pub models: PurposeModels,
+    #[serde(default)]
+    pub local_endpoint: Option<LocalEndpoint>,
     /// Agent run timeout in seconds (FR-5.3, default 1800 = 30 min).
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
@@ -616,6 +632,7 @@ impl Default for AgentSettings {
             adapters: default_adapters(),
             default_adapter: default_default_adapter(),
             models: PurposeModels::default(),
+            local_endpoint: None,
             timeout_secs: default_timeout_secs(),
             agent_binary_path: None,
             appearance: Appearance::System,
@@ -715,6 +732,12 @@ pub enum SettingsError {
     )]
     InvalidApiKey,
 
+    #[error("invalid local endpoint API key: it must contain no whitespace or control characters")]
+    InvalidLocalApiKey,
+
+    #[error("invalid local model endpoint: {0}")]
+    InvalidLocalEndpoint(String),
+
     /// A run routed via OpenRouter (bead `conceptify-e7m.7`) but no key is
     /// stored. Raised BEFORE any run row exists (FR-4.9 guard freed).
     #[error(
@@ -760,6 +783,18 @@ impl AgentSettings {
     pub fn validate(&self) -> Result<(), SettingsError> {
         if !self.adapters.contains_key(&self.default_adapter) {
             return Err(SettingsError::UnknownAdapter(self.default_adapter.clone()));
+        }
+        if let Some(endpoint) = &self.local_endpoint {
+            let url = reqwest::Url::parse(endpoint.base_url.trim()).map_err(|_| {
+                SettingsError::InvalidLocalEndpoint("base URL must be an absolute http(s) URL".into())
+            })?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || url.password().is_some() || !url.username().is_empty() {
+                return Err(SettingsError::InvalidLocalEndpoint("base URL must be an absolute http(s) URL without embedded credentials".into()));
+            }
+            if endpoint.models.is_empty() {
+                return Err(SettingsError::InvalidLocalEndpoint("add at least one model id".into()));
+            }
+            for model in &endpoint.models { validate_model(model)?; }
         }
         if self.run_concurrency.default == 0 {
             return Err(SettingsError::InvalidRunConcurrency(
@@ -1135,6 +1170,29 @@ pub fn has_openrouter_api_key(conn: &Connection) -> Result<bool, SettingsError> 
     Ok(get_openrouter_api_key(conn)?.is_some())
 }
 
+pub fn get_local_endpoint_api_key(conn: &Connection) -> Result<Option<String>, SettingsError> {
+    let raw: Option<String> = conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        [LOCAL_ENDPOINT_KEY_SETTINGS_KEY], |row| row.get(0),
+    ).optional()?;
+    Ok(raw.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()))
+}
+
+pub fn set_local_endpoint_api_key(conn: &Connection, key: Option<&str>) -> Result<(), SettingsError> {
+    let key = key.map(str::trim).filter(|value| !value.is_empty());
+    match key {
+        None => { conn.execute("DELETE FROM settings WHERE key = ?1", [LOCAL_ENDPOINT_KEY_SETTINGS_KEY])?; }
+        Some(value) => {
+            if value.chars().any(|c| c.is_whitespace() || c.is_control()) { return Err(SettingsError::InvalidLocalApiKey); }
+            conn.execute(
+                "INSERT INTO settings(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                rusqlite::params![LOCAL_ENDPOINT_KEY_SETTINGS_KEY, value],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Persist the agent settings (validated first, so a config whose
 /// `default_adapter` names no adapter never lands in the DB). Written as one
 /// upsert statement — SQLite applies it atomically, so a crash mid-write can't
@@ -1230,8 +1288,8 @@ mod tests {
         assert_eq!(inv.program, "claude");
         assert_eq!(inv.args[0], "-p");
         assert_eq!(inv.args[1], evil);
-        // The default template has 33 args; nothing was injected/split.
-        assert_eq!(inv.args.len(), 33);
+        // The default template has 34 args; nothing was injected/split.
+        assert_eq!(inv.args.len(), 34);
         // The model/permission structure is intact and untouched by the prompt.
         assert_eq!(inv.args[2], "--model");
         assert_eq!(inv.args[3], "claude-haiku-4-5");

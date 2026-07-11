@@ -580,3 +580,10 @@ real Conceptify project as inspectable history.
 - Answer runs accumulate those deltas in an ephemeral, bounded store buffer and render a clearly labeled, accessible “Live answer draft” panel in the sidebar.
 - A persisted `comment-updated`, cancellation, failure, or terminal run clears the draft; the authoritative stored answer replaces it through the normal comment refetch. No partial content enters SQLite.
 - Production frontend build and focused adapter/classifier tests are green.
+# 2026-07-11 — Local/self-hosted model gateway (`conceptify-cmu`)
+
+- Added one configurable LiteLLM/Anthropic-compatible endpoint with display name, validated HTTP(S) base URL, explicit model ids, and an optional write-only key stored outside `AgentSettings`.
+- Local models join every catalog/picker under a distinct `local` provider as explicit `local/<model>` ids; this prevents existing slash-form OpenRouter routing from capturing them.
+- The new `local` route strips only the endpoint qualifier before passing `--model`, uses the existing Claude adapter, and sets the configured base URL plus optional auth token per run.
+- Settings now exposes the endpoint, model list, and masked key state. Existing Anthropic/OpenAI/OpenRouter decisions remain unchanged when no endpoint is configured.
+- Real subprocess tests captured exact argv/environment and proved the local secret never reaches the settings blob, run row, or log. Routing, catalog, frontend-build, check, and clippy gates are green.

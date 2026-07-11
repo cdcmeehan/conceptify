@@ -16,7 +16,7 @@ where possible). Worth building *before* content piles up. (PRD Phase 2 lists
 this; index maintenance hooks belong in `save-artifact` and the comment
 mutation paths.)
 
-## 2. Local / self-hosted models via a LiteLLM proxy — planned: `conceptify-cmu`
+## 2. Local / self-hosted models via a LiteLLM proxy — completed: `conceptify-cmu`
 
 Provider-routed execution (bead `conceptify-e7m.7`) covers anthropic-native,
 openai-native, and everything-else-via-OpenRouter. Local or self-hosted models
@@ -27,7 +27,9 @@ by `StartRun::env` + `routing.rs`), but need a base-URL + optional-key settings
 surface per endpoint and a way to attribute catalog entries to a local
 provider. Cheap to add on top of the routing layer when wanted: a new
 `RouteTag`/route arm with a configurable base URL instead of the hardcoded
-OpenRouter one.
+OpenRouter one. Implemented with explicit `local/<model>` ids, one configurable
+gateway and model list, an optional write-only key, a distinct Local catalog
+group, and the existing Claude CLI environment mechanism.
 
 ## 3. Artifact version diffing — planned: `conceptify-3nn`
 

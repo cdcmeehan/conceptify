@@ -82,6 +82,12 @@ export function SettingsView() {
   const [keyInput, setKeyInput] = useState("");
   const [keyEditing, setKeyEditing] = useState(false);
   const [keyBusy, setKeyBusy] = useState(false);
+  const [localName, setLocalName] = useState("");
+  const [localBaseUrl, setLocalBaseUrl] = useState("");
+  const [localModels, setLocalModels] = useState("");
+  const [localKeySet, setLocalKeySet] = useState(false);
+  const [localKeyInput, setLocalKeyInput] = useState("");
+  const [localKeyBusy, setLocalKeyBusy] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
@@ -101,6 +107,9 @@ export function SettingsView() {
     setAdaptersText(JSON.stringify(s.adapters, null, 2));
     setEnabledProviders(new Set(s.enabledProviders));
     setSystemNotifications(s.systemNotifications);
+    setLocalName(s.localEndpoint?.name ?? "Local models");
+    setLocalBaseUrl(s.localEndpoint?.baseUrl ?? "");
+    setLocalModels(s.localEndpoint?.models.join("\n") ?? "");
     setError(null);
   }
 
@@ -126,7 +135,7 @@ export function SettingsView() {
     api
       .getAgentOptions()
       .then((o) => {
-        if (alive) setOpenRouterKeySet(o.openRouterKeySet);
+        if (alive) { setOpenRouterKeySet(o.openRouterKeySet); setLocalKeySet(o.localEndpointKeySet); }
       })
       .catch((e) => console.warn("agent options load failed", e));
     return () => {
@@ -186,15 +195,24 @@ export function SettingsView() {
     const trimmedBinary = binaryPath.trim();
     const trimmedBase = autoBaseDir.trim();
 
+    const endpointModels = localModels.split("\n").map((value) => value.trim()).filter(Boolean);
+    const localEndpoint = localBaseUrl.trim() === "" ? null : {
+      name: localName.trim() || "Local models",
+      baseUrl: localBaseUrl.trim(),
+      models: endpointModels,
+    };
+    const providers = new Set(enabledProviders);
+    if (localEndpoint != null) providers.add("local");
     return {
       adapters,
       defaultAdapter,
       models: { followUp, artifactUpdate, inAppAsk },
+      localEndpoint,
       timeoutSecs: Math.round(mins * 60),
       agentBinaryPath: trimmedBinary === "" ? null : trimmedBinary,
       appearance,
       autoProjectBaseDir: trimmedBase === "" ? null : trimmedBase,
-      enabledProviders: [...enabledProviders].sort(),
+      enabledProviders: [...providers].sort(),
       // The scheduler consumes a generic keyed map. Until this view gains a
       // capacity editor, round-trip it verbatim so saving appearance/models
       // cannot reset limits configured by another surface.
@@ -215,6 +233,8 @@ export function SettingsView() {
     try {
       await api.setAgentSettings(next);
       setSaved(next);
+      setEnabledProviders(new Set(next.enabledProviders));
+      api.getModelCatalog().then(setCatalog).catch(() => {});
       setAppearance(next.appearance);
       setSystemNotificationsEnabled(next.systemNotifications);
       setSavedFlash(true);
@@ -344,6 +364,14 @@ export function SettingsView() {
     } finally {
       setKeyBusy(false);
     }
+  }
+
+  async function onSaveLocalKey() {
+    setLocalKeyBusy(true); setError(null);
+    try {
+      await api.setLocalEndpointApiKey(localKeyInput.trim() || null);
+      setLocalKeySet(localKeyInput.trim() !== ""); setLocalKeyInput("");
+    } catch (e) { setError(String(e)); } finally { setLocalKeyBusy(false); }
   }
 
   const adapterNames = (() => {
@@ -583,6 +611,31 @@ export function SettingsView() {
                     )}
                   </>
                 )}
+              </Section>
+
+              <Section
+                title="Local models"
+                description="Route explicit local/<model> choices through one LiteLLM or Anthropic-compatible gateway. The optional key is write-only."
+              >
+                <div class="grid gap-3 sm:grid-cols-2">
+                  <Field label="Endpoint name" hint="Shown in model pickers.">
+                    <TextInput value={localName} onInput={setLocalName} placeholder="Studio GPU" />
+                  </Field>
+                  <Field label="Base URL" hint="For example http://127.0.0.1:4000">
+                    <TextInput value={localBaseUrl} onInput={setLocalBaseUrl} placeholder="http://127.0.0.1:4000" />
+                  </Field>
+                </div>
+                <Field label="Model ids" hint="One LiteLLM model name per line; exposed as local/<id>.">
+                  <textarea value={localModels} onInput={(event) => setLocalModels(event.currentTarget.value)} rows={3} class="cfy-input resize-y font-mono text-xs" placeholder={"llama-3.3-70b\nqwen2.5-coder"} />
+                </Field>
+                <div class="flex items-center gap-2">
+                  <input type="password" value={localKeyInput} onInput={(event) => setLocalKeyInput(event.currentTarget.value)} autocomplete="off" spellcheck={false} class="cfy-input flex-1 font-mono text-sm" placeholder={localKeySet ? "Key stored — enter to replace" : "Optional gateway key"} />
+                  <button type="button" onClick={() => void onSaveLocalKey()} disabled={localKeyBusy || (localKeyInput.trim() === "" && !localKeySet)} class="cfy-btn cfy-btn-secondary">
+                    {localKeyBusy ? "Saving…" : localKeyInput.trim() !== "" ? "Save key" : "Clear key"}
+                  </button>
+                  {localKeySet && <span class="cfy-chip bg-ok-bg text-ok">Key stored</span>}
+                </div>
+                <p class="text-[11px] text-muted">Save settings after changing the endpoint or model list. Model discovery is also available from LiteLLM at <code>/v1/models</code>; explicit ids keep offline gateways usable.</p>
               </Section>
 
               {/* OpenRouter key (bead conceptify-e7m.7) */}

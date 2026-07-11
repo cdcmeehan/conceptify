@@ -153,6 +153,7 @@ async fn live_bridge() {
             crate::commands::reset_agent_settings,
             crate::commands::get_agent_options,
             crate::commands::set_openrouter_api_key,
+            crate::commands::set_local_endpoint_api_key,
             crate::commands::ask_follow_ups,
             crate::commands::ask_single_comment,
             crate::commands::apply_to_artifact,

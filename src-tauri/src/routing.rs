@@ -107,6 +107,8 @@ pub enum RouteTag {
     Openai,
     /// Any other provider: claude CLI pointed at OpenRouter via per-run env.
     Openrouter,
+    /// Explicit `local/<id>` through the configured Anthropic-compatible gateway.
+    Local,
     /// Routing bypassed — user-directed adapter (per-run override or a custom
     /// `default_adapter`).
     Manual,
@@ -118,6 +120,7 @@ impl RouteTag {
             RouteTag::Anthropic => "anthropic",
             RouteTag::Openai => "openai",
             RouteTag::Openrouter => "openrouter",
+            RouteTag::Local => "local",
             RouteTag::Manual => "manual",
         }
     }
@@ -186,6 +189,27 @@ pub fn route_run(
             model,
             env: Vec::new(),
             tag: RouteTag::Manual,
+        });
+    }
+
+    if let Some(local_model) = model.strip_prefix("local/") {
+        let endpoint = settings.local_endpoint.as_ref().ok_or_else(|| {
+            SettingsError::InvalidLocalEndpoint("configure a local endpoint before selecting local models".into())
+        })?;
+        if !endpoint.models.iter().any(|candidate| candidate == local_model) {
+            return Err(SettingsError::InvalidLocalEndpoint(format!("model '{local_model}' is not configured")));
+        }
+        return Ok(RouteDecision {
+            adapter: "claude".into(),
+            model: local_model.to_owned(),
+            env: vec![
+                ("ANTHROPIC_BASE_URL".into(), endpoint.base_url.trim_end_matches('/').to_owned()),
+                // The engine replaces this non-secret sentinel with the
+                // separately stored optional key immediately before spawn.
+                ("ANTHROPIC_AUTH_TOKEN".into(), "local".into()),
+                ("ANTHROPIC_API_KEY".into(), String::new()),
+            ],
+            tag: RouteTag::Local,
         });
     }
 
@@ -318,6 +342,25 @@ mod tests {
             assert!(d.env.is_empty());
             assert_eq!(d.tag, RouteTag::Anthropic);
         }
+    }
+
+    #[test]
+    fn explicit_local_model_routes_to_configured_gateway_without_affecting_slash_heuristics() {
+        let mut s = AgentSettings::default();
+        s.local_endpoint = Some(crate::settings::LocalEndpoint {
+            name: "Lab".into(),
+            base_url: "http://127.0.0.1:4000/".into(),
+            models: vec!["qwen-coder".into()],
+        });
+        let d = route_run(&s, Purpose::FollowUp, Some(&over(None, Some("local/qwen-coder"))), no_catalog, None).unwrap();
+        assert_eq!(d.tag, RouteTag::Local);
+        assert_eq!(d.adapter, "claude");
+        assert_eq!(d.model, "qwen-coder");
+        assert_eq!(d.env[0], ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:4000".into()));
+        assert_eq!(d.env[1].1, "local");
+
+        let openrouter = route_run(&s, Purpose::FollowUp, Some(&over(None, Some("vendor/model"))), no_catalog, Some("key")).unwrap();
+        assert_eq!(openrouter.tag, RouteTag::Openrouter);
     }
 
     #[test]
@@ -500,6 +543,7 @@ mod tests {
         assert_eq!(RouteTag::Anthropic.as_str(), "anthropic");
         assert_eq!(RouteTag::Openai.as_str(), "openai");
         assert_eq!(RouteTag::Openrouter.as_str(), "openrouter");
+        assert_eq!(RouteTag::Local.as_str(), "local");
         assert_eq!(RouteTag::Manual.as_str(), "manual");
     }
 }

@@ -742,6 +742,7 @@ async fn prepare_persisted(
             base_artifact_version: captured_base,
             settings: settings::get_settings(conn)?,
             openrouter_key: settings::get_openrouter_api_key(conn)?,
+            local_endpoint_key: settings::get_local_endpoint_api_key(conn)?,
         })
     })
     .await?;
@@ -750,13 +751,14 @@ async fn prepare_persisted(
         adapter: (row.route == "manual").then_some(row.agent.clone()),
         model: Some(row.model.clone()),
     };
-    let route = routing::route_run(
+    let mut route = routing::route_run(
         &loaded.settings,
         mode.purpose(),
         Some(&routing_override),
         crate::catalog::provider_of,
         loaded.openrouter_key.as_deref(),
     )?;
+    apply_local_secret(&mut route, loaded.local_endpoint_key.as_deref());
     if route.adapter != row.agent || route.model != row.model {
         return Err(RunError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -830,6 +832,7 @@ struct Loaded {
     /// `Command::env`; never logged, never persisted on the row, never part of
     /// an error/event (test-proven below).
     openrouter_key: Option<String>,
+    local_endpoint_key: Option<String>,
 }
 
 struct PreparedExec {
@@ -843,6 +846,14 @@ struct PreparedExec {
     model: String,
     provider_pool: String,
     prompt_chars: usize,
+}
+
+fn apply_local_secret(route: &mut routing::RouteDecision, key: Option<&str>) {
+    if route.tag != routing::RouteTag::Local { return; }
+    let token = key.map(str::trim).filter(|value| !value.is_empty()).unwrap_or("local");
+    if let Some((_, value)) = route.env.iter_mut().find(|(name, _)| name == "ANTHROPIC_AUTH_TOKEN") {
+        *value = token.to_owned();
+    }
 }
 
 /// Start a headless agent run for a thread (PRD §5.1, §5.5 surface 2).
@@ -904,6 +915,7 @@ async fn start_reserved<R: Runtime>(
 
         let settings = settings::get_settings(conn)?;
         let openrouter_key = settings::get_openrouter_api_key(conn)?;
+        let local_endpoint_key = settings::get_local_endpoint_api_key(conn)?;
         Ok(Loaded {
             project_id,
             root_path,
@@ -911,6 +923,7 @@ async fn start_reserved<R: Runtime>(
             base_artifact_version,
             settings,
             openrouter_key,
+            local_endpoint_key,
         })
     })
     .await?;
@@ -928,13 +941,14 @@ async fn start_reserved<R: Runtime>(
     //    pre-routing invocation by construction.
     let purpose = req.mode.purpose();
     let over = req.run_override.as_ref();
-    let route = routing::route_run(
+    let mut route = routing::route_run(
         &loaded.settings,
         purpose,
         over,
         crate::catalog::provider_of,
         loaded.openrouter_key.as_deref(),
     )?;
+    apply_local_secret(&mut route, loaded.local_endpoint_key.as_deref());
     // Fill the flow prompt's per-adapter scope note now that routing has decided
     // WHICH agent runs (bead conceptify-w9e). The behavioral rules the note
     // states are adapter-independent; only the mechanism description varies, and
@@ -1230,6 +1244,10 @@ async fn execute_when_admitted<R: Runtime>(
     let route_note = match prepared.route.tag {
         routing::RouteTag::Openrouter => {
             format!(" route=openrouter base_url={}", routing::OPENROUTER_BASE_URL)
+        }
+        routing::RouteTag::Local => {
+            let base = prepared.route.env.iter().find(|(name, _)| name == "ANTHROPIC_BASE_URL").map(|(_, value)| value.as_str()).unwrap_or("local endpoint");
+            format!(" route=local base_url={base}")
         }
         tag => format!(" route={}", tag.as_str()),
     };
@@ -2630,6 +2648,44 @@ exit 0
     }
 
     // -- provider routing (bead conceptify-e7m.7) -----------------------------
+
+    #[tokio::test]
+    async fn local_route_uses_configured_base_and_scrubs_optional_secret() {
+        let h = harness("localroute");
+        h.install_routed_capture("claude");
+        let token = "LOCAL-DEADBEEF-secret";
+        {
+            let conn = h.db.lock().unwrap();
+            let mut configured = crate::settings::get_settings(&conn).unwrap();
+            configured.local_endpoint = Some(crate::settings::LocalEndpoint {
+                name: "Lab".into(),
+                base_url: "http://127.0.0.1:4400".into(),
+                models: vec!["qwen-coder".into()],
+            });
+            configured.enabled_providers.insert("local".into());
+            crate::settings::update_settings(&conn, &configured).unwrap();
+            crate::settings::set_local_endpoint_api_key(&conn, Some(token)).unwrap();
+        }
+        let started = h.start_over(RunMode::Answer, "local prompt", Some(RunOverride {
+            adapter: None, model: Some("local/qwen-coder".into()),
+        })).await.unwrap();
+        let run_id = started.run_id.clone();
+        let fin = finished(started).await;
+        assert_eq!(fin.status, RunStatus::Completed);
+        let argv = std::fs::read_to_string(h.work_dir.join("argv.txt")).unwrap();
+        assert_eq!(argv.lines().collect::<Vec<_>>(), vec!["--model", "qwen-coder", "local prompt"]);
+        let env = std::fs::read_to_string(h.work_dir.join("env.txt")).unwrap();
+        assert_eq!(env, format!("base=http://127.0.0.1:4400\ntoken={token}\nkey=<>\nkey_present=set\n"));
+        assert_eq!(h.run_route(&run_id).as_deref(), Some("local"));
+        let log = std::fs::read_to_string(&fin.log_path).unwrap();
+        assert!(log.contains("route=local base_url=http://127.0.0.1:4400"));
+        assert!(!log.contains(token));
+        assert!(!h.run_row_text(&run_id).contains("DEADBEEF"));
+        let settings_blob: String = h.db.lock().unwrap().query_row(
+            "SELECT value FROM settings WHERE key='agent_settings'", [], |row| row.get(0),
+        ).unwrap();
+        assert!(!settings_blob.contains(token));
+    }
 
     #[tokio::test]
     async fn openrouter_route_env_reaches_child_and_secret_never_logged_or_persisted() {
