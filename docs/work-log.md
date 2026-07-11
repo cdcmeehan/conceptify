@@ -290,3 +290,17 @@ After submission, queued, provider-wait, submitting, and cancelling rows explain
 that the question and history are durable. Browser QA verified live copy changes
 from Quick to Deep + Prefer visuals, an enabled submit button, and a clean
 console.
+
+**Adaptive-ask checkpoint (`conceptify-l9w.7`).** The same borrow-checking
+topic was exercised as Quick + Plain language, Deep + Plain language, Balanced
++ Domain-native + Text only, and Deep + Domain-native + Prefer visuals +
+Comparison. The prompt matrix proves depth and assumed language remain
+independent and that format constraints materially change agent obligations.
+Live composer evidence covered the concise default, keyboard-native radio
+groups, automatic recommendation, manual search/override, explicit no-skill,
+qualitative expectations, project-default save/reload/clear, and narrow layout.
+Backend evidence covered local selection privacy, unknown/unavailable skills,
+durable queue metadata, retry identity, artifact provenance, and stale-result
+recovery; the contract-accurate thread-header checkpoint displayed the exact
+profile and skill schema version on a historical artifact. No raw prompt or
+provider detail reached the UI.

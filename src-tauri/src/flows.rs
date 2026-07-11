@@ -2040,6 +2040,44 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
     }
 
     #[test]
+    fn adaptive_profile_matrix_keeps_depth_and_language_independent() {
+        let cases = [
+            ("quick", "plain", "auto", "auto", "Depth: Quick", "Language: Plain language"),
+            ("deep", "plain", "auto", "walkthrough", "Depth: Deep", "Language: Plain language"),
+            ("balanced", "domain_native", "avoid", "reference", "Depth: Balanced", "Language: Domain-native"),
+            ("deep", "domain_native", "prefer", "comparison", "Depth: Deep", "Language: Domain-native"),
+        ];
+        for (depth, language, visuals, shape, depth_text, language_text) in cases {
+            let metadata = crate::skill_catalog::RunResponseMetadata {
+                intent: crate::skill_catalog::ResponseIntentInput {
+                    version: 1,
+                    depth: depth.to_owned(),
+                    language: language.to_owned(),
+                    visuals: visuals.to_owned(),
+                    shape: shape.to_owned(),
+                },
+                skills: Vec::new(),
+            };
+            let prompt = build_ask_prompt(&AskPromptContext {
+                thread_id: "t1",
+                slug: "matrix",
+                title: "Borrow checking",
+                question: "How does Rust borrow checking work?",
+                project_root: "/tmp/rust-project",
+                response_metadata: Some(&metadata),
+            });
+            assert!(prompt.contains(depth_text), "{depth}/{language}: {prompt}");
+            assert!(prompt.contains(language_text), "{depth}/{language}: {prompt}");
+            if visuals == "avoid" {
+                assert!(prompt.contains("HARD CONSTRAINT"), "{prompt}");
+            }
+            if visuals == "prefer" {
+                assert!(prompt.contains("Prefer visuals"), "{prompt}");
+            }
+        }
+    }
+
+    #[test]
     fn answer_prompt_exact_codex() {
         // Same two-exchange fixture as `answer_prompt_exact_for_fixture`; ONLY
         // the scope line differs — the codex mechanism note verbatim. The
