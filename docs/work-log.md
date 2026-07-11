@@ -218,3 +218,15 @@ confirms a separate candidate version; recovered artifacts retain source run,
 base, and resolution metadata. Browser QA covered modified/added comparisons
 and the two-step separate-version guard; backend tests cover refusal, retention,
 terminal-state preservation, provenance, and explicit recovery.
+
+**Concurrency checkpoint (`conceptify-k9z.7`).** The constrained-provider
+simulation overlapped exploration across projects, filled the durable queue,
+cancelled both queued and admitted work, resumed queued rows after restart,
+retried a failed ask into its original thread, and forced two mutations to save
+from the same artifact base. Queue ownership and FIFO/fairness survived capacity
+changes; cancellation never spawned late work; restart reused the original run
+row and captured base; retry preserved its source lineage; and the stale writer
+retained a reviewable candidate instead of overwriting the newer version. The
+production frontend build and activity/conflict browser checks stayed responsive,
+keyboard-operable, and explicit about every recovery choice. No draft, ask, or
+artifact candidate was lost.
