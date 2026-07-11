@@ -21,6 +21,7 @@ mod project_context;
 mod routing;
 mod run_queue;
 mod runs;
+mod search;
 mod server;
 mod settings;
 mod skill_catalog;

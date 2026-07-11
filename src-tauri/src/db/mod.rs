@@ -95,6 +95,7 @@ fn open_and_migrate(path: &std::path::Path) -> Result<DbHandle, Box<dyn std::err
     conn.pragma_update(None, "foreign_keys", "ON")?;
 
     migrations::migrations().to_latest(&mut conn)?;
+    crate::search::rebuild_artifacts(&conn)?;
 
     Ok(Arc::new(Mutex::new(conn)))
 }

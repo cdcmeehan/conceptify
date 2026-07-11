@@ -45,6 +45,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(LEARNING_SUGGESTIONS),
         M::up(CONCEPT_MAP),
         M::up(THREAD_SYNTHESES),
+        M::up(SEARCH_INDEX),
     ])
 }
 
@@ -499,6 +500,79 @@ CREATE TABLE thread_syntheses (
 CREATE INDEX idx_thread_syntheses_project ON thread_syntheses(project_id, created_at DESC);
 ";
 
+/// Content-owning FTS5 index. Search rows deliberately keep their own content
+/// rather than using an external-content table: artifact HTML lives on disk,
+/// and one artifact expands into multiple independently-addressable blocks.
+/// Stable `search_key` values let mutation hooks replace a logical document
+/// without relying on FTS rowids.
+const SEARCH_INDEX: &str = r#"
+CREATE VIRTUAL TABLE search_index USING fts5(
+    search_key UNINDEXED,
+    kind UNINDEXED,
+    entity_id UNINDEXED,
+    project_id UNINDEXED,
+    thread_id UNINDEXED,
+    artifact_version UNINDEXED,
+    block_id UNINDEXED,
+    title,
+    body,
+    tokenize = 'unicode61 tokenchars ''_-'''
+);
+
+CREATE TRIGGER search_projects_insert AFTER INSERT ON projects BEGIN
+  INSERT INTO search_index(search_key, kind, entity_id, project_id, title, body)
+  VALUES ('project:' || new.id, 'project', new.id, new.id, new.name, new.root_path);
+END;
+CREATE TRIGGER search_projects_update AFTER UPDATE OF name, root_path, archived ON projects BEGIN
+  DELETE FROM search_index WHERE search_key = 'project:' || old.id;
+  INSERT INTO search_index(search_key, kind, entity_id, project_id, title, body)
+  SELECT 'project:' || new.id, 'project', new.id, new.id, new.name, new.root_path
+  WHERE new.archived = 0;
+END;
+CREATE TRIGGER search_projects_delete AFTER DELETE ON projects BEGIN
+  DELETE FROM search_index WHERE project_id = old.id;
+END;
+
+CREATE TRIGGER search_threads_insert AFTER INSERT ON threads BEGIN
+  INSERT INTO search_index(search_key, kind, entity_id, project_id, thread_id, title, body)
+  VALUES ('thread:' || new.id, 'thread', new.id, new.project_id, new.id, new.title, new.initial_question);
+END;
+CREATE TRIGGER search_threads_update AFTER UPDATE OF title, initial_question, project_id ON threads BEGIN
+  DELETE FROM search_index WHERE search_key = 'thread:' || old.id;
+  INSERT INTO search_index(search_key, kind, entity_id, project_id, thread_id, title, body)
+  VALUES ('thread:' || new.id, 'thread', new.id, new.project_id, new.id, new.title, new.initial_question);
+END;
+CREATE TRIGGER search_threads_delete AFTER DELETE ON threads BEGIN
+  DELETE FROM search_index WHERE thread_id = old.id;
+END;
+
+CREATE TRIGGER search_comments_insert AFTER INSERT ON comments BEGIN
+  INSERT INTO search_index(search_key, kind, entity_id, project_id, thread_id, title, body)
+  SELECT 'comment:' || new.id, 'comment', new.id, t.project_id, new.thread_id, '',
+         new.body || ' ' || coalesce(new.answer_html, '')
+  FROM threads t WHERE t.id = new.thread_id;
+END;
+CREATE TRIGGER search_comments_update AFTER UPDATE OF body, answer_html, thread_id ON comments BEGIN
+  DELETE FROM search_index WHERE search_key = 'comment:' || old.id;
+  INSERT INTO search_index(search_key, kind, entity_id, project_id, thread_id, title, body)
+  SELECT 'comment:' || new.id, 'comment', new.id, t.project_id, new.thread_id, '',
+         new.body || ' ' || coalesce(new.answer_html, '')
+  FROM threads t WHERE t.id = new.thread_id;
+END;
+CREATE TRIGGER search_comments_delete AFTER DELETE ON comments BEGIN
+  DELETE FROM search_index WHERE search_key = 'comment:' || old.id;
+END;
+
+INSERT INTO search_index(search_key, kind, entity_id, project_id, title, body)
+SELECT 'project:' || id, 'project', id, id, name, root_path FROM projects WHERE archived = 0;
+INSERT INTO search_index(search_key, kind, entity_id, project_id, thread_id, title, body)
+SELECT 'thread:' || id, 'thread', id, project_id, id, title, initial_question FROM threads;
+INSERT INTO search_index(search_key, kind, entity_id, project_id, thread_id, title, body)
+SELECT 'comment:' || c.id, 'comment', c.id, t.project_id, c.thread_id, '',
+       c.body || ' ' || coalesce(c.answer_html, '')
+FROM comments c JOIN threads t ON t.id = c.thread_id;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,7 +580,7 @@ mod tests {
 
     /// `user_version` after the full chain — the count of `M::up` entries in
     /// [`migrations`].
-    const LATEST: usize = 20;
+    const LATEST: usize = 21;
 
     /// Position of the durable scheduler metadata migration.
     const RUN_QUEUE: usize = 13;
@@ -609,6 +683,63 @@ mod tests {
         let mut conn = fresh_conn();
         migrations().to_latest(&mut conn).expect("to_latest");
         assert_eq!(user_version(&conn), LATEST);
+    }
+
+    #[test]
+    fn search_index_backfills_and_tracks_thread_comment_mutations() {
+        let mut conn = fresh_conn();
+        migrations().to_latest(&mut conn).expect("to_latest");
+        conn.execute(
+            "INSERT INTO projects (id, name, root_path) VALUES ('p1', 'Search Project', '/tmp/search')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, project_id, title, slug, initial_question, status)
+             VALUES ('t1', 'p1', 'Token pipeline', 'token-pipeline', 'How does lexing work?', 'ready')",
+            [],
+        ).unwrap();
+        // An artifact row is required by the comment FK; artifact text itself
+        // is indexed by the Rust save hook because its body lives on disk.
+        conn.execute(
+            "INSERT INTO artifacts (id, thread_id, version, file_path, created_by)
+             VALUES ('a1', 't1', 1, '/tmp/missing.html', 'initial')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO comments (id, thread_id, artifact_version, body, status)
+             VALUES ('c1', 't1', 1, 'What is a lexer?', 'open')",
+            [],
+        ).unwrap();
+        let hits: i64 = conn.query_row(
+            "SELECT count(*) FROM search_index WHERE search_index MATCH 'lexer'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(hits, 1);
+
+        conn.execute("UPDATE comments SET answer_html = '<p>Tokenizer answer</p>' WHERE id = 'c1'", []).unwrap();
+        let hits: i64 = conn.query_row(
+            "SELECT count(*) FROM search_index WHERE search_index MATCH 'Tokenizer'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(hits, 1);
+        conn.execute("DELETE FROM threads WHERE id = 't1'", []).unwrap();
+        let remaining: i64 = conn.query_row(
+            "SELECT count(*) FROM search_index WHERE thread_id = 't1'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn search_migration_backfills_preexisting_rows() {
+        let mut conn = fresh_conn();
+        migrations().to_version(&mut conn, LATEST - 1).unwrap();
+        seed_thread(&conn);
+        migrations().to_latest(&mut conn).unwrap();
+        let title: String = conn.query_row(
+            "SELECT title FROM search_index WHERE search_key = 'thread:t1'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(title, "Title");
     }
 
     /// The load-bearing test: rows written under the pre-rebuild schema
