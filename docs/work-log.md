@@ -335,3 +335,13 @@ selected files are copied into the managed project boundary, links are not
 fetched, and clearing context removes its stored/materialized representation.
 The resulting project uses the same question, run, and artifact paths as a
 folder-backed project.
+
+**Create and first ask (`conceptify-vc1.4`).** Both folder and topic setup now
+offer an editable optional first question plus overview, architecture, key
+concept, and learning-path starters. Empty keeps the create-only path; non-empty
+changes the action and outcome copy to Create/Start & ask. Creation completes
+first, then the existing durable ask flow submits exactly once with inherited
+response preferences and opens its generating thread. A failed ask therefore
+leaves the selected project and durable run available for retry, while the
+core's existing title derivation turns an unlabelled starter/edit into a
+sensible thread title.

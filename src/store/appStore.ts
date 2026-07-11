@@ -1247,7 +1247,7 @@ class AppStore {
    * either way the sidebar ends up focused on the right project. Throws
    * (invalid/missing path) so the caller can surface the message inline.
    */
-  async createProjectFromDir(rootPath: string): Promise<void> {
+  async createProjectFromDir(rootPath: string): Promise<string> {
     const result = await api.ensureProject(rootPath, null);
     await this.refetchProjects();
     this.selectProject(result.id);
@@ -1272,6 +1272,7 @@ class AppStore {
       ),
     });
     void api.scanProjectContext(result.id).then(() => this.refetchProjects()).catch(() => undefined);
+    return result.id;
   }
 
   /**
@@ -1280,13 +1281,32 @@ class AppStore {
    * project. Throws (empty name, unresolvable base dir, mkdir failure) so the
    * caller can surface the message inline.
    */
-  async createProjectFolder(name: string, context?: api.TopicContext): Promise<void> {
+  async createProjectFolder(name: string, context?: api.TopicContext): Promise<string> {
     const result = await api.createProjectFolder(name);
     if (context != null && (context.notes !== "" || context.links.length > 0 || context.files.length > 0)) {
       await api.setTopicContext(result.id, context);
     }
     await this.refetchProjects();
     this.selectProject(result.id);
+    return result.id;
+  }
+
+  async launchFirstQuestion(projectId: string, question: string): Promise<void> {
+    const trimmed = question.trim();
+    if (trimmed === "") return;
+    const preferences = await api.getResponsePreferences(projectId).catch(() => null);
+    const started = await api.askFromApp(
+      projectId,
+      null,
+      trimmed,
+      null,
+      preferences?.intent,
+      "auto",
+      [],
+    );
+    await this.refetchProjects();
+    await this.refetchThreads(projectId);
+    this.selectThread(started.thread_id);
   }
 
   /**

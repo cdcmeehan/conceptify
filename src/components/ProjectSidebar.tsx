@@ -37,6 +37,7 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
   const [newTopicLinks, setNewTopicLinks] = useState("");
   const [topicContextOpen, setTopicContextOpen] = useState(false);
   const [newTopicFiles, setNewTopicFiles] = useState<string[]>([]);
+  const [firstQuestion, setFirstQuestion] = useState("");
   const [contextOpenId, setContextOpenId] = useState<string | null>(null);
 
   function closeNewProject() {
@@ -48,6 +49,7 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
     setNewTopicLinks("");
     setTopicContextOpen(false);
     setNewTopicFiles([]);
+    setFirstQuestion("");
   }
 
   async function pickDirectory() {
@@ -62,7 +64,8 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
       });
       if (typeof selected !== "string") return; // cancelled
       setNewProjectBusy(true);
-      await appStore.createProjectFromDir(selected);
+      const projectId = await appStore.createProjectFromDir(selected);
+      if (firstQuestion.trim() !== "") await appStore.launchFirstQuestion(projectId, firstQuestion);
       closeNewProject();
     } catch (e) {
       setNewProjectError(String(e));
@@ -87,7 +90,10 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
         links: newTopicLinks.split("\n").map((value) => value.trim()).filter(Boolean),
         files: newTopicFiles,
       })
-      .then(() => closeNewProject())
+      .then(async (projectId) => {
+        if (firstQuestion.trim() !== "") await appStore.launchFirstQuestion(projectId, firstQuestion);
+        closeNewProject();
+      })
       .catch((e) => {
         setNewProjectError(String(e));
         setNewProjectBusy(false);
@@ -175,13 +181,29 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
               }
             }}
           >
+            <div>
+              <label class="cfy-label" for="quick-start-question">First question (optional)</label>
+              <textarea
+                id="quick-start-question"
+                value={firstQuestion}
+                onInput={(e) => setFirstQuestion((e.currentTarget as HTMLTextAreaElement).value)}
+                rows={2}
+                class="cfy-input mt-1 resize-y text-[10px]"
+                placeholder="What would you like to understand first?"
+              />
+              <div class="mt-1 flex flex-wrap gap-1">
+                {["Give me a useful overview", "Show me the architecture", "What are the key concepts?", "Create a learning path"].map((starter) => (
+                  <button key={starter} type="button" onClick={() => setFirstQuestion(starter)} class="rounded-full border border-line px-1.5 py-0.5 text-[9px] text-muted hover:border-accent/40 hover:text-ink">{starter}</button>
+                ))}
+              </div>
+            </div>
             <button
               type="button"
               disabled={newProjectBusy}
               onClick={() => void pickDirectory()}
               class="cfy-btn cfy-btn-secondary"
             >
-              Choose an existing folder…
+              {firstQuestion.trim() === "" ? "Choose an existing folder…" : "Choose folder & ask…"}
             </button>
             <div class="flex items-center gap-2 text-[10px] uppercase tracking-wide text-muted">
               <span class="h-px flex-1 bg-line" />
@@ -252,9 +274,12 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
                 disabled={newProjectBusy || newFolderName.trim().length === 0}
                 class="cfy-btn cfy-btn-primary"
               >
-                {newProjectBusy ? "Starting…" : "Start topic"}
+                {newProjectBusy ? "Starting…" : firstQuestion.trim() === "" ? "Start topic" : "Start & ask"}
               </button>
             </div>
+            <p class="text-[9px] leading-relaxed text-muted">
+              {firstQuestion.trim() === "" ? "Creates the project and opens its home." : "Creates the project, saves this question once, and opens its generating thread."}
+            </p>
           </div>
         ) : (
           <button
