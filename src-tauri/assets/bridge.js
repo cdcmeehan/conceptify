@@ -8,7 +8,7 @@
  * inline JS, and provides the interaction layer for comments:
  *
  *   artifact -> shell : ready | selection | selection_cleared | element_click
- *   shell -> artifact : set_highlights | scroll_to_anchor
+ *   shell -> artifact : set_highlights | set_diff_markers | scroll_to_anchor
  *
  * The full protocol (envelope, payloads, coordinate + offset conventions,
  * trust model) is documented in docs/api.md, section "Bridge protocol" —
@@ -387,6 +387,15 @@
     "@keyframes cfy-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }",
     ":where([data-cfy-pulse]) { animation: cfy-pulse 0.6s ease-in-out 2; }",
 
+    // Version-diff gutters live in document-level overlay nodes rather than on
+    // artifact elements. They cannot replace an artifact's border/background/
+    // shadow and compose independently with terracotta comment highlights.
+    ":where(.cfy-diff-marker) { position: absolute; z-index: 2147483646; width: 3px; border-radius: 3px; pointer-events: none; background: #5686a5; }",
+    ":where(.cfy-diff-marker[data-kind='added']) { background: #4f8a68; }",
+    ":where(.cfy-diff-marker[data-kind='moved']) { background: #8069a8; }",
+    ":where(.cfy-diff-marker[data-kind='removed']) { width: 0; border-left: 3px dashed #b45b54; background: transparent; }",
+    "@media (prefers-reduced-motion: reduce) { :where([data-cfy-pulse]) { animation: none; } }",
+
     // Dark re-tint (prefers-color-scheme resolves inside the artifact iframe —
     // artifacts are dual-theme by contract). Lighter terracotta, slightly less
     // fill (protects light syntax text over vitesse-dark), brighter accents for
@@ -445,6 +454,56 @@
       }
     }
   }
+
+  // Diff markers are layout-neutral gutter overlays positioned in document
+  // coordinates beside their target block. Removed content targets its nearest
+  // surviving neighbor, chosen by the shell from the diff response.
+  var diffMarkers = [];
+
+  function clearDiffMarkers() {
+    for (var i = 0; i < diffMarkers.length; i++) {
+      var marker = diffMarkers[i].marker;
+      if (marker.parentNode) marker.parentNode.removeChild(marker);
+    }
+    diffMarkers = [];
+  }
+
+  function findCfyElement(id) {
+    var elements = document.querySelectorAll("[data-cfy-id]");
+    for (var i = 0; i < elements.length; i++) {
+      if (elements[i].getAttribute("data-cfy-id") === id) return elements[i];
+    }
+    return null;
+  }
+
+  function positionDiffMarkers() {
+    for (var i = 0; i < diffMarkers.length; i++) {
+      var item = diffMarkers[i];
+      var rect = item.target.getBoundingClientRect();
+      item.marker.style.left = Math.max(2, rect.left + window.scrollX - 8) + "px";
+      item.marker.style.top = rect.top + window.scrollY + "px";
+      item.marker.style.height = Math.max(12, rect.height) + "px";
+    }
+  }
+
+  function setDiffMarkers(list) {
+    clearDiffMarkers();
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      if (!item || typeof item.cfy_id !== "string") continue;
+      var target = findCfyElement(item.cfy_id);
+      if (!target) continue;
+      var marker = document.createElement("span");
+      marker.className = "cfy-diff-marker";
+      marker.setAttribute("data-kind", typeof item.kind === "string" ? item.kind : "modified");
+      marker.setAttribute("aria-hidden", "true");
+      (document.body || document.documentElement).appendChild(marker);
+      diffMarkers.push({ target: target, marker: marker });
+    }
+    positionDiffMarkers();
+  }
+
+  window.addEventListener("resize", positionDiffMarkers);
 
   function markElement(el, key) {
     el.setAttribute("data-cfy-hl", "element");
@@ -630,12 +689,14 @@
     if (targets.length === 0) return;
 
     try {
-      targets[0].scrollIntoView({ behavior: "smooth", block: "center" });
+      var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      targets[0].scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "center" });
     } catch (e) {
       targets[0].scrollIntoView();
     }
     for (var i = 0; i < targets.length; i++) {
       targets[i].removeAttribute("data-cfy-pulse");
+      if (reduced) continue;
       void targets[i].offsetWidth; // restart a mid-flight animation
       targets[i].setAttribute("data-cfy-pulse", "");
     }
@@ -672,6 +733,8 @@
             selfMutation = false;
           }, 50);
         }
+      } else if (d.type === "set_diff_markers") {
+        setDiffMarkers(Array.isArray(d.markers) ? d.markers : []);
       } else if (d.type === "scroll_to_anchor") {
         scrollToAnchor(d);
       }

@@ -82,6 +82,12 @@ export interface HighlightSpec {
   anchor: Anchor;
 }
 
+export interface DiffMarkerSpec {
+  key: string;
+  cfy_id: string;
+  kind: "modified" | "added" | "moved" | "removed";
+}
+
 type BridgeListener = (message: BridgeMessage) => void;
 
 // ---- inbound validation (untrusted input) ----
@@ -203,6 +209,12 @@ class ArtifactBridge {
    */
   setHighlights(highlights: HighlightSpec[]): void {
     this.send({ type: "set_highlights", highlights });
+  }
+
+  /** Replace layout-neutral diff gutter markers. This is a separate bridge
+   * channel so comment highlights and selections remain untouched. */
+  setDiffMarkers(markers: DiffMarkerSpec[]): void {
+    this.send({ type: "set_diff_markers", markers });
   }
 
   /** Smooth-scroll the anchored element/range into view with a brief pulse.

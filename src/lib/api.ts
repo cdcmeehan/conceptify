@@ -101,6 +101,49 @@ export function listArtifactVersions(threadId: string): Promise<ArtifactVersion[
   return invoke<ArtifactVersion[]>("list_artifact_versions", { thread_id: threadId });
 }
 
+export type ArtifactDiffKind = "unchanged" | "modified" | "added" | "removed";
+export type TextDiffKind = "equal" | "added" | "removed";
+
+export interface TextDiffHunk {
+  kind: TextDiffKind;
+  text: string;
+}
+
+export interface ArtifactBlockDiff {
+  cfy_id: string | null;
+  kind: ArtifactDiffKind;
+  moved: boolean;
+  old_index: number | null;
+  new_index: number | null;
+  previous_cfy_id: string | null;
+  next_cfy_id: string | null;
+  old_text: string | null;
+  new_text: string | null;
+  hunks: TextDiffHunk[];
+}
+
+export interface ArtifactVersionDiff {
+  thread_id: string;
+  from_version: number;
+  to_version: number;
+  changes: ArtifactBlockDiff[];
+  unchanged_count: number;
+  degraded: boolean;
+  warnings: string[];
+}
+
+export function diffVersions(
+  threadId: string,
+  fromVersion: number,
+  toVersion: number,
+): Promise<ArtifactVersionDiff> {
+  return invoke<ArtifactVersionDiff>("diff_versions", {
+    thread_id: threadId,
+    from_version: fromVersion,
+    to_version: toVersion,
+  });
+}
+
 export type CommentStatus = "open" | "answered" | "applied";
 
 /**

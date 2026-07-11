@@ -1694,7 +1694,8 @@ shell→artifact *commands* (its `event.source` is its own window, not
 | `type` | Payload | Meaning |
 |---|---|---|
 | `set_highlights` | `highlights`: array of `{key, anchor}` (`key` = comment id) | **Full replacement** of the decoration set (`[]` clears). Element anchors get an outline on the resolved element; text anchors are wrapped in inline `<span data-cfy-hl="text">` spans via offsets (verified against the quote), falling back to a document-wide quote search, then to outlining the `cfy_id` host. Unresolvable anchors are skipped (flagging them `moved` is `conceptify-94m.7`). Decorations are non-destructive and fully reverted on the next `set_highlights`. |
-| `scroll_to_anchor` | `anchor`, optional `key` | Smooth-scroll the anchored element/range into view (`block: "center"`) with a brief attention pulse. When `key` matches a live decoration the pulse lands exactly on it; otherwise the anchor is resolved fresh. |
+| `set_diff_markers` | `markers`: array of `{key, cfy_id, kind}` | **Full replacement** of version-diff gutter markers (`[]` clears). Markers are pointer-transparent document overlays positioned beside resolved blocks, never attributes/styles/wrappers on artifact content, so they coexist with comment highlights and selection without triggering `selectionchange`. Kinds are `modified`, `added`, `moved`, or `removed` (the last targets the nearest surviving neighbor). Re-send on every `ready`. |
+| `scroll_to_anchor` | `anchor`, optional `key` | Scroll the anchored element/range into view (`block: "center"`) with a brief attention pulse. When `key` matches a live decoration the pulse lands exactly on it; otherwise the anchor is resolved fresh. Smooth motion and the pulse are disabled under `prefers-reduced-motion: reduce`. |
 
 ### Hover affordance (v1 decision)
 

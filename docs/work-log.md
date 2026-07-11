@@ -197,3 +197,13 @@ reorders from insertion/deletion, and supplies neighbor ids for removed-block
 placement. Duplicate ids and changed id-less content degrade explicitly to a
 document fallback; malformed HTML is error-recovered. Tests cover every change
 class and a 150-block artifact well below the one-second budget.
+
+**Viewer diff (`conceptify-3nn.2`).** Every viewed version with a predecessor
+now offers “What changed”: a summary, changed-block list, next/previous jump,
+layout-neutral color gutters, removed-block neighbor markers, and a unified
+word-diff fallback. The bridge keeps diff overlays on a separate full-replacement
+channel from comment highlights, so selections and comment decorations coexist
+and both reapply independently after iframe reloads. Reduced-motion users get
+instant jumps without pulses. Browser QA covered real v2→v3 apply output,
+v1→v2 id-less fallback, version switching, jump, and clean exit; the rebuilt
+native `Conceptify.app` repeated the real-apply checkpoint beside live comments.

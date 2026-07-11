@@ -14,9 +14,9 @@
 // version and the iframe reloads in place. Concrete version URLs are
 // immutable/cacheable, so history browsing is instant (FR-2.4).
 
-import { useCallback, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import * as api from "../lib/api";
-import type { Thread } from "../lib/api";
+import type { ArtifactVersionDiff, Thread } from "../lib/api";
 import { artifactBridge } from "../lib/bridge";
 import type { ActiveRunState } from "../store/appStore";
 import { appStore, useAppStore } from "../store/appStore";
@@ -24,6 +24,7 @@ import { ArtifactCommentLayer } from "./ArtifactCommentLayer";
 import { CommentsSidebar } from "./CommentsSidebar";
 import { GenerationError, GenerationProgress } from "./GenerationView";
 import { StatusChip } from "./StatusChip";
+import { ArtifactDiffPanel } from "./ArtifactDiffPanel";
 
 export function ThreadView({ thread }: { thread: Thread | null }) {
   const state = useAppStore();
@@ -32,6 +33,12 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
   // thread switches (ThreadView isn't remounted per thread — only the iframe and
   // comment layer are keyed). Default open: this is the interrogation home base.
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [diffOpen, setDiffOpen] = useState(false);
+  const [diff, setDiff] = useState<ArtifactVersionDiff | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [selectedChange, setSelectedChange] = useState(0);
+  const [diffNudge, setDiffNudge] = useState(false);
 
   // Register the viewer iframe with the bridge (src/lib/bridge.ts owns the
   // postMessage handshake; comment UI riding on it is 94m.3/94m.6). Stable
@@ -46,15 +53,7 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
     else artifactBridge.detach();
   }, []);
 
-  if (thread == null) {
-    return (
-      <main class="flex h-full flex-1 items-center justify-center bg-well">
-        <p class="text-[13px] text-muted">Select a thread to view its artifact.</p>
-      </main>
-    );
-  }
-
-  const threadId = thread.id;
+  const threadId = thread?.id ?? "";
   const versions = state.artifactVersions;
   const latestVersion = versions.length > 0 ? versions[versions.length - 1].version : null;
   // The concrete version the iframe shows. "latest" tracks the newest known
@@ -64,6 +63,82 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
     state.viewerVersion === "latest" ? latestVersion : state.viewerVersion;
   const viewingOldVersion =
     resolvedVersion != null && latestVersion != null && resolvedVersion < latestVersion;
+  const previousVersion =
+    resolvedVersion == null
+      ? null
+      : [...versions]
+          .reverse()
+          .find((version) => version.version < resolvedVersion)?.version ?? null;
+
+  const latestSeenRef = useRef({ threadId, version: latestVersion });
+  useEffect(() => {
+    const seen = latestSeenRef.current;
+    if (seen.threadId !== threadId) {
+      latestSeenRef.current = { threadId, version: latestVersion };
+      setDiffOpen(false);
+      setDiff(null);
+      setDiffNudge(false);
+      return;
+    }
+    if (
+      seen.version != null &&
+      latestVersion != null &&
+      latestVersion > seen.version &&
+      state.viewerVersion === "latest"
+    ) {
+      setDiffNudge(true);
+    }
+    latestSeenRef.current = { threadId, version: latestVersion };
+  }, [threadId, latestVersion, state.viewerVersion]);
+
+  useEffect(() => {
+    if (!diffOpen || resolvedVersion == null || previousVersion == null) return;
+    let current = true;
+    setDiffLoading(true);
+    setDiffError(null);
+    setDiff(null);
+    setSelectedChange(0);
+    api
+      .diffVersions(threadId, previousVersion, resolvedVersion)
+      .then((result) => {
+        if (current) setDiff(result);
+      })
+      .catch((error) => {
+        if (current) setDiffError(String(error));
+      })
+      .finally(() => {
+        if (current) setDiffLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [diffOpen, threadId, previousVersion, resolvedVersion]);
+
+  const currentDiff =
+    diff != null && diff.thread_id === threadId && diff.to_version === resolvedVersion ? diff : null;
+  const diffMarkers = useMemo(() => {
+    if (!diffOpen || currentDiff == null) return [];
+    return currentDiff.changes.flatMap((change, index) => {
+      const cfyId = change.cfy_id ?? change.previous_cfy_id ?? change.next_cfy_id;
+      if (cfyId == null) return [];
+      return [{
+        key: `diff-${index}`,
+        cfy_id: cfyId,
+        kind: change.kind === "removed" ? "removed" as const : change.kind === "added" ? "added" as const : change.moved ? "moved" as const : "modified" as const,
+      }];
+    });
+  }, [diffOpen, currentDiff]);
+
+  useEffect(() => {
+    artifactBridge.setDiffMarkers(diffMarkers);
+    const unsubscribe = artifactBridge.onMessage((message) => {
+      if (message.type === "ready") artifactBridge.setDiffMarkers(diffMarkers);
+    });
+    return () => {
+      unsubscribe();
+      artifactBridge.setDiffMarkers([]);
+    };
+  }, [diffMarkers]);
 
   const hasArtifact = resolvedVersion != null;
   const waitingOnVersions =
@@ -77,9 +152,35 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
     appStore.setViewerVersion(value === "latest" ? "latest" : Number(value));
   }
 
+  function toggleDiff() {
+    if (diffOpen) {
+      setDiffOpen(false);
+      return;
+    }
+    setDiffNudge(false);
+    setDiffOpen(true);
+  }
+
+  function selectChange(index: number) {
+    setSelectedChange(index);
+    const change = currentDiff?.changes[index];
+    const cfyId = change?.cfy_id ?? change?.previous_cfy_id ?? change?.next_cfy_id;
+    if (cfyId != null) {
+      artifactBridge.scrollToAnchor({ v: 1, type: "element", cfy_id: cfyId });
+    }
+  }
+
   function onOpenInBrowser() {
     setOpenError(null);
     api.openArtifactInBrowser(threadId).catch((e) => setOpenError(String(e)));
+  }
+
+  if (thread == null) {
+    return (
+      <main class="flex h-full flex-1 items-center justify-center bg-well">
+        <p class="text-[13px] text-muted">Select a thread to view its artifact.</p>
+      </main>
+    );
   }
 
   return (
@@ -113,6 +214,17 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
                   </option>
                 ))}
               </select>
+              {previousVersion != null && (
+                <button
+                  type="button"
+                  onClick={toggleDiff}
+                  aria-pressed={diffOpen}
+                  class={`cfy-btn shrink-0 ${diffOpen ? "cfy-btn-accent" : "cfy-btn-secondary"}`}
+                >
+                  What changed
+                  {diffNudge && <span class="cfy-chip bg-info-bg text-info">New</span>}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={onOpenInBrowser}
@@ -197,6 +309,27 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
             </div>
           ) : (
             <NoArtifactState thread={thread} activeRun={state.activeRun} />
+          )}
+          {diffOpen && diffLoading && (
+            <div class="flex h-24 shrink-0 items-center justify-center border-t border-line bg-paper text-xs text-muted">
+              Comparing v{previousVersion} and v{resolvedVersion}…
+            </div>
+          )}
+          {diffOpen && !diffLoading && diffError != null && (
+            <div class="flex h-24 shrink-0 items-center justify-between gap-3 border-t border-line bg-paper px-4 text-xs text-danger">
+              <span class="truncate">Could not compare versions: {diffError}</span>
+              <button type="button" onClick={() => setDiffOpen(false)} class="cfy-btn cfy-btn-secondary">
+                Close
+              </button>
+            </div>
+          )}
+          {diffOpen && !diffLoading && diffError == null && currentDiff != null && (
+            <ArtifactDiffPanel
+              diff={currentDiff}
+              selected={selectedChange}
+              onSelect={selectChange}
+              onClose={() => setDiffOpen(false)}
+            />
           )}
         </div>
 
