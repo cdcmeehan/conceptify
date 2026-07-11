@@ -280,3 +280,13 @@ does not overwrite a question already being edited; saving never clears its
 text. Browser QA saved a Deep project default, preserved the active question,
 verified inheritance after reload, then cleared it back to Balanced. Existing
 thread metadata remains immutable when defaults change.
+
+**Composer expectations (`conceptify-l9w.6`).** A compact note now translates
+the selected profile into calm qualitative guidance: focused, balanced, deeper,
+visual, capability-assisted, or deep visual treatment. Only the unusually
+work-heavy Deep + Prefer visuals combination receives a caution, and it remains
+fully submittable. No exact time, token, price, or queue promise is invented.
+After submission, queued, provider-wait, submitting, and cancelling rows explain
+that the question and history are durable. Browser QA verified live copy changes
+from Quick to Deep + Prefer visuals, an enabled submit button, and a clean
+console.

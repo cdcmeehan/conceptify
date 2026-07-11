@@ -7,6 +7,7 @@ import type { AskQuestionDraft, AskSubmissionStatus } from "../store/appStore";
 import { appStore, useAppStore } from "../store/appStore";
 import { ModelOverridePicker } from "./ModelOverridePicker";
 import { ResponseProfilePicker } from "./ResponseProfilePicker";
+import type { ResponseIntent } from "../lib/api";
 
 const STATUS_LABEL: Record<AskSubmissionStatus, string> = {
   submitting: "Submitting",
@@ -30,6 +31,61 @@ const STATUS_CLASS: Record<AskSubmissionStatus, string> = {
   failed: "bg-danger-bg text-danger",
 };
 
+const STATUS_HELP: Partial<Record<AskSubmissionStatus, string>> = {
+  submitting: "Saving your question before it enters the queue.",
+  queued: "Saved and waiting for an execution slot.",
+  throttled: "The provider asked us to wait; your question is still saved.",
+  cancelling: "Stopping safely; the thread and run history remain.",
+};
+
+export function responseExpectation(
+  intent: ResponseIntent,
+  skillMode: AskQuestionDraft["skillMode"],
+  selectedSkillCount: number,
+): { label: string; detail: string; caution: boolean } {
+  const hasChosenSkill = skillMode === "manual" && selectedSkillCount > 0;
+  if (intent.depth === "deep" && intent.visuals === "prefer") {
+    return {
+      label: "Deep visual treatment",
+      detail: "More code research, diagram work, and visual review may be involved. You can still submit now.",
+      caution: true,
+    };
+  }
+  if (intent.depth === "quick" && intent.visuals !== "prefer" && !hasChosenSkill) {
+    return {
+      label: "Focused answer",
+      detail: "Essential scope with a lighter authoring and review pass.",
+      caution: false,
+    };
+  }
+  if (intent.depth === "deep") {
+    return {
+      label: "Deeper treatment",
+      detail: "Expect broader code research, edge cases, and a fuller review pass.",
+      caution: false,
+    };
+  }
+  if (intent.visuals === "prefer") {
+    return {
+      label: "Visual treatment",
+      detail: "A useful diagram and its visual review may add work when the topic supports one.",
+      caution: false,
+    };
+  }
+  if (hasChosenSkill) {
+    return {
+      label: "Capability-assisted answer",
+      detail: "The chosen skill may add setup and review beyond the explanation itself.",
+      caution: false,
+    };
+  }
+  return {
+    label: "Balanced treatment",
+    detail: "A standard research, explanation, and review pass; actual queue state appears after submission.",
+    caution: false,
+  };
+}
+
 export function NewThreadComposer({
   projectId,
   onClose,
@@ -47,6 +103,11 @@ export function NewThreadComposer({
   const launching = submissions.some((item) => item.status === "submitting");
   const canSubmit = draft.question.trim().length > 0;
   const validStaged = staged.filter((item) => item.question.trim().length > 0);
+  const expectation = responseExpectation(
+    draft.responseIntent,
+    draft.skillMode,
+    draft.selectedSkillIds.length,
+  );
 
   function submitSingle(e: Event) {
     e.preventDefault();
@@ -142,6 +203,10 @@ export function NewThreadComposer({
           onResetToInherited={() => appStore.resetAskDraftToInherited(projectId)}
           onResetDefault={(scope) => appStore.resetAskResponsePreference(projectId, scope)}
         />
+        <div class={`flex items-start gap-2 rounded-ctl px-2 py-1.5 text-[9px] leading-relaxed ${expectation.caution ? "bg-warn-bg text-warn" : "bg-well/40 text-muted"}`} role="note">
+          <span class="shrink-0 font-semibold text-ink">{expectation.label}</span>
+          <span>{expectation.detail}</span>
+        </div>
         <div class="flex items-center justify-between gap-2">
           <ModelOverridePicker
             purpose="inAppAsk"
@@ -216,6 +281,9 @@ export function NewThreadComposer({
                       <p class="line-clamp-2 text-[11px] leading-snug text-ink">{item.question}</p>
                       {item.error != null && (
                         <p class="mt-1 line-clamp-2 text-[10px] text-danger">{item.error}</p>
+                      )}
+                      {STATUS_HELP[item.status] != null && (
+                        <p class="mt-1 text-[9px] leading-snug text-muted">{STATUS_HELP[item.status]}</p>
                       )}
                     </div>
                     <span class={`cfy-chip shrink-0 ${STATUS_CLASS[item.status]}`}>
