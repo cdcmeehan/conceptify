@@ -958,7 +958,10 @@
         if (target) targets = [target];
       }
     }
-    if (targets.length === 0) return;
+    if (targets.length === 0) {
+      if (typeof msg.request_id === "string") post({ type: "scroll_result", request_id: msg.request_id, found: false });
+      return;
+    }
 
     try {
       var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -977,6 +980,7 @@
         targets[i].removeAttribute("data-cfy-pulse");
       }
     }, 1500);
+    if (typeof msg.request_id === "string") post({ type: "scroll_result", request_id: msg.request_id, found: true });
   }
 
   // -------------------------------------------------------------------------

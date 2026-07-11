@@ -175,6 +175,28 @@ export function listThreads(projectId: string): Promise<Thread[]> {
   return invoke<Thread[]>("list_threads", { project_id: projectId });
 }
 
+export type SearchHitKind = "project" | "thread" | "artifact" | "comment";
+export interface SearchHit {
+  kind: SearchHitKind;
+  entityId: string;
+  projectId: string;
+  threadId: string | null;
+  artifactVersion: number | null;
+  blockId: string | null;
+  title: string;
+  snippet: string;
+  rank: number;
+}
+export interface SearchResponse {
+  projects: SearchHit[];
+  threads: SearchHit[];
+  artifacts: SearchHit[];
+  comments: SearchHit[];
+}
+export function search(query: string, projectFilter: string | null = null, limit = 40): Promise<SearchResponse> {
+  return invoke<SearchResponse>("search", { query, project_filter: projectFilter, limit });
+}
+
 export interface LearningSuggestion {
   id: string;
   project_id: string;

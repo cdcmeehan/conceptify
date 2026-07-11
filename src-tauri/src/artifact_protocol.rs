@@ -802,6 +802,7 @@ mod tests {
             "suggestion_click",
             "set_highlights",
             "scroll_to_anchor",
+            "scroll_result",
         ] {
             assert!(BRIDGE_TAG.contains(msg), "bridge must reference {msg:?}");
         }

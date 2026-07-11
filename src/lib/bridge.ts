@@ -84,6 +84,7 @@ export interface BridgeRect {
 /** Artifact → shell. */
 export type BridgeMessage =
   | { type: "ready" }
+  | { type: "scroll_result"; request_id: string; found: boolean }
   | { type: "selection"; anchor: TextAnchor; rect: BridgeRect }
   | { type: "selection_cleared" }
   | { type: "element_click"; anchor: ElementAnchor; rect: BridgeRect }
@@ -171,6 +172,11 @@ function parseMessage(data: unknown): BridgeMessage | null {
   switch (data.type) {
     case "ready":
       return { type: "ready" };
+    case "scroll_result":
+      if (typeof data.request_id === "string" && typeof data.found === "boolean") {
+        return { type: "scroll_result", request_id: data.request_id, found: data.found };
+      }
+      return null;
     case "selection_cleared":
       return { type: "selection_cleared" };
     case "selection":
@@ -209,6 +215,7 @@ class ArtifactBridge {
   private queue: Record<string, unknown>[] = [];
   private listeners = new Set<BridgeListener>();
   private windowListenerInstalled = false;
+  private scrollRequests = new Map<string, (found: boolean) => void>();
 
   /**
    * Register the viewer iframe. Idempotent for the same element (safe to call
@@ -262,6 +269,19 @@ class ArtifactBridge {
     this.send({ type: "scroll_to_anchor", anchor, ...(key != null ? { key } : null) });
   }
 
+  /** Queue-safe scroll with acknowledgement for stale search targets. */
+  locateAnchor(anchor: Anchor): Promise<boolean> {
+    const request_id = crypto.randomUUID();
+    return new Promise((resolve) => {
+      this.scrollRequests.set(request_id, resolve);
+      this.send({ type: "scroll_to_anchor", anchor, request_id });
+      window.setTimeout(() => {
+        const pending = this.scrollRequests.get(request_id);
+        if (pending != null) { this.scrollRequests.delete(request_id); pending(false); }
+      }, 8000);
+    });
+  }
+
   private send(msg: Record<string, unknown>): void {
     if (this.iframe == null) return; // no viewer: drop silently
     if (!this.ready) {
@@ -302,6 +322,10 @@ class ArtifactBridge {
         const pending = this.queue;
         this.queue = [];
         for (const queued of pending) this.post(queued);
+      }
+      if (message.type === "scroll_result") {
+        const resolve = this.scrollRequests.get(message.request_id);
+        if (resolve != null) { this.scrollRequests.delete(message.request_id); resolve(message.found); }
       }
       for (const listener of this.listeners) listener(message);
     });

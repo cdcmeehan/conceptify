@@ -75,6 +75,7 @@ interface Props {
   /** Latest failed/timed-out run on this thread (FR-4.8 failure panel). */
   runFailure: RunFailureState | null;
   onClose: () => void;
+  searchTargetCommentId: string | null;
 }
 
 /** The excerpt shown on a row: the anchored quote, a direct-question marker, or
@@ -125,6 +126,7 @@ export function CommentsSidebar({
   activeRun,
   runFailure,
   onClose,
+  searchTargetCommentId,
 }: Props) {
   const [filter, setFilter] = useState<Filter>("all");
   // Inline error from a rejected run start (guard messages are user-facing);
@@ -137,6 +139,22 @@ export function CommentsSidebar({
   // Per-comment "Ask now" carries its own override, scoped to its ChainItem.
   const [followUpOverride, setFollowUpOverride] = useState<string | null>(null);
   const [applyOverride, setApplyOverride] = useState<string | null>(null);
+  useEffect(() => {
+    if (searchTargetCommentId == null || loading) return;
+    setFilter("all");
+    const frame = requestAnimationFrame(() => requestAnimationFrame(() => {
+      const row = document.getElementById(`comment-${searchTargetCommentId}`);
+      if (row == null) {
+        appStore.finishSearchTarget("That comment is no longer available. The thread is open.");
+        return;
+      }
+      row.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      row.classList.add("ring-2", "ring-accent", "ring-offset-2", "ring-offset-paper");
+      window.setTimeout(() => row.classList.remove("ring-2", "ring-accent", "ring-offset-2", "ring-offset-paper"), 1800);
+      appStore.finishSearchTarget();
+    }));
+    return () => cancelAnimationFrame(frame);
+  }, [searchTargetCommentId, loading, comments]);
 
   // Threaded view (epic conceptify-6xi): group the flat list into root chains.
   // Filters + counts operate on ROOT status only — a reply always renders with
@@ -505,6 +523,7 @@ function ChainItem({
 
   return (
     <li
+      id={`comment-${root.id}`}
       class={`cfy-card group ${menuOpen ? "overflow-visible" : "overflow-hidden"} ${
         failedHighlight ? "border-danger/50" : ""
       }`}
@@ -700,7 +719,7 @@ function ReplyRow({ reply }: { reply: Comment }) {
   const answered = reply.answer_html != null && reply.answer_html.length > 0;
 
   return (
-    <li class="ml-2.5 border-l border-line">
+    <li id={`comment-${reply.id}`} class="ml-2.5 border-l border-line">
       <div class="px-2.5 py-1.5">
         <div class="mb-0.5 flex items-center justify-between gap-2">
           <span class="text-[10px] font-medium uppercase tracking-wide text-muted">

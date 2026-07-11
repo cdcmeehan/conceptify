@@ -201,6 +201,8 @@ export interface AppState {
   activityTrayOpen: boolean;
   conflictReviewRunId: string | null;
   pendingConceptEvidence: { threadId: string; cfyId: string } | null;
+  pendingSearchTarget: { threadId: string; kind: "artifact" | "comment"; targetId: string } | null;
+  searchNotice: string | null;
 }
 
 type Listener = () => void;
@@ -231,6 +233,8 @@ const initialState: AppState = {
   activityTrayOpen: false,
   conflictReviewRunId: null,
   pendingConceptEvidence: null,
+  pendingSearchTarget: null,
+  searchNotice: null,
 };
 
 let askDraftSequence = 0;
@@ -1239,6 +1243,14 @@ class AppStore {
     void this.syncActiveRun(id);
   }
 
+  /** Cold-safe navigation used by global search and external navigation. */
+  async navigateTo(projectId: string, threadId: string | null): Promise<void> {
+    if (projectId !== this.state.selectedProjectId) this.selectProject(projectId);
+    if (threadId == null) return;
+    await this.refetchThreads(projectId);
+    this.selectThread(threadId);
+  }
+
   openConceptEvidence(threadId: string, cfyId: string): void {
     this.set({ pendingConceptEvidence: { threadId, cfyId } });
     this.selectThread(threadId);
@@ -1246,6 +1258,23 @@ class AppStore {
 
   clearPendingConceptEvidence(): void {
     this.set({ pendingConceptEvidence: null });
+  }
+
+  async navigateToSearchHit(hit: api.SearchHit): Promise<void> {
+    const target = hit.threadId == null ? null : hit.kind === "artifact" && hit.blockId != null
+      ? { threadId: hit.threadId, kind: "artifact" as const, targetId: hit.blockId }
+      : hit.kind === "comment"
+        ? { threadId: hit.threadId, kind: "comment" as const, targetId: hit.entityId }
+        : null;
+    this.set({ pendingSearchTarget: target, searchNotice: null });
+    await this.navigateTo(hit.projectId, hit.threadId);
+  }
+
+  finishSearchTarget(notice: string | null = null): void {
+    this.set({ pendingSearchTarget: null, searchNotice: notice });
+    if (notice != null) window.setTimeout(() => {
+      if (this.state.searchNotice === notice) this.set({ searchNotice: null });
+    }, 4200);
   }
 
   setShowArchived(showArchived: boolean): void {

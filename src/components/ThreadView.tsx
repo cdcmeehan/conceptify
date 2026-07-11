@@ -92,6 +92,17 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
     artifactBridge.scrollToAnchor({ v: 1, type: "element", cfy_id: evidence.cfyId });
     appStore.clearPendingConceptEvidence();
   }, [state.pendingConceptEvidence, threadId, resolvedVersion]);
+  useEffect(() => {
+    const target = state.pendingSearchTarget;
+    if (target == null || target.threadId !== threadId) return;
+    if (target.kind === "comment") { setSidebarOpen(true); return; }
+    if (resolvedVersion == null) return;
+    let current = true;
+    void artifactBridge.locateAnchor({ v: 1, type: "element", cfy_id: target.targetId }).then((found) => {
+      if (current) appStore.finishSearchTarget(found ? null : "That section changed since it was indexed. The thread is open at its latest version.");
+    });
+    return () => { current = false; };
+  }, [state.pendingSearchTarget, threadId, resolvedVersion]);
   const viewingOldVersion =
     resolvedVersion != null && latestVersion != null && resolvedVersion < latestVersion;
   const previousVersion =
@@ -419,9 +430,11 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
             activeRun={state.activeRun}
             runFailure={state.runFailure}
             onClose={() => setSidebarOpen(false)}
+            searchTargetCommentId={state.pendingSearchTarget?.threadId === threadId && state.pendingSearchTarget.kind === "comment" ? state.pendingSearchTarget.targetId : null}
           />
         )}
       </div>
+      {state.searchNotice != null && <div role="status" class="pointer-events-none fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-ctl border border-line-strong bg-paper px-3 py-2 text-xs text-muted shadow-lg">{state.searchNotice}</div>}
     </main>
   );
 }

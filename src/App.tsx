@@ -17,6 +17,7 @@ import { SettingsView } from "./components/SettingsView";
 import { ActivityTray } from "./components/ActivityTray";
 import { ConflictReview } from "./components/ConflictReview";
 import { ProjectHome } from "./components/ProjectHome";
+import { QuickSwitcher } from "./components/QuickSwitcher";
 import { initSystemNotifications } from "./lib/systemNotifications";
 import "./App.css";
 
@@ -80,6 +81,7 @@ function App() {
         <ConflictReview runId={state.conflictReviewRunId} />
       )}
       {state.settingsOpen && <SettingsView />}
+      <QuickSwitcher />
     </div>
   );
 }
