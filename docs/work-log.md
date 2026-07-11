@@ -304,3 +304,15 @@ durable queue metadata, retry identity, artifact provenance, and stale-result
 recovery; the contract-accurate thread-header checkpoint displayed the exact
 profile and skill schema version on a historical artifact. No raw prompt or
 provider detail reached the UI.
+
+## 2026-07-11 — Fast project kickoff
+
+**Quick-start IA prototype (`conceptify-vc1.1`).** Accepted a progressive
+single-sheet flow around two user intents: Explore a folder and Learn a topic.
+The decision fixes minimum fields, inferred defaults, terminology, exact Create
+versus Create & ask destinations, context/readiness summaries, first-launch and
+returning focus behavior, and recovery for picker cancellation, invalid or
+duplicate folders, creation failure, and topic-only setup. Validation against
+the existing sidebar retained its compact strengths while identifying the
+implementation-led divider, ambiguous destination, missing readiness, and
+missing first ask that the child beads now replace.
