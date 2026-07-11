@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "conceptify",
+  "name": "Conceptify artifact",
+  "outcome": "Creates a polished, self-contained explanation artifact with optional diagrams and code walkthroughs.",
+  "supported_intents": ["explain", "teach", "visualize", "compare", "reference"],
+  "context_requirements": ["A question or topic", "A writable Conceptify thread"],
+  "expected_outputs": ["Self-contained HTML artifact", "Anchored explanation sections", "Optional inline diagrams and highlighted code"],
+  "latency_hint": "extended",
+  "compatible_response_controls": {
+    "depth": ["quick", "balanced", "deep"],
+    "language": ["plain", "familiar", "domain_native"],
+    "visuals": ["auto", "prefer", "avoid"],
+    "shape": ["auto", "walkthrough", "comparison", "reference"]
+  },
+  "recommendation": {
+    "terms": ["artifact", "diagram", "visual", "illustrate", "interactive", "walkthrough", "concept map"],
+    "visual_preference_score": 2,
+    "shape_scores": {"walkthrough": 1, "comparison": 1, "reference": 1},
+    "minimum_score": 2
+  },
+  "manual_selectable": true
+}

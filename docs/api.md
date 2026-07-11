@@ -456,6 +456,26 @@ settings commands are the exception (they emit `settings-changed`, above).
   `ArtifactVersionDiffResponse` as the authenticated HTTP endpoint below. It is
   a read-only command and emits no event.
 
+**Skill capabilities (`conceptify-l9w.2`):**
+
+- `list_skill_capabilities {}` → `SkillCatalogEntry[]` — reads local
+  `capabilities.json` sidecars from supported agent skill directories and the
+  bundled Conceptify descriptor. Each entry describes its outcome, supported
+  intents, context requirements, expected outputs, latency hint, compatible
+  response controls, recommendation signals, manual-selectability, and
+  `{ available, reason }` installation state.
+- `recommend_skills { question, intent, selected_skill_ids }` →
+  `SkillRecommendation[]` — validates the response-intent v1 object and scores
+  the local catalog deterministically. Results include score, a plain-language
+  reason, and `selected_manually`; unavailable manual choices remain visible
+  with their installation reason. Question text is processed in-process and is
+  never sent to a model or service merely for selection. An ordinary question
+  may correctly return an empty list.
+
+Capability sidecar schema version 1 is exemplified by
+`skill/capabilities.json`. New skills need no service code when they use the
+same schema; invalid or unknown-version sidecars are not executable.
+
 **Settings (FR-7.1–7.4, beads 959.4):**
 
 - `get_agent_settings {}` → `AgentSettings` — stored overrides merged over code

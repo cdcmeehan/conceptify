@@ -15,6 +15,67 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type ThreadStatus = "generating" | "ready" | "updating" | "error";
 
+export type ResponseDepth = "quick" | "balanced" | "deep";
+export type ResponseLanguage = "plain" | "familiar" | "domain_native";
+export type ResponseVisuals = "auto" | "prefer" | "avoid";
+export type ResponseShape = "auto" | "walkthrough" | "comparison" | "reference";
+
+export interface ResponseIntent {
+  version: 1;
+  depth: ResponseDepth;
+  language: ResponseLanguage;
+  visuals: ResponseVisuals;
+  shape: ResponseShape;
+}
+
+export interface SkillCapability {
+  schema_version: number;
+  id: string;
+  name: string;
+  outcome: string;
+  supported_intents: string[];
+  context_requirements: string[];
+  expected_outputs: string[];
+  latency_hint: "fast" | "moderate" | "extended";
+  compatible_response_controls: {
+    depth: ResponseDepth[];
+    language: ResponseLanguage[];
+    visuals: ResponseVisuals[];
+    shape: ResponseShape[];
+  };
+  recommendation: {
+    terms: string[];
+    visual_preference_score: number;
+    shape_scores: Partial<Record<ResponseShape, number>>;
+    minimum_score: number;
+  };
+  manual_selectable: boolean;
+  availability: { available: boolean; reason: string | null };
+}
+
+export interface SkillRecommendation {
+  skill: SkillCapability;
+  score: number;
+  reason: string;
+  selected_manually: boolean;
+}
+
+export function listSkillCapabilities(): Promise<SkillCapability[]> {
+  return invoke<SkillCapability[]>("list_skill_capabilities");
+}
+
+export function recommendSkills(
+  question: string,
+  intent: ResponseIntent,
+  selectedSkillIds: string[] = [],
+): Promise<SkillRecommendation[]> {
+  return invoke<SkillRecommendation[]>("recommend_skills", {
+    question,
+    intent,
+    selected_skill_ids: selectedSkillIds,
+  });
+}
+
 export interface Project {
   id: string;
   name: string;

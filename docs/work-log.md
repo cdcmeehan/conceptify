@@ -240,3 +240,11 @@ per-dimension user/project/question inheritance, immutable resolved provenance,
 valid cross-combinations, explicit capability fallbacks, a hard text-only
 constraint, stable localization keys, and keyboard/zoom/focus requirements.
 The ordinary default remains Balanced + Familiar + When useful + Best fit.
+
+**Skill capability catalog (`conceptify-l9w.2`).** Installed skills can now
+declare a versioned local sidecar covering outcomes, supported intents, context,
+outputs, latency, response-control compatibility, and recommendation signals.
+The app discovers future sidecars from supported agent skill directories,
+explains missing installations, preserves manual choices, and recommends with
+deterministic in-process scoring; ordinary questions return no recommendation.
+The Tauri/TypeScript API is ready for the progressive composer.

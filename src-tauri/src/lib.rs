@@ -20,6 +20,7 @@ mod run_queue;
 mod runs;
 mod server;
 mod settings;
+mod skill_catalog;
 mod threads;
 
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -124,6 +125,8 @@ pub fn run() {
             commands::get_latest_run,
             commands::get_model_catalog,
             commands::refresh_model_catalog,
+            skill_catalog::list_skill_capabilities,
+            skill_catalog::recommend_skills,
             runs::cancel_run,
         ])
         .setup(|app| {
