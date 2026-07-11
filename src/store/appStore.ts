@@ -108,6 +108,9 @@ export interface ActiveRunState {
    *  progress panel's activity feed; the sidebar run block only uses
    *  `lastProgress`. Capped at {@link MAX_RUN_PROGRESS_LINES}. */
   recentProgress: string[];
+  /** Ephemeral Claude text deltas for the answer currently being composed.
+   * Never persisted; cleared when a comment update or terminal event lands. */
+  liveAnswer: string;
 }
 
 /** How many `run-progress` lines the rolling activity feed keeps (FR-5.2). */
@@ -944,6 +947,7 @@ class AppStore {
         targetIds: started.target_comment_ids,
         lastProgress: null,
         recentProgress: [],
+        liveAnswer: "",
       },
       runFailure: null,
     });
@@ -973,6 +977,7 @@ class AppStore {
         targetIds: started.target_comment_ids,
         lastProgress: null,
         recentProgress: [],
+        liveAnswer: "",
       },
       runFailure: null,
     });
@@ -998,6 +1003,7 @@ class AppStore {
         targetIds: started.target_comment_ids,
         lastProgress: null,
         recentProgress: [],
+        liveAnswer: "",
       },
       runFailure: null,
     });
@@ -1033,6 +1039,7 @@ class AppStore {
           targetIds: null,
           lastProgress: null,
           recentProgress: [],
+          liveAnswer: "",
         },
         runFailure: null,
       });
@@ -1055,6 +1062,7 @@ class AppStore {
         targetIds: null,
         lastProgress: null,
         recentProgress: [],
+        liveAnswer: "",
       },
       runFailure: null,
     });
@@ -1070,6 +1078,10 @@ class AppStore {
     this.updateSubmissionByRun(payload.run_id, { status: "running" });
     const run = this.state.activeRun;
     if (run != null && run.runId === payload.run_id) {
+      if (payload.kind === "assistant_text_delta") {
+        if (run.mode === "answer") this.set({ activeRun: { ...run, liveAnswer: `${run.liveAnswer}${payload.detail}`.slice(-12000) } });
+        return;
+      }
       const line = formatRunProgressLine(payload.kind, payload.detail);
       if (line == null) return; // non-actionable noise (e.g. an "allowed" rate-limit heartbeat)
       const recentProgress = [...run.recentProgress, line].slice(-MAX_RUN_PROGRESS_LINES);
@@ -1079,6 +1091,14 @@ class AppStore {
     if (run == null && payload.thread_id === this.state.selectedThreadId) {
       void this.syncActiveRun(payload.thread_id);
     }
+  }
+
+  handleCommentUpdated(payload: { thread_id: string; comment_id: string }): void {
+    const run = this.state.activeRun;
+    if (run?.mode === "answer" && run.threadId === payload.thread_id) {
+      this.set({ activeRun: { ...run, liveAnswer: "" } });
+    }
+    void this.refetchComments(payload.thread_id);
   }
 
   handleRunStateChanged(payload: {
@@ -1195,6 +1215,7 @@ class AppStore {
             targetIds: null,
             lastProgress: null,
             recentProgress: [],
+            liveAnswer: "",
           },
         });
       } else if (this.state.activeRun?.threadId === threadId) {

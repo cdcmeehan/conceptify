@@ -1944,6 +1944,18 @@ fn detect_throttle(line: &str) -> Option<String> {
 fn classify_line(line: &str) -> (String, String) {
     match serde_json::from_str::<serde_json::Value>(line) {
         Ok(value) => {
+            // Claude Code `--include-partial-messages` wraps Anthropic stream
+            // events as `{type:"stream_event",event:{...}}`. Forward only
+            // assistant text deltas under a stable internal kind; tool JSON
+            // deltas remain ordinary progress and Codex output is untouched.
+            let event = value.get("event").unwrap_or(&value);
+            if event.get("type").and_then(|v| v.as_str()) == Some("content_block_delta")
+                && event.pointer("/delta/type").and_then(|v| v.as_str()) == Some("text_delta")
+            {
+                if let Some(text) = event.pointer("/delta/text").and_then(|v| v.as_str()) {
+                    return ("assistant_text_delta".to_owned(), text.to_owned());
+                }
+            }
             let kind = value
                 .get("type")
                 .and_then(|t| t.as_str())
@@ -2300,6 +2312,12 @@ mod tests {
         assert_eq!(kind, "assistant");
         assert_eq!(detail, r#"{"type":"assistant","message":{}}"#);
 
+        let (kind, detail) = classify_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Partial answer"}}}"#,
+        );
+        assert_eq!(kind, "assistant_text_delta");
+        assert_eq!(detail, "Partial answer");
+
         // rate_limit_event: no `subtype`, so `detail` carries the nested
         // `rate_limit_info` as compact JSON (not the truncated raw line) so the
         // frontend can decide whether to surface it (bead conceptify-pri).
@@ -2380,11 +2398,14 @@ mod tests {
     async fn successful_run_streams_logs_and_completes() {
         let h = harness("ok");
         h.install_fake_agent(
-            "#!/bin/sh\n\
-             echo '{\"type\":\"system\",\"subtype\":\"init\"}'\n\
-             echo '{\"type\":\"result\",\"subtype\":\"success\"}'\n\
-             echo 'warn: something odd' >&2\n\
-             exit 0\n",
+            r#"#!/bin/sh
+echo '{"type":"system","subtype":"init"}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Partial "}}}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"answer"}}}'
+echo '{"type":"result","subtype":"success"}'
+echo 'warn: something odd' >&2
+exit 0
+"#,
             60,
         );
 
@@ -2436,15 +2457,19 @@ mod tests {
             .contains(&format!("{}/threads/", h.project_id)));
         assert!(fin.log_path.to_string_lossy().contains("/runs/"));
 
-        // Events: run-progress only for stdout lines (2), with parsed kinds;
+        // Events: every stdout line, including progressive assistant deltas;
         // run-finished exactly once with terminal status.
         let progress = h.progress.lock().unwrap().clone();
-        assert_eq!(progress.len(), 2, "{progress:?}");
+        assert_eq!(progress.len(), 4, "{progress:?}");
         assert_eq!(progress[0]["kind"], "system");
         assert_eq!(progress[0]["detail"], "init");
         assert_eq!(progress[0]["run_id"], run_id.as_str());
         assert_eq!(progress[0]["thread_id"], h.thread_id.as_str());
-        assert_eq!(progress[1]["kind"], "result");
+        assert_eq!(progress[1]["kind"], "assistant_text_delta");
+        assert_eq!(progress[1]["detail"], "Partial ");
+        assert_eq!(progress[2]["kind"], "assistant_text_delta");
+        assert_eq!(progress[2]["detail"], "answer");
+        assert_eq!(progress[3]["kind"], "result");
 
         let fin_events = h.finished_events.lock().unwrap().clone();
         assert_eq!(fin_events.len(), 1, "{fin_events:?}");

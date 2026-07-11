@@ -315,6 +315,10 @@ fn default_adapters() -> BTreeMap<String, Adapter> {
                 "acceptEdits".to_owned(),
                 "--output-format".to_owned(),
                 "stream-json".to_owned(),
+                // Emits `stream_event` / `content_block_delta` lines while
+                // Claude is composing so answer-mode UI can show an ephemeral
+                // live draft. Confirmed in Claude Code 2.1.207's CLI help.
+                "--include-partial-messages".to_owned(),
                 // The claude CLI requires --verbose whenever --print is
                 // combined with --output-format=stream-json; without it the
                 // process exits 1 immediately and every headless run fails
@@ -1256,6 +1260,7 @@ mod tests {
                 "acceptEdits",
                 "--output-format",
                 "stream-json",
+                "--include-partial-messages",
                 "--verbose",
                 "--strict-mcp-config",
                 "--allowedTools",

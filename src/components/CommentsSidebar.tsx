@@ -890,6 +890,14 @@ function RunStatusBlock({ run, comments }: { run: ActiveRunState; comments: Comm
           {run.lastProgress}
         </p>
       )}
+      {run.mode === "answer" && run.liveAnswer.trim() !== "" && (
+        <div class="mt-2 rounded-ctl border border-info/20 bg-paper/70 px-2 py-1.5" aria-live="polite">
+          <p class="cfy-label mb-1 text-info">Live answer draft</p>
+          <p class="max-h-28 overflow-hidden whitespace-pre-wrap text-xs leading-relaxed text-ink [mask-image:linear-gradient(to_bottom,black_75%,transparent)]">
+            {run.liveAnswer}
+          </p>
+        </div>
+      )}
     </div>
   );
 }

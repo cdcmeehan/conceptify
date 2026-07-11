@@ -108,7 +108,7 @@ export function initEventListeners(): () => void {
     // scoped refresh: the sidebar re-renders the new status/answer, highlights
     // drop a no-longer-open comment, and the badge count updates.
     listen<CommentEventPayload>("comment-updated", (event) => {
-      void appStore.refetchComments(event.payload.thread_id);
+      appStore.handleCommentUpdated(event.payload);
       void appStore.refetchThreads(event.payload.project_id);
     }),
 

@@ -573,3 +573,10 @@ real Conceptify project as inspectable history.
 - Measured five representative queries across 349 indexed rows: 3.5 ms average, 4.8 ms maximum through the real Tauri invoke bridge.
 - Visually checked dark and light themes plus emulated `prefers-reduced-motion: reduce`; the overlay remained legible and focus stayed on the search field.
 - Quality gates: `just check`, `cargo test --workspace` (330 passed, 3 ignored; CLI 24 passed), production frontend build, and release app/DMG bundle all green.
+# 2026-07-11 — Live follow-up answer drafts (`conceptify-bds`)
+
+- Confirmed current Claude Code 2.1.207 supports `--include-partial-messages` with print-mode `stream-json`, then enabled it on the built-in Claude adapter.
+- The run classifier now forwards only `content_block_delta` / `text_delta` payloads as `assistant_text_delta`; tool JSON and Codex stdout retain their prior paths.
+- Answer runs accumulate those deltas in an ephemeral, bounded store buffer and render a clearly labeled, accessible “Live answer draft” panel in the sidebar.
+- A persisted `comment-updated`, cancellation, failure, or terminal run clears the draft; the authoritative stored answer replaces it through the normal comment refetch. No partial content enters SQLite.
+- Production frontend build and focused adapter/classifier tests are green.

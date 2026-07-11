@@ -37,15 +37,17 @@ changed-section highlighting in the viewer (diff the two HTML files
 server-side, mark changed `data-cfy-id` blocks), or a side-by-side text diff
 as a first cut. PRD lists visual diff as P2/nice-to-have (FR-2.4).
 
-## 4. Streaming answers into the sidebar — planned: `conceptify-bds`
+## 4. Streaming answers into the sidebar — completed: `conceptify-bds`
 
 Follow-up answers currently land wholesale per comment (`comment-updated`
 fires when `resolve-comment` completes). Streaming the answer text
 token-by-token into the sidebar row would make the interrogation loop feel
 alive. Requires the headless agent to emit partial answers (or the run
 `stream-json` events to carry assistant text deltas that the run-progress
-pipeline forwards to a per-comment buffer). Polish, not structure — do after
-the conversational-interrogation epic lands.
+pipeline forwards to an ephemeral answer buffer). Implemented with Claude
+Code's `--include-partial-messages`: text deltas render in a clearly-associated
+live draft panel, clear when the persisted comment update lands, and are never
+written to the database. Codex retains its prior non-streaming behavior.
 
 ## 5. Structured codex run-progress parsing — planned: `conceptify-dqq`
 
