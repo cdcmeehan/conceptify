@@ -189,6 +189,7 @@ async fn live_bridge() {
             crate::synthesis::compare_threads,
             crate::synthesis::record_thread_synthesis,
             crate::synthesis::get_thread_synthesis,
+            crate::search::search,
             crate::runs::cancel_run,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))

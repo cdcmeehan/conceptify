@@ -275,7 +275,7 @@ fn record(
             project_id,
             thread_id,
             serde_json::to_string(&sources).map_err(|error| error.to_string())?,
-            normalized_text(&instruction, 500),
+            normalized_text(instruction, 500),
         ],
     )
     .map_err(|error| error.to_string())?;

@@ -362,7 +362,8 @@ pub fn save_artifact_for_run(
     let mut response_intent_json: Option<String> = None;
     let mut selected_skills_json: Option<String> = None;
     if let Some(run_id) = source_run_id {
-        let run: Option<(String, String, Option<i64>, Option<String>, Option<String>, Option<String>)> = conn
+        type RunArtifactMetadata = (String, String, Option<i64>, Option<String>, Option<String>, Option<String>);
+        let run: Option<RunArtifactMetadata> = conn
             .query_row(
                 "SELECT thread_id, run_class, base_artifact_version,
                         response_intent_json, selected_skills_json, status_reason

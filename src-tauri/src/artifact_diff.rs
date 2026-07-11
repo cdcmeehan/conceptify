@@ -206,6 +206,7 @@ pub fn diff_html(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn block_change(
     id: Option<&str>,
     kind: ArtifactDiffKind,

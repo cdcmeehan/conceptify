@@ -1559,6 +1559,7 @@ impl From<crate::flows::AskStarted> for AskStartedDto {
 /// optional (derived from the question when blank). Rejects (user-facing string)
 /// on an empty question, an unknown project, or a missing CLI/agent binary.
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 pub async fn ask_from_app<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     project_id: String,

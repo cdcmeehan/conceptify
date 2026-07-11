@@ -561,3 +561,15 @@ to 300–360 px, yielding two visible 360 px sources at desktop width and a
 deliberate scrollable strip for four-source/narrow layouts. Screenshots were
 captured under `/tmp/dqb-*.png`; controlled checkpoint threads remain in the
 real Conceptify project as inspectable history.
+# 2026-07-11 — Search and quick-switcher checkpoint (`conceptify-7x3.5`)
+
+- Built and installed a fresh release bundle at `/Applications/Conceptify.app`; launched its real binary against the production DB/API.
+- Verified Cmd/Ctrl-K keyboard-only operation, Escape focus restoration, empty/recent state, literal-prefix highlighting, and grouped thread/artifact/comment results.
+- Found a term present only in an artifact code block (`connect-src`) and landed a background thread at the exact `data-cfy-id` block after the opaque iframe became ready.
+- Found an answer-only term (`shorthand`) and landed/focused the answered comment row; found a title-only thread and navigated directly.
+- Saved artifact v2 with `SearchMutationZephyr`, created then answered a comment with `AnswerMutationNimbus`, and renamed/restored a thread: each result changed immediately without a manual rebuild.
+- Injected one controlled stale index target and verified the quiet “section changed since it was indexed” fallback, then removed the fixture.
+- Restarted both the installed release and live bridge; saved artifact and answer hits remained searchable, exercising startup recovery against disk-backed artifact content.
+- Measured five representative queries across 349 indexed rows: 3.5 ms average, 4.8 ms maximum through the real Tauri invoke bridge.
+- Visually checked dark and light themes plus emulated `prefers-reduced-motion: reduce`; the overlay remained legible and focus stayed on the search field.
+- Quality gates: `just check`, `cargo test --workspace` (330 passed, 3 ignored; CLI 24 passed), production frontend build, and release app/DMG bundle all green.

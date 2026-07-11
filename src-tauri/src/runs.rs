@@ -1433,12 +1433,12 @@ fn spawn_supervisor<R: Runtime>(
                 // made the child exit (and even in the exit-vs-cancel photo
                 // finish, the user asked for cancelled and should read
                 // cancelled).
-                if !ctx.cancel_flag.load(Ordering::SeqCst)
-                    && !out.timed_out
-                    && !out.exit_success
-                    && out.throttle_until.is_some()
-                {
-                    let until = out.throttle_until.expect("checked above");
+                if let Some(until) = out.throttle_until.as_ref().filter(|_| {
+                    !ctx.cancel_flag.load(Ordering::SeqCst)
+                        && !out.timed_out
+                        && !out.exit_success
+                }) {
+                    let until = until.clone();
                     let id = ctx.run_id.clone();
                     let until_for_db = until.clone();
                     let throttled = db::with_conn(&ctx.db, move |conn| {
