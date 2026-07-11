@@ -137,6 +137,8 @@ export interface AskQuestionDraft {
   responseIntent: api.ResponseIntent;
   skillMode: "auto" | "none" | "manual";
   selectedSkillIds: string[];
+  responseOrigins: Record<"depth" | "language" | "visuals" | "shape", api.ResponsePreferenceOrigin>;
+  responseIntentTouched: boolean;
 }
 
 export type AskSubmissionStatus =
@@ -161,6 +163,7 @@ export interface AskComposerWorkspace {
   draft: AskQuestionDraft;
   staged: AskQuestionDraft[];
   submissions: AskSubmission[];
+  preferences: api.ResolvedResponsePreferences | null;
 }
 
 export interface AppState {
@@ -230,14 +233,14 @@ const initialState: AppState = {
 
 let askDraftSequence = 0;
 
-function newAskDraft(): AskQuestionDraft {
+function newAskDraft(preferences?: api.ResolvedResponsePreferences | null): AskQuestionDraft {
   askDraftSequence += 1;
   return {
     id: `ask-draft-${Date.now()}-${askDraftSequence}`,
     title: "",
     question: "",
     modelOverride: null,
-    responseIntent: {
+    responseIntent: preferences?.intent ?? {
       version: 1,
       depth: "balanced",
       language: "familiar",
@@ -246,11 +249,18 @@ function newAskDraft(): AskQuestionDraft {
     },
     skillMode: "auto",
     selectedSkillIds: [],
+    responseOrigins: preferences?.origins ?? {
+      depth: "product",
+      language: "product",
+      visuals: "product",
+      shape: "product",
+    },
+    responseIntentTouched: false,
   };
 }
 
 function defaultAskWorkspace(): AskComposerWorkspace {
-  return { mode: "single", draft: newAskDraft(), staged: [], submissions: [] };
+  return { mode: "single", draft: newAskDraft(), staged: [], submissions: [], preferences: null };
 }
 
 function runOverrideOfModel(model: string | null): RunOverride | null {
@@ -389,6 +399,16 @@ class AppStore {
   ensureAskWorkspace(projectId: string): void {
     if (this.state.askComposerByProject[projectId] != null) return;
     this.setAskWorkspace(projectId, defaultAskWorkspace());
+    void api.getResponsePreferences(projectId).then((preferences) => {
+      const workspace = this.askWorkspace(projectId);
+      this.setAskWorkspace(projectId, {
+        ...workspace,
+        preferences,
+        draft: workspace.draft.responseIntentTouched
+          ? workspace.draft
+          : newAskDraft(preferences),
+      });
+    }).catch(() => undefined);
   }
 
   setAskComposerMode(projectId: string, mode: "single" | "multi"): void {
@@ -402,7 +422,72 @@ class AppStore {
     const workspace = this.askWorkspace(projectId);
     this.setAskWorkspace(projectId, {
       ...workspace,
-      draft: { ...workspace.draft, ...patch },
+      draft: {
+        ...workspace.draft,
+        ...patch,
+        ...(patch.responseIntent == null
+          ? {}
+          : {
+              responseIntentTouched: true,
+              responseOrigins: {
+                depth: "question",
+                language: "question",
+                visuals: "question",
+                shape: "question",
+              } as const,
+            }),
+      },
+    });
+  }
+
+  async saveAskResponsePreference(
+    projectId: string,
+    scope: "user" | "project",
+    intent: api.ResponseIntent,
+  ): Promise<void> {
+    const preferences = await api.saveResponsePreference(projectId, scope, intent);
+    const workspace = this.askWorkspace(projectId);
+    this.setAskWorkspace(projectId, {
+      ...workspace,
+      preferences,
+      draft: {
+        ...workspace.draft,
+        responseIntent: preferences.intent,
+        responseOrigins: preferences.origins,
+        responseIntentTouched: false,
+      },
+    });
+  }
+
+  async resetAskResponsePreference(
+    projectId: string,
+    scope: "user" | "project",
+  ): Promise<void> {
+    const preferences = await api.resetResponsePreference(projectId, scope);
+    const workspace = this.askWorkspace(projectId);
+    this.setAskWorkspace(projectId, {
+      ...workspace,
+      preferences,
+      draft: {
+        ...workspace.draft,
+        responseIntent: preferences.intent,
+        responseOrigins: preferences.origins,
+        responseIntentTouched: false,
+      },
+    });
+  }
+
+  resetAskDraftToInherited(projectId: string): void {
+    const workspace = this.askWorkspace(projectId);
+    const inherited = newAskDraft(workspace.preferences);
+    this.setAskWorkspace(projectId, {
+      ...workspace,
+      draft: {
+        ...workspace.draft,
+        responseIntent: inherited.responseIntent,
+        responseOrigins: inherited.responseOrigins,
+        responseIntentTouched: false,
+      },
     });
   }
 
@@ -412,7 +497,7 @@ class AppStore {
     this.setAskWorkspace(projectId, {
       ...workspace,
       staged: [...workspace.staged, { ...workspace.draft }],
-      draft: newAskDraft(),
+      draft: newAskDraft(workspace.preferences),
     });
   }
 
@@ -425,7 +510,23 @@ class AppStore {
     this.setAskWorkspace(projectId, {
       ...workspace,
       staged: workspace.staged.map((draft) =>
-        draft.id === draftId ? { ...draft, ...patch } : draft,
+        draft.id === draftId
+          ? {
+              ...draft,
+              ...patch,
+              ...(patch.responseIntent == null
+                ? {}
+                : {
+                    responseIntentTouched: true,
+                    responseOrigins: {
+                      depth: "question",
+                      language: "question",
+                      visuals: "question",
+                      shape: "question",
+                    } as const,
+                  }),
+            }
+          : draft,
       ),
     });
   }
@@ -454,6 +555,8 @@ class AppStore {
           responseIntent: submission.responseIntent,
           skillMode: submission.skillMode,
           selectedSkillIds: submission.selectedSkillIds,
+          responseOrigins: submission.responseOrigins,
+          responseIntentTouched: true,
         },
       ],
       submissions: workspace.submissions.filter((item) => item.id !== submissionId),
@@ -484,7 +587,7 @@ class AppStore {
     const ids = new Set(unique.map((draft) => draft.id));
     this.setAskWorkspace(projectId, {
       ...workspace,
-      draft: ids.has(workspace.draft.id) ? newAskDraft() : workspace.draft,
+      draft: ids.has(workspace.draft.id) ? newAskDraft(workspace.preferences) : workspace.draft,
       staged: workspace.staged.filter((draft) => !ids.has(draft.id)),
       submissions: [...launching, ...workspace.submissions].slice(0, 12),
     });

@@ -489,6 +489,21 @@ Capability sidecar schema version 1 is exemplified by
 `skill/capabilities.json`. New skills need no service code when they use the
 same schema; invalid or unknown-version sidecars are not executable.
 
+**Response preferences (`conceptify-l9w.4`):**
+
+- `get_response_preferences { project_id }` → `{ intent, origins, user,
+  project }` resolves each dimension independently in project → user → product
+  order. `origins` names the winning scope for depth, language, visuals, and
+  shape; partial stored scopes are returned for inspection.
+- `save_response_preference { project_id, scope, intent }` → the same resolved
+  shape. `scope` is `user` or `project`; saving is an explicit action and
+  validates the full v1 contract.
+- `reset_response_preference { project_id, scope }` → the newly resolved shape
+  after deleting that scope. Existing run/artifact snapshots are untouched.
+
+These commands use namespaced rows in the existing settings key/value table;
+model/provider settings remain separate.
+
 **Settings (FR-7.1–7.4, beads 959.4):**
 
 - `get_agent_settings {}` → `AgentSettings` — stored overrides merged over code

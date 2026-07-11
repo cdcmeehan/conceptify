@@ -14,12 +14,16 @@ interface Props {
   intent: ResponseIntent;
   skillMode: SkillMode;
   selectedSkillIds: string[];
+  origins?: Record<"depth" | "language" | "visuals" | "shape", "product" | "user" | "project" | "question">;
   onChange: (patch: {
     responseIntent?: ResponseIntent;
     skillMode?: SkillMode;
     selectedSkillIds?: string[];
   }) => void;
   compact?: boolean;
+  onSaveDefault?: (scope: "user" | "project") => Promise<void>;
+  onResetToInherited?: () => void;
+  onResetDefault?: (scope: "user" | "project") => Promise<void>;
 }
 
 const DEPTH = [
@@ -66,14 +70,20 @@ export function ResponseProfilePicker({
   intent,
   skillMode,
   selectedSkillIds,
+  origins,
   onChange,
   compact = false,
+  onSaveDefault,
+  onResetToInherited,
+  onResetDefault,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [catalog, setCatalog] = useState<SkillCapability[]>([]);
   const [recommendations, setRecommendations] = useState<SkillRecommendation[]>([]);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [preferenceMessage, setPreferenceMessage] = useState<string | null>(null);
+  const [savingPreference, setSavingPreference] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const controlId = useId();
 
@@ -144,6 +154,11 @@ export function ResponseProfilePicker({
         ? `${recommendations.length} suggested`
         : "Skills automatic";
   const summary = profileSummary(intent);
+  const originSummary = origins == null
+    ? null
+    : new Set(Object.values(origins)).size === 1
+      ? Object.values(origins)[0]
+      : "mixed";
 
   function close() {
     setOpen(false);
@@ -169,6 +184,34 @@ export function ResponseProfilePicker({
     if (selected.has(id)) selected.delete(id);
     else selected.add(id);
     onChange({ skillMode: "manual", selectedSkillIds: [...selected] });
+  }
+
+  async function saveDefault(scope: "user" | "project") {
+    if (onSaveDefault == null) return;
+    setSavingPreference(true);
+    setPreferenceMessage(null);
+    try {
+      await onSaveDefault(scope);
+      setPreferenceMessage(scope === "project" ? "Saved as this project’s default." : "Saved as your default.");
+    } catch (error) {
+      setPreferenceMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingPreference(false);
+    }
+  }
+
+  async function clearDefault(scope: "user" | "project") {
+    if (onResetDefault == null) return;
+    setSavingPreference(true);
+    setPreferenceMessage(null);
+    try {
+      await onResetDefault(scope);
+      setPreferenceMessage(scope === "project" ? "Project default cleared." : "Your default cleared.");
+    } catch (error) {
+      setPreferenceMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingPreference(false);
+    }
   }
 
   return (
@@ -216,10 +259,10 @@ export function ResponseProfilePicker({
           </div>
 
           <div class="grid gap-3 p-3 min-[520px]:grid-cols-2">
-            <ChoiceGroup groupId={controlId} legend="Depth" dimension="depth" value={intent.depth} choices={DEPTH} onChange={setIntent} />
-            <ChoiceGroup groupId={controlId} legend="Language" dimension="language" value={intent.language} choices={LANGUAGE} onChange={setIntent} />
-            <ChoiceGroup groupId={controlId} legend="Visuals" dimension="visuals" value={intent.visuals} choices={VISUALS} onChange={setIntent} />
-            <ChoiceGroup groupId={controlId} legend="Shape" dimension="shape" value={intent.shape} choices={SHAPE} onChange={setIntent} />
+            <ChoiceGroup groupId={controlId} legend="Depth" origin={origins?.depth} dimension="depth" value={intent.depth} choices={DEPTH} onChange={setIntent} />
+            <ChoiceGroup groupId={controlId} legend="Language" origin={origins?.language} dimension="language" value={intent.language} choices={LANGUAGE} onChange={setIntent} />
+            <ChoiceGroup groupId={controlId} legend="Visuals" origin={origins?.visuals} dimension="visuals" value={intent.visuals} choices={VISUALS} onChange={setIntent} />
+            <ChoiceGroup groupId={controlId} legend="Shape" origin={origins?.shape} dimension="shape" value={intent.shape} choices={SHAPE} onChange={setIntent} />
           </div>
 
           <div class="border-t border-line bg-well/25 p-3">
@@ -287,6 +330,32 @@ export function ResponseProfilePicker({
               </div>
             )}
           </div>
+          {onSaveDefault != null ? (
+            <div class="border-t border-line bg-paper px-3 py-2.5">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p class="cfy-label">Defaults</p>
+                  <p class="mt-0.5 text-[9px] text-muted">
+                    {originSummary === "question" ? "Edited for this question only." : originSummary === "project" ? "Inherited from this project." : originSummary === "user" ? "Inherited from your default." : originSummary === "product" ? "Using Conceptify defaults." : "Inherited from more than one scope."}
+                  </p>
+                </div>
+                <div class="flex flex-wrap gap-1.5">
+                  {onResetToInherited != null && Object.values(origins ?? {}).includes("question") ? (
+                    <button type="button" onClick={onResetToInherited} class="cfy-btn cfy-btn-ghost h-7 px-2 text-[9px]">Reset to inherited</button>
+                  ) : null}
+                  {onResetDefault != null && Object.values(origins ?? {}).includes("project") ? (
+                    <button type="button" disabled={savingPreference} onClick={() => void clearDefault("project")} class="cfy-btn cfy-btn-ghost h-7 px-2 text-[9px]">Clear project default</button>
+                  ) : null}
+                  {onResetDefault != null && Object.values(origins ?? {}).includes("user") ? (
+                    <button type="button" disabled={savingPreference} onClick={() => void clearDefault("user")} class="cfy-btn cfy-btn-ghost h-7 px-2 text-[9px]">Clear my default</button>
+                  ) : null}
+                  <button type="button" disabled={savingPreference} onClick={() => void saveDefault("user")} class="cfy-btn cfy-btn-secondary h-7 px-2 text-[9px]">Make my default</button>
+                  <button type="button" disabled={savingPreference} onClick={() => void saveDefault("project")} class="cfy-btn cfy-btn-secondary h-7 px-2 text-[9px]">Use for project</button>
+                </div>
+              </div>
+              {preferenceMessage != null ? <p class="mt-1.5 text-[9px] text-muted" role="status">{preferenceMessage}</p> : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -296,6 +365,7 @@ export function ResponseProfilePicker({
 function ChoiceGroup<K extends keyof Omit<ResponseIntent, "version">>({
   groupId,
   legend,
+  origin,
   dimension,
   value,
   choices,
@@ -303,6 +373,7 @@ function ChoiceGroup<K extends keyof Omit<ResponseIntent, "version">>({
 }: {
   groupId: string;
   legend: string;
+  origin?: "product" | "user" | "project" | "question";
   dimension: K;
   value: ResponseIntent[K];
   choices: ReadonlyArray<readonly [ResponseIntent[K], string, string]>;
@@ -310,7 +381,9 @@ function ChoiceGroup<K extends keyof Omit<ResponseIntent, "version">>({
 }) {
   return (
     <fieldset>
-      <legend class="cfy-label mb-1.5">{legend}</legend>
+      <legend class="cfy-label mb-1.5">
+        {legend}{origin != null ? <span class="ml-1 normal-case tracking-normal text-muted">· {origin === "question" ? "this question" : origin}</span> : null}
+      </legend>
       <div class="flex flex-col gap-1">
         {choices.map(([choice, label, description]) => (
           <label key={String(choice)} class={`flex cursor-pointer items-start gap-2 rounded-ctl border px-2 py-1.5 ${value === choice ? "border-accent/40 bg-accent-bg/45" : "border-line bg-paper hover:bg-well/35"}`}>

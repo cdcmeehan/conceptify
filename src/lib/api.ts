@@ -60,6 +60,40 @@ export interface SkillRecommendation {
   selected_manually: boolean;
 }
 
+export type ResponsePreferenceOrigin = "product" | "user" | "project" | "question";
+export interface ResolvedResponsePreferences {
+  intent: ResponseIntent;
+  origins: Record<"depth" | "language" | "visuals" | "shape", Exclude<ResponsePreferenceOrigin, "question">>;
+  user: Partial<Omit<ResponseIntent, "version">>;
+  project: Partial<Omit<ResponseIntent, "version">>;
+}
+
+export function getResponsePreferences(projectId: string): Promise<ResolvedResponsePreferences> {
+  return invoke<ResolvedResponsePreferences>("get_response_preferences", { project_id: projectId });
+}
+
+export function saveResponsePreference(
+  projectId: string,
+  scope: "user" | "project",
+  intent: ResponseIntent,
+): Promise<ResolvedResponsePreferences> {
+  return invoke<ResolvedResponsePreferences>("save_response_preference", {
+    project_id: projectId,
+    scope,
+    intent,
+  });
+}
+
+export function resetResponsePreference(
+  projectId: string,
+  scope: "user" | "project",
+): Promise<ResolvedResponsePreferences> {
+  return invoke<ResolvedResponsePreferences>("reset_response_preference", {
+    project_id: projectId,
+    scope,
+  });
+}
+
 export function listSkillCapabilities(): Promise<SkillCapability[]> {
   return invoke<SkillCapability[]>("list_skill_capabilities");
 }

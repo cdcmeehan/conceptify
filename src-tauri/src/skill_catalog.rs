@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use crate::db::DbHandle;
 
 const BUNDLED_CONCEPTIFY: &str = include_str!("../../skill/capabilities.json");
 const SIDECAR: &str = "capabilities.json";
@@ -83,6 +86,168 @@ pub struct SelectedSkill {
 pub struct RunResponseMetadata {
     pub intent: ResponseIntentInput,
     pub skills: Vec<SelectedSkill>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PartialResponseIntent {
+    pub depth: Option<String>,
+    pub language: Option<String>,
+    pub visuals: Option<String>,
+    pub shape: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ResponseIntentOrigins {
+    pub depth: String,
+    pub language: String,
+    pub visuals: String,
+    pub shape: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ResolvedResponsePreferences {
+    pub intent: ResponseIntentInput,
+    pub origins: ResponseIntentOrigins,
+    pub user: PartialResponseIntent,
+    pub project: PartialResponseIntent,
+}
+
+const USER_PREFERENCE_KEY: &str = "response_intent:user";
+
+fn product_intent() -> ResponseIntentInput {
+    ResponseIntentInput {
+        version: 1,
+        depth: "balanced".to_owned(),
+        language: "familiar".to_owned(),
+        visuals: "auto".to_owned(),
+        shape: "auto".to_owned(),
+    }
+}
+
+fn project_preference_key(project_id: &str) -> String {
+    format!("response_intent:project:{project_id}")
+}
+
+fn read_partial(conn: &rusqlite::Connection, key: &str) -> Result<PartialResponseIntent, String> {
+    use rusqlite::OptionalExtension;
+    let raw: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    raw.map(|json| serde_json::from_str(&json).map_err(|e| e.to_string()))
+        .transpose()
+        .map(|value| value.unwrap_or_default())
+}
+
+fn resolve_preferences(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+) -> Result<ResolvedResponsePreferences, String> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+            [project_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !exists {
+        return Err(format!("project not found: {project_id}"));
+    }
+    let user = read_partial(conn, USER_PREFERENCE_KEY)?;
+    let project = read_partial(conn, &project_preference_key(project_id))?;
+    let product = product_intent();
+    let resolve = |project: &Option<String>, user: &Option<String>, fallback: &String| {
+        project
+            .as_ref()
+            .or(user.as_ref())
+            .unwrap_or(fallback)
+            .clone()
+    };
+    let origin = |project: &Option<String>, user: &Option<String>| {
+        if project.is_some() {
+            "project"
+        } else if user.is_some() {
+            "user"
+        } else {
+            "product"
+        }
+        .to_owned()
+    };
+    let intent = ResponseIntentInput {
+        version: 1,
+        depth: resolve(&project.depth, &user.depth, &product.depth),
+        language: resolve(&project.language, &user.language, &product.language),
+        visuals: resolve(&project.visuals, &user.visuals, &product.visuals),
+        shape: resolve(&project.shape, &user.shape, &product.shape),
+    };
+    validate_intent(&intent)?;
+    Ok(ResolvedResponsePreferences {
+        intent,
+        origins: ResponseIntentOrigins {
+            depth: origin(&project.depth, &user.depth),
+            language: origin(&project.language, &user.language),
+            visuals: origin(&project.visuals, &user.visuals),
+            shape: origin(&project.shape, &user.shape),
+        },
+        user,
+        project,
+    })
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_response_preferences(
+    db: State<DbHandle>,
+    project_id: String,
+) -> Result<ResolvedResponsePreferences, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    resolve_preferences(&conn, &project_id)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn save_response_preference(
+    db: State<DbHandle>,
+    project_id: String,
+    scope: String,
+    intent: ResponseIntentInput,
+) -> Result<ResolvedResponsePreferences, String> {
+    validate_intent(&intent)?;
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let key = match scope.as_str() {
+        "user" => USER_PREFERENCE_KEY.to_owned(),
+        "project" => project_preference_key(&project_id),
+        _ => return Err(format!("unknown response preference scope '{scope}'")),
+    };
+    let partial = PartialResponseIntent {
+        depth: Some(intent.depth),
+        language: Some(intent.language),
+        visuals: Some(intent.visuals),
+        shape: Some(intent.shape),
+    };
+    let json = serde_json::to_string(&partial).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![key, json],
+    )
+    .map_err(|e| e.to_string())?;
+    resolve_preferences(&conn, &project_id)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn reset_response_preference(
+    db: State<DbHandle>,
+    project_id: String,
+    scope: String,
+) -> Result<ResolvedResponsePreferences, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let key = match scope.as_str() {
+        "user" => USER_PREFERENCE_KEY.to_owned(),
+        "project" => project_preference_key(&project_id),
+        _ => return Err(format!("unknown response preference scope '{scope}'")),
+    };
+    conn.execute("DELETE FROM settings WHERE key = ?1", [key])
+        .map_err(|e| e.to_string())?;
+    resolve_preferences(&conn, &project_id)
 }
 
 fn default_roots() -> Vec<PathBuf> {
@@ -515,5 +680,48 @@ mod tests {
             .iter()
             .any(|entry| entry.metadata.id == "future-map"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preferences_inherit_each_dimension_without_rewriting_history() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE projects (id TEXT PRIMARY KEY);
+             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO projects (id) VALUES ('p1');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                USER_PREFERENCE_KEY,
+                r#"{"depth":"deep","language":"plain"}"#
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                project_preference_key("p1"),
+                r#"{"visuals":"avoid","shape":"reference"}"#
+            ],
+        )
+        .unwrap();
+        let resolved = resolve_preferences(&conn, "p1").unwrap();
+        assert_eq!(resolved.intent.depth, "deep");
+        assert_eq!(resolved.intent.language, "plain");
+        assert_eq!(resolved.intent.visuals, "avoid");
+        assert_eq!(resolved.intent.shape, "reference");
+        assert_eq!(resolved.origins.depth, "user");
+        assert_eq!(resolved.origins.visuals, "project");
+
+        let captured = serde_json::to_string(&resolved.intent).unwrap();
+        conn.execute(
+            "UPDATE settings SET value = ?2 WHERE key = ?1",
+            rusqlite::params![USER_PREFERENCE_KEY, r#"{"depth":"quick"}"#],
+        )
+        .unwrap();
+        assert!(captured.contains("\"depth\":\"deep\""));
+        assert_eq!(resolve_preferences(&conn, "p1").unwrap().intent.depth, "quick");
     }
 }

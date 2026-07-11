@@ -136,7 +136,11 @@ export function NewThreadComposer({
           intent={draft.responseIntent}
           skillMode={draft.skillMode}
           selectedSkillIds={draft.selectedSkillIds}
+          origins={draft.responseOrigins}
           onChange={(patch) => appStore.updateAskDraft(projectId, patch)}
+          onSaveDefault={(scope) => appStore.saveAskResponsePreference(projectId, scope, draft.responseIntent)}
+          onResetToInherited={() => appStore.resetAskDraftToInherited(projectId)}
+          onResetDefault={(scope) => appStore.resetAskResponsePreference(projectId, scope)}
         />
         <div class="flex items-center justify-between gap-2">
           <ModelOverridePicker
@@ -294,6 +298,7 @@ function QuestionSlip({
           intent={item.responseIntent}
           skillMode={item.skillMode}
           selectedSkillIds={item.selectedSkillIds}
+          origins={item.responseOrigins}
           onChange={onChange}
         />
       </div>

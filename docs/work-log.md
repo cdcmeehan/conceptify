@@ -270,3 +270,13 @@ follow-up versions inheriting provenance when their mutation run has no new
 profile. The thread header shows the effective profile and chosen/suggested
 skills without exposing raw prompt plumbing. Tests cover every dimension,
 retry identity, migration, conflict recovery publication, and skill validation.
+
+**Response preference inheritance (`conceptify-l9w.4`).** User and project
+defaults now persist as separate namespaced settings and resolve independently
+per dimension over the product default. The composer labels each dimension's
+origin, treats edits as question-only, and offers explicit Make my default, Use
+for project, Reset to inherited, and clear-scope actions. Async preference load
+does not overwrite a question already being edited; saving never clears its
+text. Browser QA saved a Deep project default, preserved the active question,
+verified inheritance after reload, then cleared it back to Balanced. Existing
+thread metadata remains immutable when defaults change.

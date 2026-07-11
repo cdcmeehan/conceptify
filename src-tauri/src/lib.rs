@@ -127,6 +127,9 @@ pub fn run() {
             commands::refresh_model_catalog,
             skill_catalog::list_skill_capabilities,
             skill_catalog::recommend_skills,
+            skill_catalog::get_response_preferences,
+            skill_catalog::save_response_preference,
+            skill_catalog::reset_response_preference,
             runs::cancel_run,
         ])
         .setup(|app| {

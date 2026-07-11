@@ -163,6 +163,9 @@ async fn live_bridge() {
             crate::commands::refresh_model_catalog,
             crate::skill_catalog::list_skill_capabilities,
             crate::skill_catalog::recommend_skills,
+            crate::skill_catalog::get_response_preferences,
+            crate::skill_catalog::save_response_preference,
+            crate::skill_catalog::reset_response_preference,
             crate::runs::cancel_run,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
