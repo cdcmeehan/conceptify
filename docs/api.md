@@ -442,6 +442,13 @@ settings commands are the exception (they emit `settings-changed`, above).
   the existing project (`created: false`), never an error. `name` overrides the
   display name (the picker leaves it unset → directory name). The frontend gets
   `root_path` from `@tauri-apps/plugin-dialog`'s `open({ directory: true })`.
+- `scan_project_context { project_id }` → `{ status, repository, languages,
+  included_files, excluded_paths, fingerprint, scanned_at, warning, unchanged
+  }` — performs a local, bounded orientation scan after the project already
+  appears. It skips generated/vendor directories, stops at 5,000 files with a
+  non-blocking fallback, and reuses stored results when the root/Git fingerprint
+  is unchanged. This is explicitly not a content index; raw file contents and
+  paths are not transmitted.
 - `create_project_folder { name }` → same shape — "create a folder for me": makes
   a fresh slugified, disk-deduped folder under the configured auto-project base
   dir (FR-7.3, default `~/Documents/conceptify/projects`) and maps it, with

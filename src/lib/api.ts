@@ -120,6 +120,23 @@ export interface Project {
   archived: boolean;
   thread_count: number;
   last_activity: string;
+  context: ProjectContextSummary | null;
+}
+
+export interface ProjectContextSummary {
+  status: "scanning" | "ready" | "limited" | "error";
+  repository: string;
+  languages: Array<{ name: string; files: number }>;
+  included_files: number;
+  excluded_paths: string[];
+  fingerprint: string;
+  scanned_at: string;
+  warning: string | null;
+  unchanged: boolean;
+}
+
+export function scanProjectContext(projectId: string): Promise<ProjectContextSummary> {
+  return invoke<ProjectContextSummary>("scan_project_context", { project_id: projectId });
 }
 
 export interface Thread {

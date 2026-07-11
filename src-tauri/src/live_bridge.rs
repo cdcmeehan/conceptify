@@ -133,6 +133,7 @@ async fn live_bridge() {
             crate::commands::remap_project,
             crate::commands::ensure_project,
             crate::commands::create_project_folder,
+            crate::project_context::scan_project_context,
             crate::commands::delete_thread,
             crate::commands::list_artifact_versions,
             crate::commands::diff_versions,

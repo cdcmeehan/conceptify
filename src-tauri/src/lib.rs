@@ -15,6 +15,7 @@ mod flows;
 #[cfg(test)]
 mod live_bridge;
 mod projects;
+mod project_context;
 mod routing;
 mod run_queue;
 mod runs;
@@ -97,6 +98,7 @@ pub fn run() {
             commands::remap_project,
             commands::ensure_project,
             commands::create_project_folder,
+            project_context::scan_project_context,
             commands::delete_thread,
             commands::list_artifact_versions,
             commands::diff_versions,

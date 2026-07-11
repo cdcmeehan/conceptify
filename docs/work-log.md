@@ -316,3 +316,12 @@ duplicate folders, creation failure, and topic-only setup. Validation against
 the existing sidebar retained its compact strengths while identifying the
 implementation-led divider, ambiguous destination, missing readiness, and
 missing first ask that the child beads now replace.
+
+**Folder context readiness (`conceptify-vc1.2`).** Folder-backed projects now
+appear and select before a local background orientation scan. The bounded scan
+detects Git versus folder context, counts the leading languages and inspected
+files, excludes common generated/vendor trees, and stops after 5,000 files with
+a clear “agents still read relevant files directly” fallback. A lightweight
+root/Git fingerprint reuses unchanged results. The selected project exposes an
+expandable readiness card with languages, exclusions, privacy/indexing copy,
+and any warning; scanning and errors never block navigation.

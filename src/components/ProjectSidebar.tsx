@@ -33,6 +33,7 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
   const [newFolderName, setNewFolderName] = useState("");
   const [newProjectError, setNewProjectError] = useState<string | null>(null);
   const [newProjectBusy, setNewProjectBusy] = useState(false);
+  const [contextOpenId, setContextOpenId] = useState<string | null>(null);
 
   function closeNewProject() {
     setNewProjectOpen(false);
@@ -388,6 +389,31 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
                         >
                           {project.archived ? "Unarchive" : "Archive"}
                         </button>
+                      </div>
+                    )}
+                    {selected && project.context != null && (
+                      <div class="mt-1.5" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          onClick={() => setContextOpenId(contextOpenId === project.id ? null : project.id)}
+                          class="w-full rounded-ctl border border-line bg-well/45 px-2 py-1 text-left text-[10px] text-muted hover:border-accent/35"
+                          aria-expanded={contextOpenId === project.id}
+                        >
+                          <span class="font-medium text-ink">
+                            {project.context.status === "scanning" ? "Checking context…" : project.context.status === "error" ? "Context needs attention" : project.context.status === "limited" ? "Context overview · limited" : "Context ready"}
+                          </span>
+                          {project.context.languages.length > 0 && (
+                            <span class="ml-1">· {project.context.languages.slice(0, 3).map((item) => item.name).join(", ")}</span>
+                          )}
+                        </button>
+                        {contextOpenId === project.id && (
+                          <div class="mt-1 rounded-ctl border border-line bg-paper p-2 text-[9px] leading-relaxed text-muted">
+                            <p class="font-medium text-ink">{project.context.repository} · {project.context.included_files.toLocaleString()} files inspected</p>
+                            <p class="mt-1">Excluded: {project.context.excluded_paths.length > 0 ? project.context.excluded_paths.join(", ") : "none detected"}</p>
+                            <p class="mt-1">This is a lightweight local overview, not a full index. Agents read relevant files when you ask.</p>
+                            {project.context.warning != null && <p class="mt-1 text-warn">{project.context.warning}</p>}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

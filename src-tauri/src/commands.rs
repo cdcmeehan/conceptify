@@ -42,6 +42,7 @@ pub struct ProjectDto {
     pub archived: bool,
     pub thread_count: i64,
     pub last_activity: String,
+    pub context: Option<crate::project_context::ProjectContextSummary>,
 }
 
 /// A thread row for the shell thread list. Mirrors the HTTP thread list item;
@@ -71,6 +72,7 @@ pub fn list_projects(
     Ok(rows
         .into_iter()
         .map(|p| ProjectDto {
+            context: crate::project_context::stored(&conn, &p.id),
             root_exists: std::path::Path::new(&p.root_path).exists(),
             id: p.id,
             name: p.name,

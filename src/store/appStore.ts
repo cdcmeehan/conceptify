@@ -1251,6 +1251,27 @@ class AppStore {
     const result = await api.ensureProject(rootPath, null);
     await this.refetchProjects();
     this.selectProject(result.id);
+    this.set({
+      projects: this.state.projects.map((project) =>
+        project.id === result.id && project.context == null
+          ? {
+              ...project,
+              context: {
+                status: "scanning",
+                repository: "Folder",
+                languages: [],
+                included_files: 0,
+                excluded_paths: [],
+                fingerprint: "",
+                scanned_at: "",
+                warning: null,
+                unchanged: false,
+              },
+            }
+          : project,
+      ),
+    });
+    void api.scanProjectContext(result.id).then(() => this.refetchProjects()).catch(() => undefined);
   }
 
   /**
