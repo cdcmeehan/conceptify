@@ -708,8 +708,14 @@ mod tests {
         a.as_object_mut()
             .unwrap()
             .insert("captured_rect".into(), json!({ "x": 1 }));
+        a.as_object_mut().unwrap().insert("target".into(), json!({
+            "kind": "code", "label": "borrow example", "excerpt": "beta",
+            "cfy_ids": ["sec-a", "code-a"], "multi_block": true
+        }));
         let r = rewritten(d.reattach(&a));
         assert_eq!(r["captured_rect"]["x"], 1);
+        assert_eq!(r["target"]["kind"], "code");
+        assert_eq!(r["target"]["multi_block"], true);
     }
 
     // -- element anchors ------------------------------------------------------

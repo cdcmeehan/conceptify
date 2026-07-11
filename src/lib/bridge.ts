@@ -36,6 +36,14 @@ export interface TextQuote {
   suffix?: string;
 }
 
+export interface SemanticTarget {
+  kind: "text" | "block" | "code" | "figure" | "image" | "diagram";
+  label: string;
+  excerpt: string;
+  cfy_ids: string[];
+  multi_block: boolean;
+}
+
 export interface TextAnchor {
   v: number;
   type: "text";
@@ -45,6 +53,7 @@ export interface TextAnchor {
   start?: number;
   end?: number;
   quote: TextQuote;
+  target?: SemanticTarget;
 }
 
 export interface ElementAnchor {
@@ -52,6 +61,7 @@ export interface ElementAnchor {
   type: "element";
   cfy_id: string;
   quote?: TextQuote;
+  target?: SemanticTarget;
 }
 
 export type Anchor = TextAnchor | ElementAnchor;
@@ -123,7 +133,8 @@ function isTextAnchor(v: unknown): v is TextAnchor {
     isQuote(v.quote) &&
     (v.cfy_id === undefined || typeof v.cfy_id === "string") &&
     (v.start === undefined || typeof v.start === "number") &&
-    (v.end === undefined || typeof v.end === "number")
+    (v.end === undefined || typeof v.end === "number") &&
+    (v.target === undefined || isSemanticTarget(v.target))
   );
 }
 
@@ -133,8 +144,17 @@ function isElementAnchor(v: unknown): v is ElementAnchor {
     v.v === 1 &&
     v.type === "element" &&
     typeof v.cfy_id === "string" &&
-    (v.quote === undefined || isQuote(v.quote))
+    (v.quote === undefined || isQuote(v.quote)) &&
+    (v.target === undefined || isSemanticTarget(v.target))
   );
+}
+
+function isSemanticTarget(v: unknown): v is SemanticTarget {
+  return isRecord(v) &&
+    ["text", "block", "code", "figure", "image", "diagram"].includes(String(v.kind)) &&
+    typeof v.label === "string" && typeof v.excerpt === "string" &&
+    Array.isArray(v.cfy_ids) && v.cfy_ids.every((id) => typeof id === "string") &&
+    typeof v.multi_block === "boolean";
 }
 
 /** Parse an untrusted `event.data` into a typed message, or null. */

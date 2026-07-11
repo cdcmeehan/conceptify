@@ -397,7 +397,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
 
   // Stage 1: the compact action toolbar for a fresh selection.
   if (popover.stage === "toolbar") {
-    const preview = popover.anchor.quote?.exact?.trim() ?? "Selected content";
+    const preview = popover.anchor.target?.label || popover.anchor.target?.excerpt || popover.anchor.quote?.exact?.trim() || "Selected content";
     return (
       <div
         ref={popoverElRef}

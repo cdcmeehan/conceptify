@@ -273,6 +273,44 @@
   }
 
   /** Build a {v:1, type:"text", ...} anchor from a live Range, or null. */
+  function semanticKind(el) {
+    if (!el) return "text";
+    if (el.closest("pre, code")) return "code";
+    if (el.closest("figure")) return "figure";
+    if (el.closest("img, picture")) return "image";
+    if (el.closest("svg, [role=img]")) return "diagram";
+    if (el.closest("p, li, blockquote, table, section, article")) return "block";
+    return "text";
+  }
+
+  function semanticLabel(el, fallback) {
+    if (!el) return fallback;
+    var figure = el.closest("figure");
+    var caption = figure && figure.querySelector("figcaption");
+    var label = el.getAttribute("aria-label") || el.getAttribute("alt") || el.getAttribute("title") ||
+      (caption && caption.textContent) || fallback;
+    return (label || "Selected content").replace(/\s+/g, " ").trim().slice(0, 160);
+  }
+
+  function semanticTargetForRange(range, exact) {
+    var start = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+    var ids = [];
+    var nodes = document.querySelectorAll("[data-cfy-id]");
+    for (var i = 0; i < nodes.length && ids.length < 8; i += 1) {
+      try {
+        if (range.intersectsNode(nodes[i])) ids.push(nodes[i].getAttribute("data-cfy-id"));
+      } catch (_) {}
+    }
+    var excerpt = exact.replace(/\s+/g, " ").trim().slice(0, 240);
+    return {
+      kind: semanticKind(start),
+      label: semanticLabel(start, excerpt),
+      excerpt: excerpt,
+      cfy_ids: ids,
+      multi_block: ids.length > 1,
+    };
+  }
+
   function captureTextAnchor(range) {
     var body = document.body;
     if (!body) return null;
@@ -289,7 +327,7 @@
     if (prefix) quote.prefix = prefix;
     if (suffix) quote.suffix = suffix;
 
-    var anchor = { v: 1, type: "text", quote: quote };
+    var anchor = { v: 1, type: "text", quote: quote, target: semanticTargetForRange(range, exact) };
     var host = cfyAncestor(range.commonAncestorContainer);
     if (host) {
       var hs = visibleOffset(host, range.startContainer, range.startOffset);
@@ -328,6 +366,13 @@
       // Omitted when empty (purely graphical node) or implausibly long.
       var text = (host.textContent || "").replace(/\s+/g, " ").trim();
       if (text && text.length <= ELEMENT_QUOTE_MAX) anchor.quote = { exact: text };
+      anchor.target = {
+        kind: semanticKind(host),
+        label: semanticLabel(host, text),
+        excerpt: text.slice(0, 240),
+        cfy_ids: [anchor.cfy_id],
+        multi_block: false,
+      };
       post({
         type: "element_click",
         anchor: anchor,

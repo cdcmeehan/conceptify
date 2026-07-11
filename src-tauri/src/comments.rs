@@ -985,13 +985,20 @@ mod tests {
             "v": 1,
             "type": "element",
             "cfy_id": "fig-x.node",
-            "captured_rect": { "x": 1, "y": 2 }
+            "captured_rect": { "x": 1, "y": 2 },
+            "target": {
+                "kind": "diagram", "label": "Queue node", "excerpt": "Queue node",
+                "cfy_ids": ["fig-x", "fig-x.node"], "multi_block": true
+            }
         });
         let c = create_comment(&conn, "t1", 1, Some(&anchor), "b")
             .unwrap()
             .comment;
         // Stored verbatim — the extra field survives the round trip.
-        assert_eq!(c.anchor.unwrap()["captured_rect"]["x"], 1);
+        let stored = c.anchor.unwrap();
+        assert_eq!(stored["captured_rect"]["x"], 1);
+        assert_eq!(stored["target"]["kind"], "diagram");
+        assert_eq!(stored["target"]["cfy_ids"].as_array().unwrap().len(), 2);
     }
 
     #[test]

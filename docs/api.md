@@ -1123,6 +1123,32 @@ Every anchor pairs a **primary** anchor (fast, exact) with a **fallback**
 text-quote (W3C Web Annotation style) used to re-attach the comment after the
 artifact is edited when the primary no longer resolves.
 
+Both variants may also carry a `target` summary. This is presentation and
+agent context rather than a third re-attachment mechanism: the primary id and
+offsets plus `quote` remain authoritative. The summary identifies the semantic
+kind (`text`, `block`, `code`, `figure`, `image`, or `diagram`), provides a
+short readable `label` and `excerpt`, and lists the intersected stable ids in
+document order. It deliberately never duplicates the whole artifact.
+
+```json
+{
+  "target": {
+    "kind": "code",
+    "label": "Refresh-token example",
+    "excerpt": "const session = await refresh(token)",
+    "cfy_ids": ["sec-auth", "example-refresh"],
+    "multi_block": true
+  }
+}
+```
+
+For a selection spanning more than one id-bearing region, `cfy_ids` contains
+at most the first eight intersected ids and `multi_block` is `true`. The bridge
+still records primary offsets only when the range has one common id-bearing
+host; the exact quote is always retained as the cross-block fallback. A whole
+element target has one primary `cfy_id`, a one-item `cfy_ids` list, and
+`multi_block: false`.
+
 **`type: "text"`** (text selection). Primary = the nearest ancestor
 `data-cfy-id` (`cfy_id`) plus `start`/`end` character offsets within that
 element's normalized text content (precise definition: "visible text" under

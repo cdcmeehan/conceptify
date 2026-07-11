@@ -804,6 +804,9 @@ mod tests {
         ] {
             assert!(BRIDGE_TAG.contains(msg), "bridge must reference {msg:?}");
         }
+        for target in ["semanticTargetForRange", "multi_block", "figure", "diagram"] {
+            assert!(BRIDGE_TAG.contains(target), "bridge must capture semantic target {target:?}");
+        }
     }
 
     #[test]
