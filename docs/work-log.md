@@ -434,3 +434,22 @@ run-id prefix in addition to inherited environment, and Undo re-runs normal
 anchor reattachment after reopening the request. The accidental live saves were
 restored through immutable versions; the final reopened request is anchored on
 the restored latest version.
+
+## 2026-07-11 — Layered visual exploration
+
+**Interactive diagram drill-in (`conceptify-dqb.3`).** Anchored SVG nodes,
+edges, groups, and diagram roots are now discoverable by pointer and keyboard:
+the bridge adds a zero-specificity pointer affordance, a visible focus ring,
+Enter/Space activation, and wrapping arrow-key traversal within each diagram.
+Node clicks are consumed in capture phase so a diagram inspection cannot also
+trigger a slide artifact's click-to-advance behavior. Existing links and form
+controls retain their native interaction.
+
+Element anchors now preserve optional diagram role and relationship summaries
+derived from explicit `data-cfy-*` metadata, ARIA descriptions, and common
+Graphviz-style node/edge classes and titles, with readable id/text fallbacks
+when metadata is absent. The shell presents that context with Explain, Deepen,
+Compare, Comment, and Redraw actions; Compare uses the structured comparison
+response profile, while all answers and revision previews retain the original
+node anchor. A browser bridge probe verified focus order, node/edge metadata,
+pointer and keyboard activation, and zero accidental slide advances.

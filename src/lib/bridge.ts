@@ -42,6 +42,9 @@ export interface SemanticTarget {
   excerpt: string;
   cfy_ids: string[];
   multi_block: boolean;
+  /** Diagram-specific metadata, present only when it can be derived. */
+  role?: string;
+  relationships?: string[];
 }
 
 export interface TextAnchor {
@@ -155,7 +158,10 @@ function isSemanticTarget(v: unknown): v is SemanticTarget {
     ["text", "block", "code", "figure", "image", "diagram"].includes(String(v.kind)) &&
     typeof v.label === "string" && typeof v.excerpt === "string" &&
     Array.isArray(v.cfy_ids) && v.cfy_ids.every((id) => typeof id === "string") &&
-    typeof v.multi_block === "boolean";
+    typeof v.multi_block === "boolean" &&
+    (v.role === undefined || typeof v.role === "string") &&
+    (v.relationships === undefined ||
+      (Array.isArray(v.relationships) && v.relationships.every((relationship) => typeof relationship === "string")));
 }
 
 /** Parse an untrusted `event.data` into a typed message, or null. */

@@ -73,7 +73,7 @@ const POPOVER_HEIGHT_ESTIMATE = 150;
  *  toolbar is intrinsic-width, so centering/clamping uses an estimate —
  *  consistent with the composer's estimate-based above/below flip. */
 const TOOLBAR_WIDTH_ESTIMATE = 310;
-const TOOLBAR_HEIGHT_ESTIMATE = 66;
+const TOOLBAR_HEIGHT_ESTIMATE = 88;
 const GAP = 8;
 const VIEWPORT_MARGIN = 8;
 /** How long the "Copied" confirmation shows before the toolbar auto-dismisses. */
@@ -100,7 +100,7 @@ interface PopoverState {
   /** Transient toolbar-stage flag: the Copy action succeeded and is confirming. */
   copied: boolean;
   error: string | null;
-  action: "explain" | "deepen" | "simplify" | "visualise" | "change" | null;
+  action: "explain" | "deepen" | "compare" | "simplify" | "visualise" | "change" | null;
   destination: "inline" | "sidebar" | "thread";
   moreOpen: boolean;
 }
@@ -190,6 +190,7 @@ interface Props {
 const EXPLORATION_INTENTS: Record<NonNullable<PopoverState["action"]>, api.ResponseIntent> = {
   explain: { version: 1, depth: "balanced", language: "familiar", visuals: "auto", shape: "auto" },
   deepen: { version: 1, depth: "deep", language: "domain_native", visuals: "auto", shape: "walkthrough" },
+  compare: { version: 1, depth: "balanced", language: "familiar", visuals: "prefer", shape: "comparison" },
   simplify: { version: 1, depth: "balanced", language: "plain", visuals: "avoid", shape: "walkthrough" },
   visualise: { version: 1, depth: "balanced", language: "familiar", visuals: "prefer", shape: "auto" },
   change: { version: 1, depth: "balanced", language: "familiar", visuals: "auto", shape: "auto" },
@@ -401,6 +402,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
     const defaultQuestions: Record<NonNullable<PopoverState["action"]>, string> = {
       explain: "Explain this selection.",
       deepen: "Go deeper on this selection.",
+      compare: visualTarget ? "Compare this visual element with its related elements." : "Compare this selection with related concepts.",
       simplify: "Explain this selection more simply.",
       visualise: "Visualise this selection.",
       change: visualTarget ? "Redraw this visual." : "Change this part of the artifact.",
@@ -506,9 +508,15 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
         ) : (
           <>
             <p class="max-w-full truncate px-2 pt-1 text-[9px] text-muted" title={preview}>“{preview}”</p>
+            {popover.kind === "element" && (popover.anchor.target?.role || popover.anchor.target?.relationships?.length) && (
+              <p class="max-w-full truncate px-2 text-[9px] text-muted">
+                {[popover.anchor.target.role, ...(popover.anchor.target.relationships ?? [])].filter(Boolean).join(" · ")}
+              </p>
+            )}
             <div class="flex items-center px-1 pb-1">
               <button type="button" onClick={() => goToComposer("explain")} class="cfy-btn cfy-btn-ghost">Explain</button>
               <button type="button" onClick={() => goToComposer("deepen")} class="cfy-btn cfy-btn-ghost">Deepen</button>
+              {popover.kind === "element" && <button type="button" onClick={() => goToComposer("compare")} class="cfy-btn cfy-btn-ghost">Compare</button>}
               <button type="button" onClick={() => goToComposer(null)} class="cfy-btn cfy-btn-ghost">Comment</button>
               <div class="relative">
                 <button type="button" aria-expanded={popover.moreOpen} onClick={() => setPopover((current) => current == null ? null : { ...current, moreOpen: !current.moreOpen })} class="cfy-btn cfy-btn-ghost">More</button>
@@ -529,7 +537,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
   // Stage 2: the comment composer.
   if (popover == null) return <InlineExplorationCards comments={explorationHistory} activeRun={state.activeRun} right={inlineRight} />;
 
-  const actionLabels = { explain: "Explain selection", deepen: "Deepen selection", simplify: "Simplify selection", visualise: "Visualise selection", change: "Change selection" } as const;
+  const actionLabels = { explain: "Explain selection", deepen: "Deepen selection", compare: "Compare selection", simplify: "Simplify selection", visualise: "Visualise selection", change: "Change selection" } as const;
   const label = popover.action == null
     ? (popover.kind === "selection" ? "Comment on selection" : "Comment on element")
     : popover.action === "change" && ["figure", "image", "diagram"].includes(popover.anchor.target?.kind ?? "")
@@ -554,7 +562,13 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
         <p class="mt-0.5 line-clamp-2 text-[10px] leading-snug text-muted">
           Included from artifact v{artifactVersion}
           {popover.anchor.target?.kind ? ` · ${popover.anchor.target.kind}` : ""}
+          {popover.anchor.target?.role ? ` · ${popover.anchor.target.role}` : ""}
         </p>
+        {popover.anchor.target?.relationships?.length ? (
+          <p class="mt-1 line-clamp-2 text-[10px] leading-snug text-muted">
+            Related: {popover.anchor.target.relationships.join(" · ")}
+          </p>
+        ) : null}
       </div>
       <textarea
         ref={textareaRef}

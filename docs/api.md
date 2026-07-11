@@ -1145,7 +1145,12 @@ agent context rather than a third re-attachment mechanism: the primary id and
 offsets plus `quote` remain authoritative. The summary identifies the semantic
 kind (`text`, `block`, `code`, `figure`, `image`, or `diagram`), provides a
 short readable `label` and `excerpt`, and lists the intersected stable ids in
-document order. It deliberately never duplicates the whole artifact.
+document order. Diagram-element targets may additionally carry a short `role`
+and a `relationships` string list when the artifact exposes them through SVG
+classes/titles, ARIA, or `data-cfy-role` / `data-cfy-relationships` metadata.
+Both fields are optional: unlabeled shapes still produce a useful target from
+their stable id and element kind. The summary deliberately never duplicates
+the whole artifact.
 
 ```json
 {
@@ -1826,7 +1831,7 @@ shell→artifact *commands* (its `event.source` is its own window, not
 | `ready` | — | The bridge booted. Sent once per **document load** — including every iframe reload (version switch, live refresh), which wipes all decorations. Consumers must (re)apply highlights on every `ready`; `bridge.ts` queues commands sent before the first `ready` of an attachment. |
 | `selection` | `anchor` (a `text` anchor), `rect` (selection bounding rect) | A non-empty text selection reported on **gesture completion**, never mid-drag: pointer selections post once on release (`pointerup`/`pointercancel`); keyboard selections (shift+arrows, Cmd+A), which have no release, post after a ~300 ms settle debounce. `cfy_id`/`start`/`end` are present when the selection has a `data-cfy-id` ancestor; `quote` always is. |
 | `selection_cleared` | — | The previously reported selection collapsed/vanished (dismiss the popover). Also sent when the user presses Escape inside the artifact: the iframe holds keyboard focus after a drag, so the bridge translates Escape into clearing the live selection (the shell's own Escape handler can't see the key). A `set_highlights` application never re-reports the still-live selection its DOM mutations perturb (the bridge suppresses its own mutation-induced `selectionchange`). |
-| `element_click` | `anchor` (an `element` anchor), `rect` (element bounding rect) | Click on a `data-cfy-id`-bearing element (nearest such ancestor of the click target). Suppressed for clicks that end a text selection and for clicks on interactive elements (`a[href]`, `button`, form controls, `summary`, `label`, `[contenteditable]`). |
+| `element_click` | `anchor` (an `element` anchor), `rect` (element bounding rect) | Click, Enter, or Space on a `data-cfy-id`-bearing element (nearest such ancestor of the click target). Suppressed for clicks that end a text selection and for clicks on interactive elements (`a[href]`, `button`, form controls, `summary`, `label`, `[contenteditable]`). Anchored SVG nodes are made focusable; arrow keys move among nodes in the same diagram. Diagram activation is consumed before click-to-advance handlers, so inspecting a node cannot advance a slide-like artifact. |
 
 ### Shell → artifact
 
@@ -1836,10 +1841,11 @@ shell→artifact *commands* (its `event.source` is its own window, not
 | `set_diff_markers` | `markers`: array of `{key, cfy_id, kind}` | **Full replacement** of version-diff gutter markers (`[]` clears). Markers are pointer-transparent document overlays positioned beside resolved blocks, never attributes/styles/wrappers on artifact content, so they coexist with comment highlights and selection without triggering `selectionchange`. Kinds are `modified`, `added`, `moved`, or `removed` (the last targets the nearest surviving neighbor). Re-send on every `ready`. |
 | `scroll_to_anchor` | `anchor`, optional `key` | Scroll the anchored element/range into view (`block: "center"`) with a brief attention pulse. When `key` matches a live decoration the pulse lands exactly on it; otherwise the anchor is resolved fresh. Smooth motion and the pulse are disabled under `prefers-reduced-motion: reduce`. |
 
-### Hover affordance (v1 decision)
+### Hover and focus affordances (v1 decision)
 
 Commentable elements (`[data-cfy-id]`) always show a subtle dashed-outline
-hover affordance — there is **no** "commenting enabled" toggle message in
+hover affordance, and keyboard-focusable diagram nodes show a solid focus ring
+— there is **no** "commenting enabled" toggle message in
 v1. Rationale: commenting is always available in the viewer, the affordance
 is zero-specificity (any artifact rule overrides it), and it doubles as
 discoverability for click-to-comment. If a mode toggle is ever needed, add a

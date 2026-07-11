@@ -276,9 +276,9 @@
   function semanticKind(el) {
     if (!el) return "text";
     if (el.closest("pre, code")) return "code";
-    if (el.closest("figure")) return "figure";
-    if (el.closest("img, picture")) return "image";
     if (el.closest("svg, [role=img]")) return "diagram";
+    if (el.closest("img, picture")) return "image";
+    if (el.closest("figure")) return "figure";
     if (el.closest("p, li, blockquote, table, section, article")) return "block";
     return "text";
   }
@@ -290,6 +290,66 @@
     var label = el.getAttribute("aria-label") || el.getAttribute("alt") || el.getAttribute("title") ||
       (caption && caption.textContent) || fallback;
     return (label || "Selected content").replace(/\s+/g, " ").trim().slice(0, 160);
+  }
+
+  function diagramRole(el) {
+    if (!el || !el.closest("svg, [role=img]")) return null;
+    var explicit = el.getAttribute("data-cfy-role");
+    if (explicit) return explicit.replace(/\s+/g, " ").trim().slice(0, 80);
+    var classes = " " + (el.getAttribute("class") || "").toLowerCase() + " ";
+    if (classes.indexOf(" node ") !== -1) return "node";
+    if (classes.indexOf(" edge ") !== -1 || classes.indexOf(" connection ") !== -1) return "connection";
+    if (classes.indexOf(" cluster ") !== -1 || classes.indexOf(" group ") !== -1) return "group";
+    var tag = el.tagName.toLowerCase();
+    if (tag === "g") return "diagram element";
+    if (["rect", "circle", "ellipse", "polygon", "path"].indexOf(tag) !== -1) return "shape";
+    return "diagram";
+  }
+
+  function diagramRelationships(el) {
+    if (!el || !el.closest("svg, [role=img]")) return [];
+    var values = [];
+    function add(value) {
+      if (!value) return;
+      var parts = String(value).split(/[|,;]/);
+      for (var i = 0; i < parts.length && values.length < 8; i += 1) {
+        var clean = parts[i].replace(/\s+/g, " ").trim().slice(0, 160);
+        if (clean && values.indexOf(clean) === -1) values.push(clean);
+      }
+    }
+    add(el.getAttribute("data-cfy-relationships"));
+    add(el.getAttribute("data-cfy-rel"));
+    var from = el.getAttribute("data-cfy-from");
+    var to = el.getAttribute("data-cfy-to");
+    if (from || to) add("Connects " + (from || "unknown") + " to " + (to || "unknown"));
+    var describedBy = el.getAttribute("aria-describedby");
+    if (describedBy) {
+      var ids = describedBy.split(/\s+/);
+      for (var j = 0; j < ids.length; j += 1) {
+        var desc = document.getElementById(ids[j]);
+        if (desc) add(desc.textContent);
+      }
+    }
+    var title = el.querySelector && el.querySelector(":scope > title");
+    if (title && (/->|--|→/.test(title.textContent || "") || diagramRole(el) === "connection")) {
+      add(title.textContent);
+    }
+    return values;
+  }
+
+  function semanticTargetForElement(host, text) {
+    var target = {
+      kind: semanticKind(host),
+      label: semanticLabel(host, text || host.getAttribute("data-cfy-id") || "Diagram element"),
+      excerpt: text.slice(0, 240),
+      cfy_ids: [host.getAttribute("data-cfy-id")],
+      multi_block: false,
+    };
+    var role = diagramRole(host);
+    var relationships = diagramRelationships(host);
+    if (role) target.role = role;
+    if (relationships.length) target.relationships = relationships;
+    return target;
   }
 
   function semanticTargetForRange(range, exact) {
@@ -345,6 +405,24 @@
   // (b) Click-to-comment on data-cfy-id elements
   // -------------------------------------------------------------------------
 
+  function isInteractiveTarget(target) {
+    return !!target.closest(
+      "a[href], button, input, textarea, select, summary, label, [contenteditable]"
+    );
+  }
+
+  function reportElement(host) {
+    var anchor = { v: 1, type: "element", cfy_id: host.getAttribute("data-cfy-id") };
+    var text = (host.textContent || "").replace(/\s+/g, " ").trim();
+    if (text && text.length <= ELEMENT_QUOTE_MAX) anchor.quote = { exact: text };
+    anchor.target = semanticTargetForElement(host, text);
+    post({
+      type: "element_click",
+      anchor: anchor,
+      rect: rectOf(host.getBoundingClientRect()),
+    });
+  }
+
   document.addEventListener("click", function (ev) {
     try {
       var sel = document.getSelection();
@@ -352,36 +430,62 @@
       var target = ev.target instanceof Element ? ev.target : null;
       if (!target) return;
       // Don't hijack genuinely interactive artifact elements.
-      if (
-        target.closest(
-          "a[href], button, input, textarea, select, summary, label, [contenteditable]"
-        )
-      ) {
-        return;
-      }
+      if (isInteractiveTarget(target)) return;
       var host = target.closest("[data-cfy-id]");
       if (!host) return;
-      var anchor = { v: 1, type: "element", cfy_id: host.getAttribute("data-cfy-id") };
-      // Optional re-attachment hint: the element's text, whitespace-collapsed.
-      // Omitted when empty (purely graphical node) or implausibly long.
-      var text = (host.textContent || "").replace(/\s+/g, " ").trim();
-      if (text && text.length <= ELEMENT_QUOTE_MAX) anchor.quote = { exact: text };
-      anchor.target = {
-        kind: semanticKind(host),
-        label: semanticLabel(host, text),
-        excerpt: text.slice(0, 240),
-        cfy_ids: [anchor.cfy_id],
-        multi_block: false,
-      };
-      post({
-        type: "element_click",
-        anchor: anchor,
-        rect: rectOf(host.getBoundingClientRect()),
-      });
+      if (diagramRole(host)) {
+        // A diagram inspection is not a slide/navigation gesture.
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+      reportElement(host);
     } catch (e) {
       /* never break the artifact */
     }
-  });
+  }, true);
+
+  var diagramNodes = document.querySelectorAll(
+    "svg[data-cfy-id], svg [data-cfy-id], [role=img][data-cfy-id], [role=img] [data-cfy-id]"
+  );
+  for (var diagramIndex = 0; diagramIndex < diagramNodes.length; diagramIndex += 1) {
+    var diagramNode = diagramNodes[diagramIndex];
+    if (!diagramNode.hasAttribute("tabindex")) diagramNode.setAttribute("tabindex", "0");
+    if (!diagramNode.hasAttribute("aria-label")) {
+      var diagramText = (diagramNode.textContent || "").replace(/\s+/g, " ").trim();
+      diagramNode.setAttribute(
+        "aria-label",
+        semanticLabel(diagramNode, diagramText || diagramNode.getAttribute("data-cfy-id"))
+      );
+    }
+  }
+
+  document.addEventListener("keydown", function (ev) {
+    try {
+      var target = ev.target instanceof Element ? ev.target : null;
+      var host = target && target.closest("[data-cfy-id]");
+      if (!host || !diagramRole(host) || isInteractiveTarget(target)) return;
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        reportElement(host);
+        return;
+      }
+      if (["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown"].indexOf(ev.key) === -1) return;
+      var diagram = host.closest("svg, [role=img]");
+      if (!diagram) return;
+      var peers = Array.prototype.slice.call(diagram.querySelectorAll("[data-cfy-id][tabindex]"));
+      if (diagram.matches("[data-cfy-id][tabindex]")) peers.unshift(diagram);
+      var index = peers.indexOf(host);
+      if (index === -1 || peers.length < 2) return;
+      var delta = ev.key === "ArrowLeft" || ev.key === "ArrowUp" ? -1 : 1;
+      var next = peers[(index + delta + peers.length) % peers.length];
+      ev.preventDefault();
+      ev.stopPropagation();
+      next.focus();
+    } catch (e) {
+      /* never break the artifact */
+    }
+  }, true);
 
   // Hover affordance (always-on for v1 — see docs/api.md "Bridge protocol").
   // :where() pins specificity at zero so any artifact rule overrides these.
@@ -393,6 +497,8 @@
     ":where([data-cfy-id]:hover) { outline: 1px dashed rgba(128,128,128,0.6); outline-offset: 2px; }",
     // Nicer, theme-following color where color-mix is supported (Safari 16.2+).
     ":where([data-cfy-id]:hover) { outline: 1px dashed color-mix(in srgb, currentColor 35%, transparent); }",
+    ":where(svg [data-cfy-id], svg[data-cfy-id], [role=img] [data-cfy-id], [role=img][data-cfy-id]) { cursor: pointer; }",
+    ":where(svg [data-cfy-id]:focus-visible, svg[data-cfy-id]:focus-visible, [role=img] [data-cfy-id]:focus-visible, [role=img][data-cfy-id]:focus-visible) { outline: 2px solid currentColor; outline-offset: 3px; }",
 
     // ---- Saved comment highlights (bead conceptify-vu1.3) ------------------
     // Warm terracotta family (coheres with the shell/artifact accent) tuned
