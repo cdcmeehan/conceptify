@@ -33,6 +33,10 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
   const [newFolderName, setNewFolderName] = useState("");
   const [newProjectError, setNewProjectError] = useState<string | null>(null);
   const [newProjectBusy, setNewProjectBusy] = useState(false);
+  const [newTopicNotes, setNewTopicNotes] = useState("");
+  const [newTopicLinks, setNewTopicLinks] = useState("");
+  const [topicContextOpen, setTopicContextOpen] = useState(false);
+  const [newTopicFiles, setNewTopicFiles] = useState<string[]>([]);
   const [contextOpenId, setContextOpenId] = useState<string | null>(null);
 
   function closeNewProject() {
@@ -40,6 +44,10 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
     setNewFolderName("");
     setNewProjectError(null);
     setNewProjectBusy(false);
+    setNewTopicNotes("");
+    setNewTopicLinks("");
+    setTopicContextOpen(false);
+    setNewTopicFiles([]);
   }
 
   async function pickDirectory() {
@@ -62,13 +70,23 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
     }
   }
 
+  async function pickTopicFiles() {
+    const selected = await openDirectoryDialog({ directory: false, multiple: true, title: "Choose source files" });
+    if (Array.isArray(selected)) setNewTopicFiles(selected);
+    else if (typeof selected === "string") setNewTopicFiles([selected]);
+  }
+
   function createFolder() {
     const name = newFolderName.trim();
     if (name.length === 0) return;
     setNewProjectBusy(true);
     setNewProjectError(null);
     appStore
-      .createProjectFolder(name)
+      .createProjectFolder(name, {
+        notes: newTopicNotes.trim(),
+        links: newTopicLinks.split("\n").map((value) => value.trim()).filter(Boolean),
+        files: newTopicFiles,
+      })
       .then(() => closeNewProject())
       .catch((e) => {
         setNewProjectError(String(e));
@@ -167,13 +185,13 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
             </button>
             <div class="flex items-center gap-2 text-[10px] uppercase tracking-wide text-muted">
               <span class="h-px flex-1 bg-line" />
-              or make one
+              or learn a topic
               <span class="h-px flex-1 bg-line" />
             </div>
             <input
               type="text"
               value={newFolderName}
-              placeholder="New topic (e.g. Distributed Systems)"
+              placeholder="Topic (e.g. Distributed Systems)"
               disabled={newProjectBusy}
               autoFocus
               onInput={(e) => setNewFolderName((e.currentTarget as HTMLInputElement).value)}
@@ -182,6 +200,40 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
               }}
               class="cfy-input"
             />
+            <button
+              type="button"
+              onClick={() => setTopicContextOpen((value) => !value)}
+              class="text-left text-[10px] font-medium text-accent-ink hover:underline"
+              aria-expanded={topicContextOpen}
+            >
+              {topicContextOpen ? "Hide optional context" : "Add optional notes or links"}
+            </button>
+            {topicContextOpen && (
+              <div class="flex flex-col gap-1.5">
+                <textarea
+                  value={newTopicNotes}
+                  onInput={(e) => setNewTopicNotes((e.currentTarget as HTMLTextAreaElement).value)}
+                  rows={2}
+                  class="cfy-input resize-y text-[10px]"
+                  placeholder="What do you already know or want to focus on?"
+                  aria-label="Topic notes"
+                />
+                <div class="flex items-center justify-between gap-2">
+                  <button type="button" onClick={() => void pickTopicFiles()} class="cfy-btn cfy-btn-secondary h-7 px-2 text-[9px]">Add source files…</button>
+                  {newTopicFiles.length > 0 && <button type="button" onClick={() => setNewTopicFiles([])} class="text-[9px] text-muted hover:text-danger">Remove all</button>}
+                </div>
+                {newTopicFiles.length > 0 && <p class="text-[9px] text-muted">{newTopicFiles.length} file{newTopicFiles.length === 1 ? "" : "s"} will be copied into the topic project.</p>}
+                <textarea
+                  value={newTopicLinks}
+                  onInput={(e) => setNewTopicLinks((e.currentTarget as HTMLTextAreaElement).value)}
+                  rows={2}
+                  class="cfy-input resize-y text-[10px]"
+                  placeholder="Reference links, one per line (optional)"
+                  aria-label="Topic reference links"
+                />
+                <p class="text-[9px] leading-relaxed text-muted">Stored inside this private topic project. Links are references only; nothing is fetched automatically.</p>
+              </div>
+            )}
             {newProjectError != null && (
               <p class="break-words text-[11px] text-danger">{newProjectError}</p>
             )}
@@ -200,7 +252,7 @@ export function ProjectSidebar({ projects, selectedProjectId, showArchived, load
                 disabled={newProjectBusy || newFolderName.trim().length === 0}
                 class="cfy-btn cfy-btn-primary"
               >
-                {newProjectBusy ? "Creating…" : "Create folder"}
+                {newProjectBusy ? "Starting…" : "Start topic"}
               </button>
             </div>
           </div>

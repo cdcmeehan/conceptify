@@ -99,6 +99,8 @@ pub fn run() {
             commands::ensure_project,
             commands::create_project_folder,
             project_context::scan_project_context,
+            project_context::get_topic_context,
+            project_context::set_topic_context,
             commands::delete_thread,
             commands::list_artifact_versions,
             commands::diff_versions,

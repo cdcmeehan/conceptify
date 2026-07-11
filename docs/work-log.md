@@ -325,3 +325,13 @@ a clear “agents still read relevant files directly” fallback. A lightweight
 root/Git fingerprint reuses unchanged results. The selected project exposes an
 expandable readiness card with languages, exclusions, privacy/indexing copy,
 and any warning; scanning and errors never block navigation.
+
+**Topic-only projects (`conceptify-vc1.3`).** The compact creation path now says
+“learn a topic” and “Start topic”; users never need to understand the managed
+backing folder. Topic name alone remains sufficient. Progressive optional
+context accepts notes, HTTP(S) reference links, and source files with remove
+controls and clear privacy copy. Notes/links become a local context document,
+selected files are copied into the managed project boundary, links are not
+fetched, and clearing context removes its stored/materialized representation.
+The resulting project uses the same question, run, and artifact paths as a
+folder-backed project.

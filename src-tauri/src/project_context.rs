@@ -33,6 +33,82 @@ pub struct ProjectContextSummary {
     pub unchanged: bool,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct TopicContext {
+    pub notes: String,
+    pub links: Vec<String>,
+    pub files: Vec<String>,
+}
+
+fn topic_key(project_id: &str) -> String { format!("topic_context:{project_id}") }
+
+pub fn stored_topic(conn: &rusqlite::Connection, project_id: &str) -> Option<TopicContext> {
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", [topic_key(project_id)], |r| r.get::<_, String>(0))
+        .optional().ok().flatten().and_then(|json| serde_json::from_str(&json).ok())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_topic_context(
+    db: State<DbHandle>,
+    project_id: String,
+    notes: String,
+    links: Vec<String>,
+    files: Vec<String>,
+) -> Result<TopicContext, String> {
+    for link in &links {
+        if !(link.starts_with("https://") || link.starts_with("http://")) {
+            return Err(format!("link must start with http:// or https://: {link}"));
+        }
+    }
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let root: String = conn.query_row("SELECT root_path FROM projects WHERE id = ?1", [&project_id], |r| r.get(0))
+        .map_err(|_| format!("project not found: {project_id}"))?;
+    let sources_dir = Path::new(&root).join(".conceptify-sources");
+    if sources_dir.exists() { std::fs::remove_dir_all(&sources_dir).map_err(|e| e.to_string())?; }
+    let mut copied_files = Vec::new();
+    for source in files.into_iter().filter(|value| !value.trim().is_empty()) {
+        let path = Path::new(&source);
+        if !path.is_file() { return Err(format!("source file not found: {source}")); }
+        std::fs::create_dir_all(&sources_dir).map_err(|e| e.to_string())?;
+        let name = path.file_name().and_then(|value| value.to_str()).ok_or_else(|| format!("unsupported source file name: {source}"))?;
+        let destination = sources_dir.join(name);
+        std::fs::copy(path, &destination).map_err(|e| e.to_string())?;
+        copied_files.push(format!(".conceptify-sources/{name}"));
+    }
+    let context = TopicContext {
+        notes: notes.trim().to_owned(),
+        links: links.into_iter().filter(|value| !value.trim().is_empty()).collect(),
+        files: copied_files,
+    };
+    let mut markdown = String::from("# Topic context\n\n");
+    if !context.notes.is_empty() { markdown.push_str(&context.notes); markdown.push_str("\n\n"); }
+    if !context.links.is_empty() {
+        markdown.push_str("## Reference links\n\n");
+        for link in &context.links { markdown.push_str(&format!("- {link}\n")); }
+        markdown.push('\n');
+    }
+    if !context.files.is_empty() {
+        markdown.push_str("## Source files\n\n");
+        for file in &context.files { markdown.push_str(&format!("- {file}\n")); }
+    }
+    let context_path = Path::new(&root).join(".conceptify-context.md");
+    if context.notes.is_empty() && context.links.is_empty() && context.files.is_empty() {
+        match std::fs::remove_file(&context_path) { Ok(()) => {}, Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}, Err(e) => return Err(e.to_string()) }
+        conn.execute("DELETE FROM settings WHERE key = ?1", [topic_key(&project_id)]).map_err(|e| e.to_string())?;
+    } else {
+        std::fs::write(context_path, markdown).map_err(|e| e.to_string())?;
+        let json = serde_json::to_string(&context).map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", rusqlite::params![topic_key(&project_id), json]).map_err(|e| e.to_string())?;
+    }
+    Ok(context)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_topic_context(db: State<DbHandle>, project_id: String) -> Result<TopicContext, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    Ok(stored_topic(&conn, &project_id).unwrap_or_default())
+}
+
 fn key(project_id: &str) -> String {
     format!("project_context:{project_id}")
 }

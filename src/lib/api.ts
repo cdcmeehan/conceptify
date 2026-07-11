@@ -139,6 +139,14 @@ export function scanProjectContext(projectId: string): Promise<ProjectContextSum
   return invoke<ProjectContextSummary>("scan_project_context", { project_id: projectId });
 }
 
+export interface TopicContext { notes: string; links: string[]; files: string[]; }
+export function getTopicContext(projectId: string): Promise<TopicContext> {
+  return invoke<TopicContext>("get_topic_context", { project_id: projectId });
+}
+export function setTopicContext(projectId: string, context: TopicContext): Promise<TopicContext> {
+  return invoke<TopicContext>("set_topic_context", { project_id: projectId, ...context });
+}
+
 export interface Thread {
   id: string;
   project_id: string;

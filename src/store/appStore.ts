@@ -1280,8 +1280,11 @@ class AppStore {
    * project. Throws (empty name, unresolvable base dir, mkdir failure) so the
    * caller can surface the message inline.
    */
-  async createProjectFolder(name: string): Promise<void> {
+  async createProjectFolder(name: string, context?: api.TopicContext): Promise<void> {
     const result = await api.createProjectFolder(name);
+    if (context != null && (context.notes !== "" || context.links.length > 0 || context.files.length > 0)) {
+      await api.setTopicContext(result.id, context);
+    }
     await this.refetchProjects();
     this.selectProject(result.id);
   }

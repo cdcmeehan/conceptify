@@ -454,6 +454,13 @@ settings commands are the exception (they emit `settings-changed`, above).
   dir (FR-7.3, default `~/Documents/conceptify/projects`) and maps it, with
   `name` as the display name. Errors (strings): empty name, unresolvable base
   dir, mkdir failure.
+- `get_topic_context { project_id }` / `set_topic_context { project_id, notes,
+  links, files }` → `{ notes, links, files }` — optional topic-only context.
+  Notes and validated HTTP(S) reference links are materialized into a private
+  `.conceptify-context.md`; selected source files are copied under
+  `.conceptify-sources/` so headless agents can read them inside the project
+  boundary. Empty context removes both stored metadata and the context file;
+  links are never fetched automatically.
 
 **Thread hygiene (bead 0kt):**
 
