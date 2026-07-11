@@ -11,7 +11,7 @@ stored values and user-facing labels do not change with the selected model.
 
 ## Decision
 
-Response intent has four independent dimensions. The controls use ordinary
+Response intent has five independent dimensions. The controls use ordinary
 language and a short example; the durable values are stable, lowercase enum
 tokens.
 
@@ -21,6 +21,7 @@ tokens.
 | Language | Plain language · Familiar · Domain-native | `plain` · `familiar` · `domain_native` | Assumed terminology, not response length |
 | Visuals | When useful · Prefer visuals · Text only | `auto` · `prefer` · `avoid` | Whether diagrams/charts should be proposed |
 | Shape | Best fit · Walkthrough · Comparison · Reference | `auto` · `walkthrough` · `comparison` · `reference` | The main organization of the answer |
+| Visual purpose | Automatic · Compare · Sequence · Relationships · Hierarchy · Plot values · Interactive model | `auto` · `compare` · `sequence` · `relationships` · `hierarchy` · `values` · `interactive` | The relationship a requested visual must make easier to understand |
 
 The labels deliberately avoid “simple/advanced,” “beginner/expert,” and
 “short/long.” Those words conflate a person's identity with the response they
@@ -52,7 +53,8 @@ Version 1 is a JSON object stored and transported as a unit:
   "depth": "balanced",
   "language": "familiar",
   "visuals": "auto",
-  "shape": "auto"
+  "shape": "auto",
+  "visual_purpose": "auto"
 }
 ```
 
@@ -103,6 +105,16 @@ Every cross-dimension combination is valid. In particular:
   structure; it does not require decorative imagery.
 - Text only + Comparison can use a table or aligned prose because “visuals”
   controls generated explanatory graphics, not basic document structure.
+- A specific visual purpose + Text only preserves the requested relationship
+  in an equivalent textual form (for example, hierarchy becomes a nested
+  outline); `avoid` remains the hard constraint.
+
+Purpose-to-format guidance is deterministic but not decorative: Compare uses
+an aligned table or small multiples; Sequence uses ordered steps, a flow, or a
+sequence diagram; Relationships uses a node-link/concept map; Hierarchy uses a
+tree or nesting; Plot values uses a chart backed by exact values; Interactive
+model uses the smallest meaningful controls plus a complete static fallback.
+Every visual has an accessible name/description and an interpretive caption.
 
 Capabilities can make a requested presentation unavailable, but no adapter may
 silently reinterpret the intent. `auto` always permits the clearest supported
@@ -125,7 +137,7 @@ captures the resolved contract before queueing and passes it unchanged through
 retry and restart. Provider-specific instructions are implementation details
 and must preserve these meanings.
 
-The resulting thread exposes the four resolved choices. Published artifacts
+The resulting thread exposes the five resolved choices. Published artifacts
 record the contract version and resolved values as provenance. A retry copies
 the original profile unless the user explicitly edits it; synthesis records
 the profile used for the synthesis rather than pretending all source runs had

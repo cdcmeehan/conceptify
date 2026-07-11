@@ -31,6 +31,7 @@ const PROFILE_LABELS = {
   language: { plain: "Plain language", familiar: "Familiar", domain_native: "Domain-native" },
   visuals: { auto: "Visuals when useful", prefer: "Prefer visuals", avoid: "Text only" },
   shape: { auto: "Best fit", walkthrough: "Walkthrough", comparison: "Comparison", reference: "Reference" },
+  visual_purpose: { auto: "", compare: "Compare", sequence: "Sequence", relationships: "Relationships", hierarchy: "Hierarchy", values: "Plot values", interactive: "Interactive model" },
 } as const;
 
 export function ThreadView({ thread }: { thread: Thread | null }) {
@@ -82,7 +83,7 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
   const responseIntent = versionMetadata?.response_intent ?? null;
   const profileSummary = responseIntent == null
     ? null
-    : `${PROFILE_LABELS.depth[responseIntent.depth]} · ${PROFILE_LABELS.language[responseIntent.language]} · ${PROFILE_LABELS.visuals[responseIntent.visuals]} · ${PROFILE_LABELS.shape[responseIntent.shape]}`;
+    : `${PROFILE_LABELS.depth[responseIntent.depth]} · ${PROFILE_LABELS.language[responseIntent.language]} · ${PROFILE_LABELS.visuals[responseIntent.visuals]}${responseIntent.visual_purpose !== "auto" ? ` · ${PROFILE_LABELS.visual_purpose[responseIntent.visual_purpose]}` : ""} · ${PROFILE_LABELS.shape[responseIntent.shape]}`;
 
   const latestSeenRef = useRef({ threadId, version: latestVersion });
   useEffect(() => {

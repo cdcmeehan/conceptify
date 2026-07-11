@@ -260,6 +260,14 @@ of how such systems usually work.
   STANDARD budget.
 - Every figure gets a `<figcaption>` that *interprets* ("Note the token
   never crosses this boundary"), never restates the title.
+- Choose visuals by explanatory purpose, using the smallest supported form:
+  compare → table/small multiples; sequence → steps/flow/sequence; relationships
+  → node-link/concept map; hierarchy → tree/nesting; values → accessible chart
+  plus exact values; interactive model → minimal controls plus a complete static
+  fallback. If the fitting form is unsupported, say so briefly and use the
+  closest textual structure. Every SVG uses `role="img"` with a useful
+  `aria-label`; every chart retains exact values in a table or description.
+  Never add a diagram merely to decorate prose.
 - Code excerpts: pick the load-bearing 5–30 lines, trim aggressively
   (`// …` for elisions), name the source file in the
   `cfy-code-title` bar, and use highlighted lines + `cfy-code-mark`

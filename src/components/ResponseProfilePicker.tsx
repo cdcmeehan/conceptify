@@ -3,6 +3,7 @@ import {
   listSkillCapabilities,
   recommendSkills,
   type ResponseIntent,
+  type VisualPurpose,
   type SkillCapability,
   type SkillRecommendation,
 } from "../lib/api";
@@ -14,7 +15,7 @@ interface Props {
   intent: ResponseIntent;
   skillMode: SkillMode;
   selectedSkillIds: string[];
-  origins?: Record<"depth" | "language" | "visuals" | "shape", "product" | "user" | "project" | "question">;
+  origins?: Record<"depth" | "language" | "visuals" | "shape" | "visual_purpose", "product" | "user" | "project" | "question">;
   onChange: (patch: {
     responseIntent?: ResponseIntent;
     skillMode?: SkillMode;
@@ -47,12 +48,22 @@ const SHAPE = [
   ["comparison", "Comparison", "Put alternatives side by side."],
   ["reference", "Reference", "Make it easy to scan later."],
 ] as const;
+const VISUAL_PURPOSE = [
+  ["auto", "Automatic", "Choose the smallest visual that clarifies the question."],
+  ["compare", "Compare", "Align alternatives so differences are visible."],
+  ["sequence", "Sequence", "Show order, direction, or timing."],
+  ["relationships", "Relationships", "Map meaningful connections between concepts."],
+  ["hierarchy", "Hierarchy", "Show parent, child, and nested levels."],
+  ["values", "Plot values", "Chart measured values and retain exact numbers."],
+  ["interactive", "Interactive model", "Let inputs change only when that teaches something."],
+] as const satisfies ReadonlyArray<readonly [VisualPurpose, string, string]>;
 
 const LABELS = {
   depth: Object.fromEntries(DEPTH.map(([value, label]) => [value, label])),
   language: Object.fromEntries(LANGUAGE.map(([value, label]) => [value, label])),
   visuals: Object.fromEntries(VISUALS.map(([value, label]) => [value, label])),
   shape: Object.fromEntries(SHAPE.map(([value, label]) => [value, label])),
+  visual_purpose: Object.fromEntries(VISUAL_PURPOSE.map(([value, label]) => [value, label])),
 } as Record<keyof Omit<ResponseIntent, "version">, Record<string, string>>;
 
 let catalogPromise: Promise<SkillCapability[]> | null = null;
@@ -62,7 +73,10 @@ function loadCatalog(): Promise<SkillCapability[]> {
 }
 
 function profileSummary(intent: ResponseIntent): string {
-  return `${LABELS.depth[intent.depth]} · ${LABELS.language[intent.language]} · ${LABELS.visuals[intent.visuals]} · ${LABELS.shape[intent.shape]}`;
+  const purpose = intent.visuals !== "avoid" && intent.visual_purpose !== "auto"
+    ? ` · ${LABELS.visual_purpose[intent.visual_purpose]}`
+    : "";
+  return `${LABELS.depth[intent.depth]} · ${LABELS.language[intent.language]} · ${LABELS.visuals[intent.visuals]}${purpose} · ${LABELS.shape[intent.shape]}`;
 }
 
 export function ResponseProfilePicker({
@@ -172,6 +186,15 @@ export function ResponseProfilePicker({
     onChange({ responseIntent: { ...intent, [dimension]: value } });
   }
 
+  function setVisualPurpose(purpose: VisualPurpose) {
+    const shape = purpose === "compare"
+      ? "comparison"
+      : purpose === "sequence"
+        ? "walkthrough"
+        : intent.shape;
+    onChange({ responseIntent: { ...intent, visuals: purpose === "auto" ? intent.visuals : "prefer", visual_purpose: purpose, shape } });
+  }
+
   function setSkillMode(next: SkillMode) {
     onChange({
       skillMode: next,
@@ -263,6 +286,23 @@ export function ResponseProfilePicker({
             <ChoiceGroup groupId={controlId} legend="Language" origin={origins?.language} dimension="language" value={intent.language} choices={LANGUAGE} onChange={setIntent} />
             <ChoiceGroup groupId={controlId} legend="Visuals" origin={origins?.visuals} dimension="visuals" value={intent.visuals} choices={VISUALS} onChange={setIntent} />
             <ChoiceGroup groupId={controlId} legend="Shape" origin={origins?.shape} dimension="shape" value={intent.shape} choices={SHAPE} onChange={setIntent} />
+            <fieldset class="min-[520px]:col-span-2">
+              <legend class="cfy-label mb-1.5">
+                Visual purpose{origins?.visual_purpose != null ? <span class="ml-1 normal-case tracking-normal text-muted">· {origins.visual_purpose === "question" ? "this question" : origins.visual_purpose}</span> : null}
+              </legend>
+              <p class="mb-2 text-[9px] leading-snug text-muted">Start with the relationship you need to see. Choosing a purpose requests a fitting visual; Text only remains a hard constraint above.</p>
+              <div class="grid gap-1 min-[520px]:grid-cols-2">
+                {VISUAL_PURPOSE.map(([purpose, label, description]) => (
+                  <label key={purpose} class={`flex cursor-pointer items-start gap-2 rounded-ctl border px-2 py-1.5 ${intent.visual_purpose === purpose ? "border-accent/40 bg-accent-bg/45" : "border-line bg-paper hover:bg-well/35"}`}>
+                    <input type="radio" name={`${controlId}-visual-purpose`} value={purpose} checked={intent.visual_purpose === purpose} onChange={() => setVisualPurpose(purpose)} class="mt-0.5 accent-current" />
+                    <span>
+                      <span class="block text-[10px] font-semibold text-ink">{label}</span>
+                      <span class="block text-[9px] leading-snug text-muted">{description}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
           </div>
 
           <div class="border-t border-line bg-well/25 p-3">

@@ -469,3 +469,19 @@ where supported. Print hides the outline and exposes all deep-dive bodies. The
 reference artifact browser probe verified sticky layout, initial/current
 outline state, deep-link opening, history restoration, native target ids,
 closed-content search, and coherent print rules.
+
+**Visualization intent (`conceptify-dqb.2`).** The response profile now asks
+what relationship a visual should clarify: compare, sequence, relationships,
+hierarchy, measured values, or an interactive model, while preserving automatic
+selection and the existing hard Text only constraint. A specific purpose
+requests visuals and aligns answer shape for comparisons/sequences. The same
+purpose picker appears in anchored Visualise actions, and both paths persist the
+choice with the source question/anchor.
+
+The provider-neutral run contract carries `visual_purpose` through inherited
+preferences, submissions, retries, run/artifact provenance, and prompt
+generation; stored v1 profiles without the additive field default safely to
+`auto`. Prompts map each purpose to the smallest fitting supported format,
+require accessible descriptions and textual/static fallbacks, preserve exact
+chart values, and explicitly reject decorative diagrams. Unsupported forms
+must be called out briefly rather than silently substituted.

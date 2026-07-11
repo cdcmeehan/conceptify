@@ -137,7 +137,7 @@ export interface AskQuestionDraft {
   responseIntent: api.ResponseIntent;
   skillMode: "auto" | "none" | "manual";
   selectedSkillIds: string[];
-  responseOrigins: Record<"depth" | "language" | "visuals" | "shape", api.ResponsePreferenceOrigin>;
+  responseOrigins: Record<"depth" | "language" | "visuals" | "shape" | "visual_purpose", api.ResponsePreferenceOrigin>;
   responseIntentTouched: boolean;
 }
 
@@ -246,6 +246,7 @@ function newAskDraft(preferences?: api.ResolvedResponsePreferences | null): AskQ
       language: "familiar",
       visuals: "auto",
       shape: "auto",
+      visual_purpose: "auto",
     },
     skillMode: "auto",
     selectedSkillIds: [],
@@ -254,6 +255,7 @@ function newAskDraft(preferences?: api.ResolvedResponsePreferences | null): AskQ
       language: "product",
       visuals: "product",
       shape: "product",
+      visual_purpose: "product",
     },
     responseIntentTouched: false,
   };
@@ -434,6 +436,7 @@ class AppStore {
                 language: "question",
                 visuals: "question",
                 shape: "question",
+                visual_purpose: "question",
               } as const,
             }),
       },
@@ -523,6 +526,7 @@ class AppStore {
                       language: "question",
                       visuals: "question",
                       shape: "question",
+                      visual_purpose: "question",
                     } as const,
                   }),
             }

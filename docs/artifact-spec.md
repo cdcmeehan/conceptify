@@ -48,6 +48,11 @@ An artifact is a **single, self-contained `.html` file**.
   zero network.
 - Small raster images MAY be embedded as `data:` URIs; prefer SVG. Mind
   the size cap (§8: warn above 5 MiB, reject above 50 MiB).
+- Explanatory visuals MUST encode a requested relationship, not decorate the
+  page. Inline SVG uses `role="img"` and a useful `aria-label`; charts retain
+  exact values in adjacent text/table form, and interactive models include a
+  complete static fallback. If the fitting visual form is unsupported, the
+  artifact states the fallback briefly and uses the closest textual structure.
 - `<a href>` links to external websites MAY be used for further reading.
   They are inert inside the app's sandboxed viewer (no navigation
   permission) but work when the file is opened in a browser. Relative

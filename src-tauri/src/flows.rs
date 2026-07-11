@@ -1688,6 +1688,15 @@ fn response_contract(metadata: Option<&crate::skill_catalog::RunResponseMetadata
         "reference" => "Reference — optimize the structure for scanning and later lookup.",
         _ => "Best fit — choose the clearest organization for this question.",
     };
+    let visual_purpose = match intent.visual_purpose.as_str() {
+        "compare" => "Compare — use an aligned table or small-multiple visual that exposes meaningful differences.",
+        "sequence" => "Sequence — use ordered steps, a flow, or a sequence diagram that makes direction and timing clear.",
+        "relationships" => "Relationships — use a node-link or concept map only when connections are the point.",
+        "hierarchy" => "Hierarchy — use a tree or nested structure that makes parent/child levels explicit.",
+        "values" => "Plot values — use an accessible chart plus exact values; never invent missing measurements.",
+        "interactive" => "Interactive model — add controls only when changing inputs teaches something; include a complete static fallback.",
+        _ => "Automatic — choose the smallest supported visual form that materially improves understanding.",
+    };
     let skills = if metadata.skills.is_empty() {
         "- Optional skills: none. Do not add a capability merely because one is installed."
             .to_owned()
@@ -1705,7 +1714,7 @@ fn response_contract(metadata: Option<&crate::skill_catalog::RunResponseMetadata
             .join("\n")
     };
     format!(
-        "\n\n## Explicit response profile (contract v{})\n- Depth: {depth}\n- Language: {language}\n- Visuals: {visuals}\n- Shape: {shape}\n{skills}\n\nThese are user-facing intent values, not suggestions. A skill may refine the answer but must not silently change them. If a requested presentation is unavailable, state the fallback clearly in the artifact.",
+        "\n\n## Explicit response profile (contract v{})\n- Depth: {depth}\n- Language: {language}\n- Visuals: {visuals}\n- Visual purpose: {visual_purpose}\n- Shape: {shape}\n{skills}\n\nThese are user-facing intent values, not suggestions. Use the smallest supported format that fits the visual purpose; every visual needs an accessible description and useful textual fallback. Decorative diagrams do not satisfy the request. A skill may refine the answer but must not silently change these values. If a requested presentation is unavailable, state the fallback clearly in the artifact.",
         intent.version
     )
 }
@@ -2113,6 +2122,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
                 language: "plain".to_owned(),
                 visuals: "avoid".to_owned(),
                 shape: "reference".to_owned(),
+                visual_purpose: "auto".to_owned(),
             },
             skills: vec![crate::skill_catalog::SelectedSkill {
                 id: "conceptify".to_owned(),
@@ -2149,7 +2159,43 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
             prompt.contains("`conceptify`, capability schema v1, manual selection"),
             "{prompt}"
         );
-        assert!(prompt.contains("must not silently change them"), "{prompt}");
+        assert!(prompt.contains("must not silently change these values"), "{prompt}");
+        assert!(prompt.contains("Visual purpose: Automatic"), "{prompt}");
+    }
+
+    #[test]
+    fn visual_purpose_selects_a_supported_format_and_accessible_fallback() {
+        for (purpose, expected) in [
+            ("compare", "aligned table or small-multiple"),
+            ("sequence", "ordered steps, a flow, or a sequence diagram"),
+            ("relationships", "node-link or concept map"),
+            ("hierarchy", "tree or nested structure"),
+            ("values", "accessible chart plus exact values"),
+            ("interactive", "complete static fallback"),
+        ] {
+            let metadata = crate::skill_catalog::RunResponseMetadata {
+                intent: crate::skill_catalog::ResponseIntentInput {
+                    version: 1,
+                    depth: "balanced".to_owned(),
+                    language: "familiar".to_owned(),
+                    visuals: "prefer".to_owned(),
+                    shape: "auto".to_owned(),
+                    visual_purpose: purpose.to_owned(),
+                },
+                skills: Vec::new(),
+            };
+            let prompt = build_ask_prompt(&AskPromptContext {
+                thread_id: "t1",
+                slug: "visual",
+                title: "Visual",
+                question: "Show this",
+                project_root: "/tmp/project",
+                response_metadata: Some(&metadata),
+            });
+            assert!(prompt.contains(expected), "{purpose}: {prompt}");
+            assert!(prompt.contains("accessible description"), "{prompt}");
+            assert!(prompt.contains("Decorative diagrams do not satisfy"), "{prompt}");
+        }
     }
 
     #[test]
@@ -2168,6 +2214,7 @@ A reader typed a question into Conceptify and wants a self-contained HTML explan
                     language: language.to_owned(),
                     visuals: visuals.to_owned(),
                     shape: shape.to_owned(),
+                    visual_purpose: "auto".to_owned(),
                 },
                 skills: Vec::new(),
             };
@@ -3297,6 +3344,7 @@ Answer now: resolve comment c-direct (the latest unanswered message in this exch
                 language: "plain".to_owned(),
                 visuals: "avoid".to_owned(),
                 shape: "reference".to_owned(),
+                visual_purpose: "auto".to_owned(),
             },
             skills: Vec::new(),
         };

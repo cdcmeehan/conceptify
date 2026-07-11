@@ -103,12 +103,13 @@ interface PopoverState {
   action: "explain" | "deepen" | "compare" | "simplify" | "visualise" | "change" | null;
   destination: "inline" | "sidebar" | "thread";
   moreOpen: boolean;
+  visualPurpose: api.VisualPurpose;
 }
 
 /** Convert an iframe-viewport rect to a clamped shell-viewport composer
  *  position, placed just below the target (flipped above when it would overflow
  *  the bottom), never overlapping the target. */
-function placePopover(iframe: HTMLIFrameElement, rect: BridgeRect): { left: number; top: number } {
+function placePopover(iframe: HTMLIFrameElement, rect: BridgeRect, estimatedHeight = POPOVER_HEIGHT_ESTIMATE): { left: number; top: number } {
   const frame = iframe.getBoundingClientRect();
   const anchorLeft = frame.left + rect.x;
   const anchorTop = frame.top + rect.y;
@@ -118,8 +119,8 @@ function placePopover(iframe: HTMLIFrameElement, rect: BridgeRect): { left: numb
 
   const below = anchorTop + rect.height + GAP;
   let top = below;
-  if (below + POPOVER_HEIGHT_ESTIMATE > window.innerHeight - VIEWPORT_MARGIN) {
-    const above = anchorTop - POPOVER_HEIGHT_ESTIMATE - GAP;
+  if (below + estimatedHeight > window.innerHeight - VIEWPORT_MARGIN) {
+    const above = anchorTop - estimatedHeight - GAP;
     top = above >= VIEWPORT_MARGIN ? above : Math.max(VIEWPORT_MARGIN, below);
   }
   return { left, top };
@@ -188,13 +189,23 @@ interface Props {
 }
 
 const EXPLORATION_INTENTS: Record<NonNullable<PopoverState["action"]>, api.ResponseIntent> = {
-  explain: { version: 1, depth: "balanced", language: "familiar", visuals: "auto", shape: "auto" },
-  deepen: { version: 1, depth: "deep", language: "domain_native", visuals: "auto", shape: "walkthrough" },
-  compare: { version: 1, depth: "balanced", language: "familiar", visuals: "prefer", shape: "comparison" },
-  simplify: { version: 1, depth: "balanced", language: "plain", visuals: "avoid", shape: "walkthrough" },
-  visualise: { version: 1, depth: "balanced", language: "familiar", visuals: "prefer", shape: "auto" },
-  change: { version: 1, depth: "balanced", language: "familiar", visuals: "auto", shape: "auto" },
+  explain: { version: 1, depth: "balanced", language: "familiar", visuals: "auto", shape: "auto", visual_purpose: "auto" },
+  deepen: { version: 1, depth: "deep", language: "domain_native", visuals: "auto", shape: "walkthrough", visual_purpose: "auto" },
+  compare: { version: 1, depth: "balanced", language: "familiar", visuals: "prefer", shape: "comparison", visual_purpose: "compare" },
+  simplify: { version: 1, depth: "balanced", language: "plain", visuals: "avoid", shape: "walkthrough", visual_purpose: "auto" },
+  visualise: { version: 1, depth: "balanced", language: "familiar", visuals: "prefer", shape: "auto", visual_purpose: "auto" },
+  change: { version: 1, depth: "balanced", language: "familiar", visuals: "auto", shape: "auto", visual_purpose: "auto" },
 };
+
+const VISUAL_PURPOSE_ACTIONS = [
+  ["auto", "Best fit"],
+  ["compare", "Compare"],
+  ["sequence", "Sequence"],
+  ["relationships", "Relationships"],
+  ["hierarchy", "Hierarchy"],
+  ["values", "Plot values"],
+  ["interactive", "Interactive"],
+] as const satisfies ReadonlyArray<readonly [api.VisualPurpose, string]>;
 
 function explorationMeta(anchor: Record<string, unknown> | null): Record<string, unknown> | null {
   if (anchor == null || typeof anchor.exploration !== "object" || anchor.exploration == null) return null;
@@ -260,6 +271,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
         action: null,
         destination: "inline",
         moreOpen: false,
+        visualPurpose: "auto",
       });
     };
 
@@ -284,6 +296,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
         action: null,
         destination: "inline",
         moreOpen: false,
+        visualPurpose: "auto",
       });
     };
 
@@ -351,7 +364,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
     const current = popoverRef.current;
     const iframe = iframeRef.current;
     if (current == null || current.stage !== "toolbar" || iframe == null) return;
-    const { left, top } = placePopover(iframe, current.rect);
+    const { left, top } = placePopover(iframe, current.rect, action === "visualise" ? 390 : POPOVER_HEIGHT_ESTIMATE);
     openIdRef.current += 1;
     const next: PopoverState = {
       ...current,
@@ -404,7 +417,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
       deepen: "Go deeper on this selection.",
       compare: visualTarget ? "Compare this visual element with its related elements." : "Compare this selection with related concepts.",
       simplify: "Explain this selection more simply.",
-      visualise: "Visualise this selection.",
+      visualise: current.visualPurpose === "auto" ? "Visualise this selection." : `Visualise this selection to show ${current.visualPurpose}.`,
       change: visualTarget ? "Redraw this visual." : "Change this part of the artifact.",
     };
     const body = current.body.trim() || (current.action == null ? "" : defaultQuestions[current.action]);
@@ -412,7 +425,14 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
 
     setPopover({ ...current, saving: true, error: null });
     const target = current.anchor.target;
-    const intent = current.action == null ? EXPLORATION_INTENTS.explain : EXPLORATION_INTENTS[current.action];
+    const baseIntent = current.action == null ? EXPLORATION_INTENTS.explain : EXPLORATION_INTENTS[current.action];
+    const intent = current.action === "visualise"
+      ? {
+          ...baseIntent,
+          visual_purpose: current.visualPurpose,
+          shape: current.visualPurpose === "compare" ? "comparison" as const : current.visualPurpose === "sequence" ? "walkthrough" as const : baseIntent.shape,
+        }
+      : baseIntent;
 
     if (current.destination === "thread" && current.action != null && current.action !== "change") {
       const excerpt = target?.excerpt || current.anchor.quote?.exact || target?.label || "Selected artifact content";
@@ -619,6 +639,24 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef, onO
                 ? "Continue the anchored exchange in Comments."
                 : "Create a durable exploration thread from this context."}
           </p>
+        </fieldset>
+      )}
+      {popover.action === "visualise" && (
+        <fieldset class="mt-2">
+          <legend class="cfy-label mb-1">Show</legend>
+          <div class="grid grid-cols-2 gap-1" aria-label="Visual purpose">
+            {VISUAL_PURPOSE_ACTIONS.map(([value, text]) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={popover.visualPurpose === value}
+                onClick={() => setPopover((prev) => prev == null ? null : { ...prev, visualPurpose: value })}
+                class={`cfy-btn justify-start px-1.5 py-1 text-[10px] ${popover.visualPurpose === value ? "cfy-btn-accent" : "cfy-btn-secondary"}`}
+              >
+                {text}
+              </button>
+            ))}
+          </div>
         </fieldset>
       )}
       {popover.action === "change" && (

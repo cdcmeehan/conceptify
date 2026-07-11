@@ -233,7 +233,11 @@ The in-app ask flow (FR-5.1/5.2/5.3, bead 959.1/959.2) adds three more:
   to author an artifact per the installed Conceptify skill and publish it via
   `conceptify save-artifact` into that thread. `title` is optional (derived
   from the question's first words when blank). `cwd` = project root. Errors
-  The response-intent v1 object is validated and `skill_mode` is `auto`, `none`,
+  are returned before queueing when validation fails. The response-intent v1
+  object carries `depth`, `language`, `visuals`, `shape`, and additive
+  `visual_purpose` (`auto | compare | sequence | relationships | hierarchy |
+  values | interactive`; missing on older stored v1 objects defaults to
+  `auto`). `skill_mode` is `auto`, `none`,
   or `manual`; automatic selection runs locally before thread creation, while
   unknown/unavailable manual skills fail visibly. The resolved profile and
   versioned skills become immutable run metadata and explicit agent

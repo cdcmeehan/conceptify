@@ -19,6 +19,7 @@ export type ResponseDepth = "quick" | "balanced" | "deep";
 export type ResponseLanguage = "plain" | "familiar" | "domain_native";
 export type ResponseVisuals = "auto" | "prefer" | "avoid";
 export type ResponseShape = "auto" | "walkthrough" | "comparison" | "reference";
+export type VisualPurpose = "auto" | "compare" | "sequence" | "relationships" | "hierarchy" | "values" | "interactive";
 
 export interface ResponseIntent {
   version: 1;
@@ -26,6 +27,7 @@ export interface ResponseIntent {
   language: ResponseLanguage;
   visuals: ResponseVisuals;
   shape: ResponseShape;
+  visual_purpose: VisualPurpose;
 }
 
 export interface SkillCapability {
@@ -63,7 +65,7 @@ export interface SkillRecommendation {
 export type ResponsePreferenceOrigin = "product" | "user" | "project" | "question";
 export interface ResolvedResponsePreferences {
   intent: ResponseIntent;
-  origins: Record<"depth" | "language" | "visuals" | "shape", Exclude<ResponsePreferenceOrigin, "question">>;
+  origins: Record<"depth" | "language" | "visuals" | "shape" | "visual_purpose", Exclude<ResponsePreferenceOrigin, "question">>;
   user: Partial<Omit<ResponseIntent, "version">>;
   project: Partial<Omit<ResponseIntent, "version">>;
 }
@@ -626,6 +628,7 @@ export function askFromApp(
       language: "familiar",
       visuals: "auto",
       shape: "auto",
+      visual_purpose: "auto",
     },
     skill_mode: skillMode,
     selected_skill_ids: selectedSkillIds,

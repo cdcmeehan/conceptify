@@ -64,6 +64,12 @@ pub struct ResponseIntentInput {
     pub language: String,
     pub visuals: String,
     pub shape: String,
+    #[serde(default = "default_visual_purpose")]
+    pub visual_purpose: String,
+}
+
+fn default_visual_purpose() -> String {
+    "auto".to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -94,6 +100,7 @@ pub struct PartialResponseIntent {
     pub language: Option<String>,
     pub visuals: Option<String>,
     pub shape: Option<String>,
+    pub visual_purpose: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -102,6 +109,7 @@ pub struct ResponseIntentOrigins {
     pub language: String,
     pub visuals: String,
     pub shape: String,
+    pub visual_purpose: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -121,6 +129,7 @@ fn product_intent() -> ResponseIntentInput {
         language: "familiar".to_owned(),
         visuals: "auto".to_owned(),
         shape: "auto".to_owned(),
+        visual_purpose: default_visual_purpose(),
     }
 }
 
@@ -179,6 +188,11 @@ fn resolve_preferences(
         language: resolve(&project.language, &user.language, &product.language),
         visuals: resolve(&project.visuals, &user.visuals, &product.visuals),
         shape: resolve(&project.shape, &user.shape, &product.shape),
+        visual_purpose: resolve(
+            &project.visual_purpose,
+            &user.visual_purpose,
+            &product.visual_purpose,
+        ),
     };
     validate_intent(&intent)?;
     Ok(ResolvedResponsePreferences {
@@ -188,6 +202,7 @@ fn resolve_preferences(
             language: origin(&project.language, &user.language),
             visuals: origin(&project.visuals, &user.visuals),
             shape: origin(&project.shape, &user.shape),
+            visual_purpose: origin(&project.visual_purpose, &user.visual_purpose),
         },
         user,
         project,
@@ -222,6 +237,7 @@ pub fn save_response_preference(
         language: Some(intent.language),
         visuals: Some(intent.visuals),
         shape: Some(intent.shape),
+        visual_purpose: Some(intent.visual_purpose),
     };
     let json = serde_json::to_string(&partial).map_err(|e| e.to_string())?;
     conn.execute(
@@ -382,6 +398,19 @@ pub fn validate_intent(intent: &ResponseIntentInput) -> Result<(), String> {
             "shape",
             intent.shape.as_str(),
             &["auto", "walkthrough", "comparison", "reference"][..],
+        ),
+        (
+            "visual_purpose",
+            intent.visual_purpose.as_str(),
+            &[
+                "auto",
+                "compare",
+                "sequence",
+                "relationships",
+                "hierarchy",
+                "values",
+                "interactive",
+            ][..],
         ),
     ] {
         if !allowed.contains(&value) {
@@ -575,6 +604,7 @@ mod tests {
             language: "familiar".to_owned(),
             visuals: visuals.to_owned(),
             shape: shape.to_owned(),
+            visual_purpose: "auto".to_owned(),
         }
     }
 
@@ -596,6 +626,21 @@ mod tests {
             .compatible_response_controls
             .depth
             .contains(&"deep".to_owned()));
+    }
+
+    #[test]
+    fn visual_purpose_is_validated_and_old_profiles_default_to_auto() {
+        let old: ResponseIntentInput = serde_json::from_str(
+            r#"{"version":1,"depth":"balanced","language":"familiar","visuals":"auto","shape":"auto"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.visual_purpose, "auto");
+        let mut requested = old;
+        requested.visual_purpose = "hierarchy".to_owned();
+        validate_intent(&requested).unwrap();
+        requested.visual_purpose = "decorative".to_owned();
+        let error = validate_intent(&requested).unwrap_err();
+        assert!(error.contains("unknown visual_purpose value 'decorative'"));
     }
 
     #[test]
@@ -712,6 +757,7 @@ mod tests {
         assert_eq!(resolved.intent.language, "plain");
         assert_eq!(resolved.intent.visuals, "avoid");
         assert_eq!(resolved.intent.shape, "reference");
+        assert_eq!(resolved.intent.visual_purpose, "auto");
         assert_eq!(resolved.origins.depth, "user");
         assert_eq!(resolved.origins.visuals, "project");
 
