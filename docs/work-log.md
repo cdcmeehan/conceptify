@@ -367,3 +367,14 @@ Keyboard-native inputs/radios, Escape cancellation, retained inline errors,
 single-column 320px composer layouts, and explicit scanning/queued/provider
 states passed the accumulated browser checkpoints. No regression added an
 empty intermediate screen or duplicate submit path.
+
+## 2026-07-11 — Contextual artifact exploration
+
+**Selection action menu (`conceptify-9lj.1`).** The shipped selection toolbar
+retains Comment and Copy while adding Explain and Deepen on the compact first
+row and Simplify, Visualise, Change, and Copy behind More. A truncated readable
+target preview keeps the request grounded, with the full quote in its title.
+Every action is a native keyboard-reachable control and advances to an anchored
+request composer with a useful default request that can be submitted as-is or
+edited. The enlarged toolbar keeps the existing viewport-edge clamp and
+above/below flip, so scrolled selections remain usable.

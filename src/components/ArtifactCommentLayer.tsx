@@ -71,8 +71,8 @@ const POPOVER_HEIGHT_ESTIMATE = 150;
  *  ~130px; this leaves clamp headroom without visibly off-centering it). The
  *  toolbar is intrinsic-width, so centering/clamping uses an estimate —
  *  consistent with the composer's estimate-based above/below flip. */
-const TOOLBAR_WIDTH_ESTIMATE = 150;
-const TOOLBAR_HEIGHT_ESTIMATE = 36;
+const TOOLBAR_WIDTH_ESTIMATE = 310;
+const TOOLBAR_HEIGHT_ESTIMATE = 66;
 const GAP = 8;
 const VIEWPORT_MARGIN = 8;
 /** How long the "Copied" confirmation shows before the toolbar auto-dismisses. */
@@ -99,6 +99,8 @@ interface PopoverState {
   /** Transient toolbar-stage flag: the Copy action succeeded and is confirming. */
   copied: boolean;
   error: string | null;
+  action: "explain" | "deepen" | "simplify" | "visualise" | "change" | null;
+  moreOpen: boolean;
 }
 
 /** Convert an iframe-viewport rect to a clamped shell-viewport composer
@@ -229,6 +231,8 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
         saving: false,
         copied: false,
         error: null,
+        action: null,
+        moreOpen: false,
       });
     };
 
@@ -251,6 +255,8 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
         saving: false,
         copied: false,
         error: null,
+        action: null,
+        moreOpen: false,
       });
     };
 
@@ -308,7 +314,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
   // Stage 1 → 2: swap the toolbar for the composer in place. Re-places from the
   // retained selection rect (composer's below-first preference) and bumps openId
   // so the autofocus effect focuses the freshly rendered textarea.
-  function goToComposer() {
+  function goToComposer(action: PopoverState["action"] = null) {
     const current = popoverRef.current;
     const iframe = iframeRef.current;
     if (current == null || current.stage !== "toolbar" || iframe == null) return;
@@ -322,6 +328,8 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
       openId: openIdRef.current,
       copied: false,
       error: null,
+      action,
+      moreOpen: false,
     });
   }
 
@@ -350,7 +358,14 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
   function save() {
     const current = popoverRef.current;
     if (current == null || current.saving) return;
-    const body = current.body.trim();
+    const defaultQuestions: Record<NonNullable<PopoverState["action"]>, string> = {
+      explain: "Explain this selection.",
+      deepen: "Go deeper on this selection.",
+      simplify: "Explain this selection more simply.",
+      visualise: "Visualise this selection.",
+      change: "Change this part of the artifact.",
+    };
+    const body = current.body.trim() || (current.action == null ? "" : defaultQuestions[current.action]);
     if (body.length === 0) return;
 
     setPopover({ ...current, saving: true, error: null });
@@ -382,12 +397,13 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
 
   // Stage 1: the compact action toolbar for a fresh selection.
   if (popover.stage === "toolbar") {
+    const preview = popover.anchor.quote?.exact?.trim() ?? "Selected content";
     return (
       <div
         ref={popoverElRef}
         role="toolbar"
         aria-label="Selection actions"
-        class="cfy-toolbar fixed z-50"
+        class="cfy-toolbar fixed z-50 flex w-[310px] flex-col items-stretch"
         style={positionStyle}
         onMouseDown={(e) => e.stopPropagation()}
       >
@@ -401,13 +417,21 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
           </span>
         ) : (
           <>
-            <button type="button" onClick={goToComposer} class="cfy-btn cfy-btn-ghost">
-              Comment
-            </button>
-            <span class="cfy-toolbar-sep" aria-hidden="true" />
-            <button type="button" onClick={copySelection} class="cfy-btn cfy-btn-ghost">
-              Copy
-            </button>
+            <p class="max-w-full truncate px-2 pt-1 text-[9px] text-muted" title={preview}>“{preview}”</p>
+            <div class="flex items-center px-1 pb-1">
+              <button type="button" onClick={() => goToComposer("explain")} class="cfy-btn cfy-btn-ghost">Explain</button>
+              <button type="button" onClick={() => goToComposer("deepen")} class="cfy-btn cfy-btn-ghost">Deepen</button>
+              <button type="button" onClick={() => goToComposer(null)} class="cfy-btn cfy-btn-ghost">Comment</button>
+              <div class="relative">
+                <button type="button" aria-expanded={popover.moreOpen} onClick={() => setPopover((current) => current == null ? null : { ...current, moreOpen: !current.moreOpen })} class="cfy-btn cfy-btn-ghost">More</button>
+                {popover.moreOpen && <div class="cfy-popover absolute right-0 top-full z-10 mt-1 w-36 p-1" role="menu" aria-label="More selection actions">
+                  <button type="button" role="menuitem" onClick={() => goToComposer("simplify")} class="cfy-btn cfy-btn-ghost w-full justify-start">Simplify</button>
+                  <button type="button" role="menuitem" onClick={() => goToComposer("visualise")} class="cfy-btn cfy-btn-ghost w-full justify-start">Visualise</button>
+                  <button type="button" role="menuitem" onClick={() => goToComposer("change")} class="cfy-btn cfy-btn-ghost w-full justify-start">Change</button>
+                  <button type="button" role="menuitem" onClick={copySelection} class="cfy-btn cfy-btn-ghost w-full justify-start">Copy</button>
+                </div>}
+              </div>
+            </div>
           </>
         )}
       </div>
@@ -415,7 +439,8 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
   }
 
   // Stage 2: the comment composer.
-  const label = popover.kind === "selection" ? "Comment on selection" : "Comment on element";
+  const actionLabels = { explain: "Explain selection", deepen: "Deepen selection", simplify: "Simplify selection", visualise: "Visualise selection", change: "Change selection" } as const;
+  const label = popover.action == null ? (popover.kind === "selection" ? "Comment on selection" : "Comment on element") : actionLabels[popover.action];
 
   return (
     <div
@@ -431,7 +456,7 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
         ref={textareaRef}
         value={popover.body}
         rows={3}
-        placeholder="Add a comment…"
+        placeholder={popover.action == null ? "Add a comment…" : "Add detail or ask with the suggested request…"}
         disabled={popover.saving}
         onInput={(e) =>
           setPopover((prev) =>
@@ -463,10 +488,10 @@ export function ArtifactCommentLayer({ threadId, artifactVersion, iframeRef }: P
         <button
           type="button"
           onClick={save}
-          disabled={popover.saving || popover.body.trim().length === 0}
+          disabled={popover.saving || (popover.action == null && popover.body.trim().length === 0)}
           class="cfy-btn cfy-btn-primary px-2.5 py-0.5"
         >
-          {popover.saving ? "Adding…" : "Add comment"}
+          {popover.saving ? "Adding…" : popover.action == null ? "Add comment" : "Add request"}
         </button>
       </div>
     </div>
