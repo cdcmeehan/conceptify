@@ -145,3 +145,13 @@ awaits a real API key in Settings.
 Parked ideas: `docs/future-improvements.md` (⌘K + FTS search, model picker
 at ask time, version diffing, streaming answers). Phase-2 backlog:
 `conceptify-qmy`.
+
+## 2026-07-11 — Phase 2 concurrency policy
+
+Accepted the run concurrency and write-conflict contract
+(`conceptify-k9z.1`; `docs/concurrency-policy.md`): durable queued/starting/
+throttled/cancelling states, configurable provider pools, FIFO plus
+cross-project fairness, honest restart recovery, concurrent exploration,
+serialized same-thread mutation, and mandatory stale-base refusal before an
+artifact version can publish. This decision unblocks the scheduler, activity,
+notification, and safe compare/apply work in the concurrency epic.
