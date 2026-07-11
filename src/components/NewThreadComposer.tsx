@@ -6,6 +6,7 @@ import { useEffect } from "preact/hooks";
 import type { AskQuestionDraft, AskSubmissionStatus } from "../store/appStore";
 import { appStore, useAppStore } from "../store/appStore";
 import { ModelOverridePicker } from "./ModelOverridePicker";
+import { ResponseProfilePicker } from "./ResponseProfilePicker";
 
 const STATUS_LABEL: Record<AskSubmissionStatus, string> = {
   submitting: "Submitting",
@@ -129,6 +130,13 @@ export function NewThreadComposer({
           rows={3}
           autoFocus
           class="cfy-input resize-y"
+        />
+        <ResponseProfilePicker
+          question={draft.question}
+          intent={draft.responseIntent}
+          skillMode={draft.skillMode}
+          selectedSkillIds={draft.selectedSkillIds}
+          onChange={(patch) => appStore.updateAskDraft(projectId, patch)}
         />
         <div class="flex items-center justify-between gap-2">
           <ModelOverridePicker
@@ -279,6 +287,16 @@ function QuestionSlip({
         class="w-full resize-y bg-transparent text-[11px] leading-relaxed text-ink outline-none"
         aria-label={`Question ${index + 1}`}
       />
+      <div class="mt-1.5">
+        <ResponseProfilePicker
+          compact
+          question={item.question}
+          intent={item.responseIntent}
+          skillMode={item.skillMode}
+          selectedSkillIds={item.selectedSkillIds}
+          onChange={onChange}
+        />
+      </div>
       <div class="mt-1 flex items-center justify-between gap-2">
         <ModelOverridePicker
           purpose="inAppAsk"

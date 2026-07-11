@@ -134,6 +134,9 @@ export interface AskQuestionDraft {
   title: string;
   question: string;
   modelOverride: string | null;
+  responseIntent: api.ResponseIntent;
+  skillMode: "auto" | "none" | "manual";
+  selectedSkillIds: string[];
 }
 
 export type AskSubmissionStatus =
@@ -234,6 +237,15 @@ function newAskDraft(): AskQuestionDraft {
     title: "",
     question: "",
     modelOverride: null,
+    responseIntent: {
+      version: 1,
+      depth: "balanced",
+      language: "familiar",
+      visuals: "auto",
+      shape: "auto",
+    },
+    skillMode: "auto",
+    selectedSkillIds: [],
   };
 }
 
@@ -385,7 +397,7 @@ class AppStore {
 
   updateAskDraft(
     projectId: string,
-    patch: Partial<Pick<AskQuestionDraft, "title" | "question" | "modelOverride">>,
+    patch: Partial<Omit<AskQuestionDraft, "id">>,
   ): void {
     const workspace = this.askWorkspace(projectId);
     this.setAskWorkspace(projectId, {
@@ -407,7 +419,7 @@ class AppStore {
   updateStagedAskDraft(
     projectId: string,
     draftId: string,
-    patch: Partial<Pick<AskQuestionDraft, "title" | "question" | "modelOverride">>,
+    patch: Partial<Omit<AskQuestionDraft, "id">>,
   ): void {
     const workspace = this.askWorkspace(projectId);
     this.setAskWorkspace(projectId, {
@@ -439,6 +451,9 @@ class AppStore {
           title: submission.title,
           question: submission.question,
           modelOverride: submission.modelOverride,
+          responseIntent: submission.responseIntent,
+          skillMode: submission.skillMode,
+          selectedSkillIds: submission.selectedSkillIds,
         },
       ],
       submissions: workspace.submissions.filter((item) => item.id !== submissionId),

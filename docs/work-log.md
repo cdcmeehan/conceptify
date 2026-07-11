@@ -248,3 +248,13 @@ The app discovers future sidecars from supported agent skill directories,
 explains missing installations, preserves manual choices, and recommends with
 deterministic in-process scoring; ordinary questions return no recommendation.
 The Tauri/TypeScript API is ready for the progressive composer.
+
+**Progressive response controls (`conceptify-l9w.3`).** The question folio now
+keeps an editorial one-line profile summary in its ordinary fast path and
+expands into native-radio depth, language, visual, and shape choices only on
+demand. A local Skills section distinguishes suggested from manually chosen
+capabilities, explains fit and output changes, supports search and unavailable
+states, and offers an explicit no-skill mode. Profiles persist independently on
+each staged question. Browser QA covered defaults, visual recommendation,
+manual search/choice, no-skill mode, independent multi-question radio groups,
+Escape/focus behavior, narrow single-column layout, and a clean console.
