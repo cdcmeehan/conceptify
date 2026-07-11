@@ -533,3 +533,31 @@ artifacts are never changed. The resulting header is separately labelled as a
 synthesis and links back to each source with the selected-section count. Tests
 cover section roles/excerpts, stored profiles, compatible and mismatched concept
 sets, same-project source validation, and lineage round-tripping.
+
+**Visual learning checkpoint (`conceptify-dqb.7`).** The real built shell,
+current CLI, production HTTP server, real app database, live IPC bridge, and
+production artifact bridge followed an unfamiliar-reader fixture from a plain
+layered overview through the serving-path visual, node semantics, editable next
+branch, exact concept evidence, durable backtracking, expert-profile comparison,
+selected semantic sections, and separately tracked synthesis lineage. No step
+required copying context by hand: source thread/version/anchor, profile, reason,
+and selected sections travelled through durable contracts.
+
+User-visible evidence covered the sticky outline and closed optional depth,
+purpose-first composer choices (including Text only), keyboard Enter activation
+of a next branch, editable no-auto-run launch dialog, concept Map/Evidence list,
+semantic assumption/conclusion checkboxes, highlighted profile differences,
+and source buttons on trail/synthesis results. The comparison remained operable
+at 390×844 with horizontal source recovery, native checkboxes, and a fixed
+synthesis footer. Existing bridge probes supplied focused diagram-node
+Enter/Space/arrow traversal, role/relationship payload, and slide-advance
+suppression evidence.
+
+The checkpoint found and fixed two integration defects. Suggested-question
+list items had pointer handling but lacked keyboard/button semantics; the bridge
+now adds tab order, accessible names, and Enter/Space activation. Long semantic
+excerpts also inflated comparison columns to ~3,146 px; columns are now bounded
+to 300–360 px, yielding two visible 360 px sources at desktop width and a
+deliberate scrollable strip for four-source/narrow layouts. Screenshots were
+captured under `/tmp/dqb-*.png`; controlled checkpoint threads remain in the
+real Conceptify project as inspectable history.

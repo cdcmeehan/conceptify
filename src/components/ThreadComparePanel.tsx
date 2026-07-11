@@ -81,8 +81,8 @@ export function ThreadComparePanel({ projectId, threads, onClose }: { projectId:
         {error != null && <p class="mb-2 rounded-ctl bg-danger-bg p-2 text-xs text-danger">{error}</p>}
         {comparison == null ? <p class="p-8 text-center text-sm text-muted">Choose parallel results to inspect their assumptions, profiles, selected explanations, and conclusions.</p> : <>
           {comparison.warnings.map((warning) => <p class="mb-2 rounded-ctl bg-warn-bg p-2 text-[10px] text-warn">{warning}</p>)}
-          <div class="grid min-w-max gap-3" style={{ gridTemplateColumns: `repeat(${comparison.threads.length}, minmax(260px, 1fr))` }}>
-            {comparison.threads.map((thread) => <article key={thread.thread_id} class="w-[min(76vw,360px)] rounded-ctl border border-line bg-paper p-3 md:w-auto">
+          <div class="grid w-max gap-3" style={{ gridTemplateColumns: `repeat(${comparison.threads.length}, minmax(300px, 360px))` }}>
+            {comparison.threads.map((thread) => <article key={thread.thread_id} class="w-[min(76vw,360px)] min-w-0 rounded-ctl border border-line bg-paper p-3 md:w-auto">
               <h2 class="font-serif text-base font-semibold text-ink">{thread.title}</h2><p class="mt-1 text-[10px] leading-snug text-muted">{thread.question}</p>
               <div class="mt-2 flex flex-wrap gap-1" aria-label="Stored response profile">{thread.profile == null ? <span class="cfy-chip bg-warn-bg text-warn">Profile unavailable</span> : <>{(["depth", "language", "visuals", "shape"] as const).map((dimension) => <span key={dimension} class={`cfy-chip ${differingProfile.has(dimension) ? "bg-warn-bg text-warn" : "bg-well text-muted"}`} title={differingProfile.has(dimension) ? `${dimension} differs across sources` : dimension}>{thread.profile![dimension]}</span>)}</>}</div>
               {thread.concepts.length > 0 && <p class="mt-2 text-[9px] text-muted">Concepts: {thread.concepts.join(" · ")}</p>}

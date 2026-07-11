@@ -423,6 +423,17 @@
     });
   }
 
+  function reportSuggestion(suggestion) {
+    post({
+      type: "suggestion_click",
+      cfy_id: suggestion.getAttribute("data-cfy-id"),
+      question: suggestion.getAttribute("data-cfy-next-question") || "",
+      reason: suggestion.getAttribute("data-cfy-reason") || "Builds on this explanation.",
+      branch: suggestion.getAttribute("data-cfy-branch") || "mechanism",
+      rect: rectOf(suggestion.getBoundingClientRect()),
+    });
+  }
+
   document.addEventListener("click", function (ev) {
     try {
       var sel = document.getSelection();
@@ -433,14 +444,7 @@
       if (suggestion) {
         ev.preventDefault();
         ev.stopPropagation();
-        post({
-          type: "suggestion_click",
-          cfy_id: suggestion.getAttribute("data-cfy-id"),
-          question: suggestion.getAttribute("data-cfy-next-question") || "",
-          reason: suggestion.getAttribute("data-cfy-reason") || "Builds on this explanation.",
-          branch: suggestion.getAttribute("data-cfy-branch") || "mechanism",
-          rect: rectOf(suggestion.getBoundingClientRect()),
-        });
+        reportSuggestion(suggestion);
         return;
       }
       // Don't hijack genuinely interactive artifact elements.
@@ -464,6 +468,9 @@
   for (var diagramIndex = 0; diagramIndex < diagramNodes.length; diagramIndex += 1) {
     var diagramNode = diagramNodes[diagramIndex];
     if (!diagramNode.hasAttribute("tabindex")) diagramNode.setAttribute("tabindex", "0");
+    if (diagramNode.tagName.toLowerCase() !== "svg" && !diagramNode.hasAttribute("role")) {
+      diagramNode.setAttribute("role", "button");
+    }
     if (!diagramNode.hasAttribute("aria-label")) {
       var diagramText = (diagramNode.textContent || "").replace(/\s+/g, " ").trim();
       diagramNode.setAttribute(
@@ -473,11 +480,29 @@
     }
   }
 
+  var suggestionNodes = document.querySelectorAll("[data-cfy-next-question][data-cfy-id]");
+  for (var suggestionIndex = 0; suggestionIndex < suggestionNodes.length; suggestionIndex += 1) {
+    var suggestionNode = suggestionNodes[suggestionIndex];
+    if (!suggestionNode.hasAttribute("tabindex")) suggestionNode.setAttribute("tabindex", "0");
+    if (!suggestionNode.hasAttribute("role")) suggestionNode.setAttribute("role", "button");
+    if (!suggestionNode.hasAttribute("aria-label")) {
+      suggestionNode.setAttribute("aria-label", suggestionNode.getAttribute("data-cfy-next-question"));
+    }
+  }
+
   document.addEventListener("keydown", function (ev) {
     try {
       var target = ev.target instanceof Element ? ev.target : null;
       var host = target && target.closest("[data-cfy-id]");
-      if (!host || !diagramRole(host) || isInteractiveTarget(target)) return;
+      if (!host) return;
+      var suggestion = host.closest("[data-cfy-next-question][data-cfy-id]");
+      if (suggestion && (ev.key === "Enter" || ev.key === " ")) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        reportSuggestion(suggestion);
+        return;
+      }
+      if (!diagramRole(host) || isInteractiveTarget(target)) return;
       if (ev.key === "Enter" || ev.key === " ") {
         ev.preventDefault();
         ev.stopPropagation();

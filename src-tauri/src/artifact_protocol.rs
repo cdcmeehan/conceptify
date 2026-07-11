@@ -814,6 +814,9 @@ mod tests {
         for outline in ["cfy-outline", "aria-current", "hashchange", "popstate", "beforematch"] {
             assert!(BRIDGE_TAG.contains(outline), "bridge must support layered outline {outline:?}");
         }
+        for suggestion in ["data-cfy-next-question", "reportSuggestion", "suggestionNodes"] {
+            assert!(BRIDGE_TAG.contains(suggestion), "bridge must support keyboard suggestions {suggestion:?}");
+        }
         for state in ["data-cfy-hl-state", "answered", "saved"] {
             assert!(BRIDGE_TAG.contains(state), "bridge must distinguish highlight state {state:?}");
         }
