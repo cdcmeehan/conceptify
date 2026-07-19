@@ -876,6 +876,25 @@ export function setArtifactTheme(theme: ArtifactTheme): Promise<void> {
   return invoke<void>("set_artifact_theme", { theme });
 }
 
+/** The explainer-video offer preference (video epic conceptify-z9y). `ask` is
+ *  the default (offer once when a video is warranted); `auto` includes a
+ *  Remotion clip without asking; `never` suppresses offers (an explicit video
+ *  request in the question still wins). Consumed by the authoring skill. */
+export type VideoMode = "ask" | "auto" | "never";
+
+/** Read the chosen video mode. Stored in its own settings row (not the
+ *  agent-settings blob), so a settings reset never disturbs it; an unset mode
+ *  resolves to `ask`. */
+export function getVideoMode(): Promise<VideoMode> {
+  return invoke<VideoMode>("get_video_mode");
+}
+
+/** Persist the chosen video mode. Rejects (user-facing message) on an unknown
+ *  id. Emits `settings-changed` on success. */
+export function setVideoMode(mode: VideoMode): Promise<void> {
+  return invoke<void>("set_video_mode", { mode });
+}
+
 // ---------------------------------------------------------------------------
 // Model catalog + routing options (epic conceptify-e7m — beads e7m.6/e7m.7).
 //

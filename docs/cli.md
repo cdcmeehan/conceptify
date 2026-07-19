@@ -47,7 +47,7 @@ The CLI reads these files written by the server:
 
 ### `conceptify status`
 
-Prints app health, version, bound port, and the chosen artifact theme as JSON. Useful for agent scripts to verify the app is available; the artifact-authoring skill reads `artifactTheme` here in one call at authoring time (epic conceptify-89k, bead 89k.2).
+Prints app health, version, bound port, and the author-time display settings (artifact theme + video mode) as JSON. Useful for agent scripts to verify the app is available; the artifact-authoring skill reads `artifactTheme` and `videoMode` here in one call at authoring time (epic conceptify-89k, bead 89k.2; epic conceptify-z9y, bead z9y.5).
 
 **Output (stdout):**
 
@@ -57,16 +57,17 @@ Prints app health, version, bound port, and the chosen artifact theme as JSON. U
   "status": "ok",
   "version": "0.1.0",
   "port": 4477,
-  "artifactTheme": "manuscript"
+  "artifactTheme": "manuscript",
+  "videoMode": "ask"
 }
 ```
 
-`artifactTheme` is one of `manuscript` | `blueprint` | `sketchbook` (defaults to `manuscript` when unset). It is read via the authenticated `GET /api/v1/settings/display` endpoint after the health probe; if that read fails (health already proved liveness), `status` degrades to `manuscript` and prints a warning to stderr rather than failing.
+`artifactTheme` is one of `manuscript` | `blueprint` | `sketchbook` (defaults to `manuscript` when unset). `videoMode` is one of `ask` | `auto` | `never` (defaults to `ask` when unset) — the skill's explainer-video offer preference. Both are read via the authenticated `GET /api/v1/settings/display` endpoint after the health probe; if that read fails (health already proved liveness), `status` degrades to the defaults (`manuscript` / `ask`) and prints a warning to stderr rather than failing.
 
 **Errors (stderr):**
 
 - `App not responding; attempting to launch...` — printed when the initial health probe fails.
-- `warning: could not read artifact theme (<reason>); assuming manuscript` — printed when the display-settings read fails after a healthy probe.
+- `warning: could not read display settings (<reason>); assuming manuscript / ask` — printed when the display-settings read fails after a healthy probe.
 - `Error: app did not become healthy within 10s` — printed when launch/polling times out.
 - `Error: failed to launch app: <reason>` — printed when `open -a Conceptify` fails.
 

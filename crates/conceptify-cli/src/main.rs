@@ -366,9 +366,10 @@ fn fail(msg: impl AsRef<str>) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// `conceptify status` — prints app/API health, version, and the chosen
-/// artifact theme as JSON. The theme (bead conceptify-89k.2) is the skill's
-/// cheap one-call read of the app-level display setting at authoring time.
+/// `conceptify status` — prints app/API health, version, and the author-time
+/// display settings (artifact theme + video mode) as JSON. These (beads
+/// conceptify-89k.2 and z9y.5) are the skill's cheap one-call read of the
+/// app-level display settings at authoring time.
 fn cmd_status() -> ExitCode {
     match ensure_app_healthy() {
         Ok(port) => {
@@ -379,17 +380,17 @@ fn cmd_status() -> ExitCode {
                     // Fold in the author-time display settings via the authed
                     // endpoint. Best-effort: health already proved liveness, so
                     // a settings read hiccup must not sink `status` — it degrades
-                    // to the default theme (with a stderr note) rather than
-                    // failing the whole command.
-                    let artifact_theme =
+                    // to the defaults (with a stderr note) rather than failing the
+                    // whole command.
+                    let (artifact_theme, video_mode) =
                         match authed_get::<DisplaySettingsResponse>(port, "/api/v1/settings/display")
                         {
-                            Ok(d) => d.artifact_theme,
+                            Ok(d) => (d.artifact_theme, d.video_mode),
                             Err(e) => {
                                 eprintln!(
-                                    "warning: could not read artifact theme ({e}); assuming manuscript"
+                                    "warning: could not read display settings ({e}); assuming manuscript / ask"
                                 );
-                                "manuscript".to_string()
+                                ("manuscript".to_string(), "ask".to_string())
                             }
                         };
                     emit(&json!({
@@ -398,6 +399,7 @@ fn cmd_status() -> ExitCode {
                         "version": health.version,
                         "port": port,
                         "artifactTheme": artifact_theme,
+                        "videoMode": video_mode,
                     }))
                 }
                 Err(e) => {
