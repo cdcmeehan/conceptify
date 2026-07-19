@@ -27,6 +27,7 @@ pub fn build_router<R: tauri::Runtime>(state: ApiState<R>) -> Router {
         .merge(super::projects_routes::router())
         .merge(super::threads_routes::router())
         .merge(super::artifacts_routes::router())
+        .merge(super::assets_routes::router())
         .merge(super::comments_routes::router())
         .merge(super::open_routes::router())
         .merge(super::catalog_routes::router())

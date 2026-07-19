@@ -298,10 +298,6 @@ Each warning is printed as `warning: <code>: <message>` (agent-visible).
 
 ### `conceptify save-asset --thread <id> --file <path>`
 
-> **Status: contract reserved, not yet implemented.** Ships with the
-> video epic's app-side bead (conceptify-z9y.6); documented here as the
-> fixed shape the skill's render pipeline builds against.
-
 Upload a video clip into a thread's asset storage (artifact-spec §1.4;
 maps to `PUT /api/v1/threads/:thread_id/assets/:sha256`). Run **before**
 `save-artifact` for any artifact whose HTML references the clip — the

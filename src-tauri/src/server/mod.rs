@@ -12,6 +12,7 @@
 //! added to `routes.rs` as the domain model lands.
 
 mod artifacts_routes;
+mod assets_routes;
 mod auth;
 mod catalog_routes;
 mod comments_routes;

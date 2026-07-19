@@ -55,7 +55,16 @@
 //! (`<img src>` in particular). This handler therefore serves exactly one
 //! document per request and nothing else — artifacts are self-contained by
 //! spec (inline SVG, `data:` URIs), so no subresource ever loads via
-//! `artifact://`. Don't build anything that relies on that changing.
+//! `artifact://`. Don't build anything that relies on that changing **on
+//! this scheme**.
+//!
+//! The one sanctioned exception lives on a *separate* scheme: `cfy-asset://`
+//! (`crate::asset_protocol`, epic conceptify-z9y) serves §1.4 video clips as
+//! subresources with full HTTP Range semantics. That path was prototyped in
+//! a real WKWebView harness (`prototypes/wkwebview-video-range/`, z9y.1) and
+//! works precisely because media loads go through AVFoundation's Range-driven
+//! loader, not the wry #168-affected image path — the "no subresources"
+//! invariant here is scoped to `artifact://`, not superseded by it.
 
 use std::fs;
 use std::io;
@@ -72,11 +81,15 @@ use crate::db::DbHandle;
 /// the contract: authors treat this as the runtime environment, so any
 /// change here must go through the spec first (and the §7.1 allowlist /
 /// `artifacts::CDN_ALLOWLIST` alongside).
+/// `media-src cfy-asset://localhost` (host form, prototype-verified in
+/// z9y.1) admits exactly the §1.4 video-asset scheme — no `data:`, no
+/// `http(s)` media.
 pub const CSP: &str = "default-src 'none'; \
      script-src 'unsafe-inline' https://cdn.jsdelivr.net; \
      style-src 'unsafe-inline' https://cdn.jsdelivr.net; \
      font-src data: https://cdn.jsdelivr.net; \
      img-src data:; \
+     media-src cfy-asset://localhost; \
      connect-src 'none'";
 
 /// Attribute marking the injected bridge script tag. `data-cfy-*` is a
@@ -191,8 +204,9 @@ impl ServeError {
 
 /// `true` iff `s` is a safe single path segment: our conservative charset
 /// (no `/`, `\`, `.`, `%`, …) structurally rules out traversal, encoding
-/// tricks, and hidden-file names.
-fn is_safe_segment(s: &str) -> bool {
+/// tricks, and hidden-file names. `pub(crate)`: the `cfy-asset://` handler
+/// (`crate::asset_protocol`) applies the identical discipline.
+pub(crate) fn is_safe_segment(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 128
         && s.bytes()
@@ -882,7 +896,8 @@ mod tests {
             header_str(&res, header::CONTENT_SECURITY_POLICY),
             "default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; \
              style-src 'unsafe-inline' https://cdn.jsdelivr.net; \
-             font-src data: https://cdn.jsdelivr.net; img-src data:; connect-src 'none'"
+             font-src data: https://cdn.jsdelivr.net; img-src data:; \
+             media-src cfy-asset://localhost; connect-src 'none'"
         );
         assert_eq!(
             header_str(&res, header::CONTENT_TYPE),

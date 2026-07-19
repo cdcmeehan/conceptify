@@ -243,6 +243,25 @@ pub struct SaveArtifactErrorResponse {
     pub errors: Vec<ArtifactIssue>,
 }
 
+/// Success response from `PUT /api/v1/threads/{thread_id}/assets/{sha256}`
+/// (artifact-spec §1.4 / §8.3; epic conceptify-z9y). The request body is the
+/// raw clip bytes — see docs/api.md. Idempotent: a re-upload of an already
+/// stored asset returns this same shape without rewriting anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveAssetResponse {
+    pub thread_id: String,
+    /// The verified content address (equals the URL's `:sha256`).
+    pub sha256: String,
+    /// Size of the stored clip in bytes.
+    pub bytes: u64,
+    /// The canonical `cfy-asset://localhost/<thread-id>/<sha256>.mp4` URL —
+    /// exactly what belongs in the artifact's `<video src>`.
+    pub url: String,
+    /// Spec §8.3 warnings (`W-ASSET-RES`, `W-ASSET-LONG`) — the asset was
+    /// stored despite these.
+    pub warnings: Vec<ArtifactIssue>,
+}
+
 // Open / focus API types (PRD §5.2 `conceptify open`)
 
 /// Request to focus the app on a project or thread (`POST /api/v1/open`).
