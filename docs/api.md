@@ -60,7 +60,7 @@ webview updates live instead of polling. The frontend subscribes with
 | `run-state-changed` | durable run scheduler | `{ run_id: string, thread_id: string, status: string }` |
 | `run-finished` | agent-run engine (`runs` module, not an HTTP route) | `{ run_id: string, thread_id: string, status: string }` |
 | `thread-updated` | flow layer (`flows` module, not an HTTP route): thread status changes owned by the run lifecycle — apply-mode `updating` ↔ `ready`, and in-app-ask generation `generating` → `error` (or `generating` again on Retry), PRD §4 | `{ project_id: string, thread_id: string, status: string }` |
-| `settings-changed` | `set_agent_settings` / `reset_agent_settings` (Tauri commands, not HTTP) | `null` (no payload) |
+| `settings-changed` | `set_agent_settings` / `reset_agent_settings` / `set_openrouter_api_key` / `set_local_endpoint_api_key` / `set_artifact_theme` (Tauri commands, not HTTP) | `null` (no payload) |
 
 `artifact-updated` is the viewer's live-refresh trigger (PRD N2: save →
 visible refresh < 500ms): the frontend reloads the artifact iframe for
@@ -641,6 +641,23 @@ thread questions and artifact provenance are never rewritten.
   `settings.rs`). Validation: no embedded whitespace/control characters, with
   an error that never echoes the value. Emits `settings-changed`.
 
+**Artifact theme (epic conceptify-89k, bead 89k.2):**
+
+- `get_artifact_theme {}` → `string` — the chosen explanation-artifact theme,
+  one of `manuscript` | `blueprint` | `sketchbook`. An absent value yields
+  `manuscript` (the default, byte-identical to the current scaffold). Stored in
+  its own `artifact.theme` settings row (a namespaced row like the OpenRouter
+  key — never inside the `agent_settings` blob), so `reset_agent_settings`
+  leaves the theme intact.
+- `set_artifact_theme { theme }` → `void` — persist the theme (validated: an
+  unknown id → user-facing error, never stored). Emits `settings-changed`. The
+  full token sets and CSS integration each theme names live in
+  `skill/design-system.md` (design record) and land in the artifact CSS via the
+  integration bead 89k.3; this command is only the stored choice.
+
+The same value is exposed to the skill/CLI over HTTP via
+`GET /api/v1/settings/display` (below) and folded into `conceptify status`.
+
 ## Endpoints
 
 ### `GET /health`
@@ -660,6 +677,30 @@ Response `200 OK`:
   "version": "0.1.0"
 }
 ```
+
+### `GET /api/v1/settings/display`
+
+Authenticated (epic conceptify-89k, bead 89k.2). The skill-facing read of the
+app-level display settings the artifact author needs at generation time — one
+cheap call the skill makes while authoring. Kept separate from the DB-free
+`/health` liveness probe. `conceptify status` calls this after health and folds
+`artifactTheme` into its JSON output.
+
+Response `200 OK`:
+
+```json
+{
+  "artifactTheme": "manuscript"
+}
+```
+
+`artifactTheme` is one of `manuscript` | `blueprint` | `sketchbook` (defaults to
+`manuscript` when unset). The object is the forward-looking home for further
+author-time display settings (e.g. a future `videoMode`).
+
+Errors: `401 Unauthorized` if the bearer token is missing or wrong;
+`500 Internal Server Error` (`{ "error": "settings error" }`) on a DB read
+failure.
 
 ### `GET /api/v1/ping`
 
@@ -1166,6 +1207,72 @@ hand edits deterministic and non-panicking.
 
 Errors: `401` without the bearer token; `404` for an unknown thread or missing
 version; `500` for database or artifact-file read failures.
+
+---
+
+### `PUT /api/v1/threads/:thread_id/assets/:sha256`
+
+> **Status: contract reserved, not yet implemented.** Ships with the
+> video epic's app-side bead (conceptify-z9y.6); documented here so the
+> render pipeline and the artifact spec (§1.4, §8.3) build against a
+> fixed shape.
+
+Authenticated. **save-asset** (artifact-spec §1.4): upload a video clip
+into a thread's content-addressed asset storage, *before* the
+`save-artifact` call whose HTML references it. `:sha256` is the SHA-256
+of the file bytes, 64 lowercase hex.
+
+**Request body: the raw clip bytes** — not JSON, not multipart (same
+rationale as save-artifact: nothing but the bytes, and the CLI just
+streams the file). Send `Content-Type: video/mp4` (not enforced). Bodies
+over the transport cap (60 MiB, shared with save-artifact) get a bare
+`413`; the spec's 20 MiB cap (`E-ASSET-SIZE`) applies below that with a
+structured error.
+
+**Validation** runs the reserved upload-time rule set from
+[docs/artifact-spec.md](artifact-spec.md) §8.3: the server re-hashes the
+body (`E-ASSET-HASH` on mismatch) and sniffs/enforces the §1.4 encoding
+budgets (`E-ASSET-TYPE`, `E-ASSET-SIZE`, `E-ASSET-DURATION`; warnings
+`W-ASSET-RES`, `W-ASSET-LONG`). Error and warning shapes match
+save-artifact (`{ "error", "code", "errors" }` on 422; `"warnings"` in
+the success JSON).
+
+**Storage**: written to
+`~/Documents/conceptify/artifacts/<project-id>/threads/<thread-slug>/assets/<sha256>.mp4`
+via temp + rename (PRD N4), then treated as **immutable** —
+content-addressing makes re-upload idempotent (a `PUT` for an already
+stored asset returns `200` without rewriting) and cross-version dedup
+free (a follow-up version referencing the same clip costs nothing). No
+supersede-time GC — old artifact versions must keep rendering; the
+assets directory is removed with the thread directory on thread
+deletion.
+
+Response `200 OK`:
+
+```json
+{
+  "thread_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "bytes": 8388608,
+  "url": "cfy-asset://localhost/7c9e6679-7425-40de-944b-e07fc1f90ae7/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.mp4",
+  "warnings": []
+}
+```
+
+`url` is exactly what belongs in the artifact's `<video src>` (the
+subsequent save-artifact enforces the reference with `E-ASSET-REF`).
+
+Side effects: **none** — no thread status change, no event.
+`artifact-updated` on the subsequent save-artifact remains the viewer's
+refresh trigger.
+
+Errors: `401` missing/wrong bearer token; `404` unknown thread; `413`
+over the transport cap; `422` validation hard failure (nothing stored);
+`500` on database or disk error.
+
+CLI: `conceptify save-asset --thread <id> --file <path>` (see
+docs/cli.md) — hashes the file locally, issues this `PUT`, and prints
+the returned `url`.
 
 ---
 

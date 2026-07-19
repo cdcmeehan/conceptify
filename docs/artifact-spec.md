@@ -41,7 +41,12 @@ An artifact is a **single, self-contained `.html` file**.
 - **No local file references, anywhere.** No relative URLs, no `file://`
   URLs, no references to files in the source repo. There is no "next to
   the file" — the artifact is copied into central storage (§5.6) and must
-  survive alone, indefinitely (N6).
+  survive alone, indefinitely (N6). **Single carve-out**: a video figure
+  (§1.4) MAY reference its clip via the reserved
+  `cfy-asset://localhost/<thread-id>/<sha256>.mp4` scheme — the clip is
+  uploaded to central storage via the assets API (docs/api.md) *before*
+  `save-artifact` and never lives in a source repo. Everything else
+  stays banned.
 - **Network references** are permitted ONLY from the Tier-2 pinned-CDN
   allowlist (§7), and every network-dependent feature MUST degrade
   gracefully offline (§7.2). Tier-0/1 content MUST render correctly with
@@ -114,6 +119,101 @@ Conceptify incrementally indexes the latest saved version of each thread so the
 project map can jump back to exact evidence. Users may pin relationships and
 explicitly merge duplicate concepts or distinguish an overloaded mention.
 
+### 1.4 Video figures (`cfy-video`)
+
+A short explainer video MAY accompany a section when the concept is
+genuinely temporal — state evolution, request lifecycles, pipelines,
+protocol rounds — never as decoration. Videos are strictly **additive**:
+the artifact MUST remain a complete, coherent explanation with the video
+absent (the same complete-static-fallback principle as §1). An artifact
+SHOULD contain at most **2** video figures.
+
+Unlike every other resource, the clip itself is NOT embedded in the
+HTML. It is uploaded to thread-scoped, content-addressed central storage
+via the assets API (`PUT /api/v1/threads/:thread_id/assets/:sha256`, or
+`conceptify save-asset` — see docs/api.md) **before** `save-artifact`,
+and referenced through the reserved scheme (the §1 carve-out):
+
+```
+cfy-asset://localhost/<thread-id>/<sha256>.mp4
+
+thread-id = [A-Za-z0-9_-]{1,128}    ; the artifact's own thread
+sha256    = 64 lowercase hex        ; SHA-256 of the clip's bytes
+```
+
+The URL MUST name the thread the artifact is being saved to, and an
+asset already uploaded for that thread (`E-ASSET-REF`, §8.1).
+
+Markup contract:
+
+```html
+<figure class="cfy-video" data-cfy-id="vid-request-lifecycle">
+  <video controls preload="metadata" playsinline
+         poster="data:image/jpeg;base64,…"
+         src="cfy-asset://localhost/<thread-id>/<sha256>.mp4"></video>
+  <details class="cfy-details cfy-video-transcript">
+    <summary>Transcript</summary>
+    <p>…the full narration, verbatim…</p>
+  </details>
+  <figcaption><strong>One request, start to finish.</strong> …</figcaption>
+</figure>
+```
+
+- The wrapper MUST be a `<figure class="cfy-video">` carrying a stable
+  `data-cfy-id` (§4; `vid-` prefix SHOULD), so readers can comment on
+  the video like any figure. §1.3 concept metadata applies as usual.
+- The `<video>` element MUST have `controls`, SHOULD have
+  `preload="metadata"` and `playsinline`, and MUST NOT have `autoplay`,
+  `loop`, or any muted-autoplay arrangement (`W-VIDEO-AUTOPLAY`) —
+  motion starts only on user intent, consistent with the D6 /
+  reduced-motion rules.
+- The clip URL goes in `src` or in a single `<source>` child — exactly
+  one clip per figure. No multi-source fallback chains: there is exactly
+  one permitted encoding (below), so there is nothing to fall back to.
+- **The poster is MANDATORY** (`W-VIDEO-POSTER`): `poster` MUST be an
+  embedded `data:` URI raster image (JPEG or WebP; SHOULD ≤ 150 KiB —
+  it counts against the normal §8 file-size caps). The poster is what
+  offline, plain-browser, and print readers see (§2), so it MUST be a
+  meaningful frame (first frame or a title frame), not a blank
+  placeholder.
+- **The transcript is MANDATORY** (`W-VIDEO-TRANSCRIPT`): a
+  `<details class="cfy-details cfy-video-transcript">` with a
+  `<summary>` (e.g. "Transcript") MUST immediately follow the `<video>`
+  element inside the figure (only whitespace between them). Its body
+  MUST carry the complete narration verbatim and/or a prose description
+  of what the video shows — sufficient that a reader who never plays
+  (or never receives) the video misses nothing. This is the
+  accessibility floor, and it keeps the video's content readable with
+  JS disabled, searchable, and indexable.
+- **`<figcaption>` is MANDATORY** (`W-VIDEO-CAPTION`), same style and
+  rules as every other figure.
+- Captions: a `<track kind="captions">` with a `data:`-URI WebVTT body
+  MAY be included. WKWebView's handling of `data:`-URI text tracks is
+  not yet verified, so a track is an enhancement only — the transcript
+  MUST carry the full content regardless.
+
+**Encoding budgets** (enforced at asset-upload time — §8.3, so a
+violating clip is rejected before the artifact referencing it is ever
+saved):
+
+| | MUST (upload rejects) | SHOULD |
+|---|---|---|
+| Container / video codec | MP4 (ISO BMFF); H.264, High profile or lower, level ≤ 4.0, 8-bit `yuv420p` | `moov` before `mdat` (faststart) |
+| Audio | AAC-LC ≤ 2 channels, or no audio track | — |
+| Size | ≤ 20 MiB | — |
+| Duration | ≤ 120 s | 30–90 s (`W-ASSET-LONG` above 90) |
+| Resolution / frame rate | — | ≤ 1280×720 (`W-ASSET-RES`), ≤ 30 fps |
+
+No WebM, HEVC, or AV1 — H.264 is the floor every render target plays
+(WKWebView WebM playback is not dependable; HEVC/AV1 decode is
+hardware-gated).
+
+**Print/export**: printed output shows the poster with the playback
+controls hidden, and the transcript body exposed (the scaffold's
+existing `<details>` print rule already expands it). The exported
+self-contained copy (§2) replaces the `cfy-asset://` URL with a `data:`
+URI so the file plays anywhere.
+
 ## 2. Rendering targets (FR-3.2)
 
 Every artifact MUST render correctly in **both**:
@@ -128,6 +228,16 @@ Safari, don't use it. Examples of things to avoid: Chromium-only CSS
 (e.g. anchor positioning pre-Safari-26 behavior differences),
 `showOpenFilePicker` and friends, non-standard `-webkit-`/`-blink-`
 extensions.
+
+Video figures (§1.4) are the one place the two targets diverge **by
+design**: in-app, the `cfy-asset://` clip is served by a Range-capable
+protocol handler and plays normally; in a standalone browser the scheme
+is unresolvable, so the reader sees the embedded poster, caption, and
+transcript — still a complete explanation. Full standalone playback
+comes from an **exported self-contained copy**, which the app produces
+on demand by inlining the clip as a `data:` URI. Export copies are
+derived output, not authored artifacts — they are never re-validated
+and never saved back.
 
 WKWebView specifics (Appendix A) that MUST inform authoring:
 
@@ -157,8 +267,14 @@ script-src  'unsafe-inline' https://cdn.jsdelivr.net;
 style-src   'unsafe-inline' https://cdn.jsdelivr.net;
 font-src    data: https://cdn.jsdelivr.net;
 img-src     data:;
+media-src   cfy-asset://localhost;
 connect-src 'none';
 ```
+
+(`media-src` admits exactly the §1.4 video-asset scheme and nothing
+else — no `data:`, no `http(s)`. The implementation's
+`artifact_protocol::CSP` changes in lockstep with this reference
+policy.)
 
 Consequences your inline JS lives under:
 
@@ -177,8 +293,10 @@ Consequences your inline JS lives under:
 - **No chrome**: `window.open`, top navigation, downloads, `alert` /
   `confirm` / `prompt`, and form submission are all blocked by the sandbox
   flags. Don't rely on any of them.
-- External images/media are blocked by CSP (`img-src data:` only) — use
-  inline SVG or `data:` URIs.
+- External images are blocked by CSP (`img-src data:` only) — use
+  inline SVG or `data:` URIs. Media is limited to the §1.4 video-asset
+  scheme (`media-src cfy-asset://localhost`): no `http(s)` and no
+  `data:` video/audio sources.
 
 Standalone browsers apply none of this, so anything that works in-app
 works in the browser too; author to the in-app constraints.
@@ -227,7 +345,8 @@ positional**: named after the content (`sec-mental-model`,
 when sections are inserted, which corrupts existing comment anchors.
 
 Conventions (SHOULD): `sec-` prefix for headings, `fig-` for
-figures/diagrams; diagram elements are namespaced under their figure id
+figures/diagrams, `vid-` for video figures (§1.4); diagram elements are
+namespaced under their figure id
 with a dot: `<figure-id>.<element>`, e.g. `fig-auth-flow.client`,
 `fig-auth-flow.client-to-gateway` for the edge client→gateway.
 
@@ -442,8 +561,9 @@ scripts) is mandatory: a failed CDN load MUST NOT throw uncaught or leave
 
 ## 8. Validation — the `save-artifact` rule set (FR-3.6, S4)
 
-`save-artifact` runs these checks on the submitted file. There are two
-severities and no others:
+`save-artifact` runs these checks on the submitted file (§8.1–8.2; §8.3
+reserves rule IDs enforced by the assets *upload* endpoint instead).
+There are two severities and no others:
 
 - **HARD FAILURES (`E-*`)**: the artifact is rejected — nothing is
   stored, no version is created, the endpoint returns a non-2xx with
@@ -463,6 +583,7 @@ severities and no others:
 | `E-PARSE` | File is empty, or HTML parsing yields a document whose `<body>` contains no elements. (HTML5 parsers are error-recovering; "unparseable" in practice means "nothing survives parsing".) |
 | `E-EXTERNAL-CODE` | Any code/style-loading reference whose URL fails the §7.1 match rule. Checked positions: `script[src]`; `link[href]` where `rel` contains `stylesheet`, `preload`, or `modulepreload`; and `@import` of an `http(s)` URL inside inline CSS. Relative and `file://` URLs in these positions fail by definition (they can't match the allowlist). |
 | `E-SIZE-MAX` | File exceeds **52,428,800 bytes (50 MiB)**. (Not in the PRD's letter — added as a viewer-protection backstop; the PRD's "size sanity" intent is the 5 MiB warning below.) |
+| `E-ASSET-REF` | A `cfy-asset://` URL, in any resource position, that is **malformed** (grammar: `cfy-asset://localhost/<thread-id>/<sha256>.mp4` with `thread-id` = `[A-Za-z0-9_-]{1,128}`, `sha256` = 64 lowercase hex — §1.4), or names a **different thread** than the one being saved to, or names an asset **not uploaded** for this thread. The existence check runs server-side at save time (like `W-VERSION-MISMATCH`); file-only validators check the grammar only. Preserves the invariant that a saved artifact is complete: every reference it makes resolves. |
 
 ### 8.2 Warnings
 
@@ -483,6 +604,39 @@ severities and no others:
 | `W-SRC-ORPHAN` | A `<!--cfy:src` comment's `for` value doesn't match the `data-cfy-id` of its next non-whitespace sibling element (missing, mismatched, or non-adjacent). |
 | `W-EXTERNAL-REF` | An `http(s)` URL in a non-code resource position — `img[src]`, `srcset`, `video`/`audio`/`source`/`track` `src`, `iframe[src]`, `object`/`embed`, or CSS `url(...)` — regardless of host. These are blocked by the runtime CSP and break offline rendering (N6). |
 | `W-LOCAL-REF` | A relative or `file://` URL in any resource position not already covered by `E-EXTERNAL-CODE`, including relative `<a href>`. These are broken by definition (§1). |
+| `W-VIDEO-POSTER` | A `<video>` element whose `poster` attribute is missing or is not a `data:` URI image (§1.4 — the poster is the offline/print/plain-browser face of the video; without it the figure degrades to a blank hole). |
+| `W-VIDEO-TRANSCRIPT` | A `cfy-video` figure whose `<video>` is not immediately followed (only whitespace between) by a `<details class="cfy-details cfy-video-transcript">` containing a `<summary>` and a non-empty body (§1.4 — the transcript is the accessibility floor). |
+| `W-VIDEO-CAPTION` | A `cfy-video` figure without a non-empty `<figcaption>` (§1.4). |
+| `W-VIDEO-AUTOPLAY` | A `<video>` element carrying `autoplay` or `loop` (§1.4 — motion starts only on user intent). |
+
+`cfy-asset://` URLs are **neither external nor local** for
+`W-EXTERNAL-REF` / `W-LOCAL-REF` purposes: they are the sanctioned
+app-scheme position (§1.4), checked exclusively by `E-ASSET-REF`. The §7
+CDN allowlist is likewise untouched — `cfy-asset://` is an app scheme,
+not an external `http(s)` reference. An `http(s)` URL in a `video`
+`src`, on the other hand, remains `W-EXTERNAL-REF` like any other media
+position.
+
+### 8.3 Reserved: asset-upload rule IDs
+
+The assets endpoint (`PUT /api/v1/threads/:thread_id/assets/:sha256` —
+docs/api.md) enforces the §1.4 encoding budgets **at upload time**,
+before any artifact referencing the asset can be saved. Its rule IDs are
+reserved here so they remain stable and never collide with
+`save-artifact` rules; the endpoint reports them in the same
+`{ "error": …, "code": … }` / `"warnings": […]` shapes as
+`save-artifact`. (These rules are implemented by the assets endpoint,
+not by the artifact validator — this section is the contract for that
+implementation.)
+
+| ID | Condition |
+|---|---|
+| `E-ASSET-HASH` | SHA-256 of the uploaded body ≠ the `:sha256` in the URL. |
+| `E-ASSET-SIZE` | Body exceeds **20,971,520 bytes (20 MiB)**. |
+| `E-ASSET-TYPE` | Not an MP4/H.264 file per the §1.4 budgets, determined by sniffing the container (ISO-BMFF `ftyp`; video `stsd` sample entry `avc1`/H.264 within High profile ≤ level 4.0, 8-bit `yuv420p`; audio, if present, AAC-LC ≤ 2 channels). An unparseable container — including an unreadable `mvhd` — is `E-ASSET-TYPE` (not valid MP4). |
+| `E-ASSET-DURATION` | Duration (from `mvhd`) exceeds **120 s**. |
+| `W-ASSET-RES` | Video resolution exceeds **1280×720**. |
+| `W-ASSET-LONG` | Duration exceeds **90 s**. |
 
 ## 9. Minimal example artifact
 

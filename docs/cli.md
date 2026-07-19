@@ -47,7 +47,7 @@ The CLI reads these files written by the server:
 
 ### `conceptify status`
 
-Prints app health, version, and bound port as JSON. Useful for agent scripts to verify the app is available.
+Prints app health, version, bound port, and the chosen artifact theme as JSON. Useful for agent scripts to verify the app is available; the artifact-authoring skill reads `artifactTheme` here in one call at authoring time (epic conceptify-89k, bead 89k.2).
 
 **Output (stdout):**
 
@@ -56,13 +56,17 @@ Prints app health, version, and bound port as JSON. Useful for agent scripts to 
   "service": "conceptify",
   "status": "ok",
   "version": "0.1.0",
-  "port": 4477
+  "port": 4477,
+  "artifactTheme": "manuscript"
 }
 ```
+
+`artifactTheme` is one of `manuscript` | `blueprint` | `sketchbook` (defaults to `manuscript` when unset). It is read via the authenticated `GET /api/v1/settings/display` endpoint after the health probe; if that read fails (health already proved liveness), `status` degrades to `manuscript` and prints a warning to stderr rather than failing.
 
 **Errors (stderr):**
 
 - `App not responding; attempting to launch...` — printed when the initial health probe fails.
+- `warning: could not read artifact theme (<reason>); assuming manuscript` — printed when the display-settings read fails after a healthy probe.
 - `Error: app did not become healthy within 10s` — printed when launch/polling times out.
 - `Error: failed to launch app: <reason>` — printed when `open -a Conceptify` fails.
 
@@ -292,6 +296,45 @@ Each warning is printed as `warning: <code>: <message>` (agent-visible).
 
 ---
 
+### `conceptify save-asset --thread <id> --file <path>`
+
+> **Status: contract reserved, not yet implemented.** Ships with the
+> video epic's app-side bead (conceptify-z9y.6); documented here as the
+> fixed shape the skill's render pipeline builds against.
+
+Upload a video clip into a thread's asset storage (artifact-spec §1.4;
+maps to `PUT /api/v1/threads/:thread_id/assets/:sha256`). Run **before**
+`save-artifact` for any artifact whose HTML references the clip — the
+save-artifact validator rejects references to assets that were never
+uploaded (`E-ASSET-REF`).
+
+The CLI computes the file's SHA-256 locally, streams the raw bytes to
+the endpoint, and prints the canonical `cfy-asset://` URL — the exact
+string that belongs in the artifact's `<video src>`. Re-uploading an
+already stored clip is idempotent (content-addressed).
+
+**Output (stdout):**
+
+```json
+{
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "bytes": 8388608,
+  "url": "cfy-asset://localhost/7c9e6679-…/e3b0c442…b855.mp4",
+  "warningsCount": 0
+}
+```
+
+**Warnings (stderr):** upload-time spec warnings (`W-ASSET-RES`,
+`W-ASSET-LONG` — artifact-spec §8.3), printed as
+`warning: <code>: <message>` like save-artifact.
+
+**Errors (stderr, exit 1):** unreadable file; missing flags; validation
+hard failures (HTTP 422 — `E-ASSET-HASH`, `E-ASSET-SIZE`,
+`E-ASSET-TYPE`, `E-ASSET-DURATION`) printed with each violated rule's
+code and message; `thread not found` (HTTP 404); API errors verbatim.
+
+---
+
 ### `conceptify get-context --thread <id>`
 
 Assemble a thread's **run context** for a headless follow-up (PRD §5.2, §5.5;
@@ -468,4 +511,5 @@ Shared types (e.g., `HealthResponse`) live in `conceptify-types` and are used by
 
 Every command in the PRD §5.2 table is now implemented: `status`, `doctor`,
 `ensure-project`, `create-thread`, `open`, `save-artifact`, `get-context`,
-`list-comments`, and `resolve-comment`.
+`list-comments`, and `resolve-comment`. `save-asset` is documented above as
+a reserved contract (video epic) and is not yet implemented.

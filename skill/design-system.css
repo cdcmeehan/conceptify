@@ -488,6 +488,28 @@ figcaption {
 }
 figcaption strong { color: var(--cfy-ink); font-weight: 600; }
 
+/* ---- Video figure: <figure class="cfy-video" data-cfy-id="vid-…"> -------
+   <video controls preload="metadata" playsinline poster="data:…">
+   + <details class="cfy-details cfy-video-transcript"> (mandatory
+   transcript, reuses the cfy-details disclosure) + <figcaption>.
+   Same paper/hairline/radius frame as cfy-diagram; the poster is the
+   offline/print face (artifact-spec §1.4).                               */
+.cfy-video video {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: var(--cfy-surface);
+  border: 1px solid var(--cfy-line);
+  border-radius: var(--cfy-radius);
+}
+.cfy-video .cfy-video-transcript {
+  margin: var(--cfy-space-3) 0 0;
+}
+.cfy-video .cfy-video-transcript > summary {
+  font-size: var(--cfy-text-sm);
+  color: var(--cfy-muted);
+}
+
 /* ---- Tables: <div class="cfy-table-wrap"><table class="cfy-table"> ------
    Print-quality: horizontal hairlines only. Add class="cfy-compare" to
    the table when the first column is row headers (comparison tables).   */
@@ -804,4 +826,8 @@ pre.cfy-fallback code { padding-inline: var(--cfy-space-5); }
   .cfy-outline { display: none; }
   .cfy-details:not([open]) > :not(summary) { display: block; }
   .cfy-details > summary::before { display: none; }
+  /* video prints as its poster; hide the playback chrome (WebKit-only
+     pseudo-element — harmless where unsupported). Transcript expansion
+     comes from the cfy-details rules above (artifact-spec §1.4). */
+  .cfy-video video::-webkit-media-controls { display: none; }
 }

@@ -84,12 +84,27 @@ artifact-only rules).
 | `<ul class="cfy-next-questions">` | Two to four semantic next-question branches. Each `<li>` carries the `data-cfy-next-question` contract; show a specific question plus why it follows. |
 | `<figure data-cfy-id="fig-…">` + `<figcaption>` | Figure + caption (caption gets a hairline rule; bold lead-in via `<strong>`). |
 | `<figure class="cfy-diagram">` | Adds the tinted diagram frame; put inline SVG inside. Add `cfy-hand` for the hand-drawn flavor. |
+| `<figure class="cfy-video" data-cfy-id="vid-…">` | Explainer-video figure (artifact-spec §1.4): `<video controls preload="metadata" playsinline>` with a mandatory `data:`-URI poster and a `cfy-asset://` clip URL, then the mandatory transcript, then `<figcaption>`. Frame matches `cfy-diagram` (paper/hairline/radius tokens, theme-aware for free). |
+| `<details class="cfy-details cfy-video-transcript">` | Mandatory transcript disclosure immediately after the `<video>`: full narration verbatim (plus described visuals). Reuses `cfy-details`; summary renders small/muted. Print expands it. |
 | `<div class="cfy-table-wrap">` + `<table class="cfy-table">` | Print-style table (horizontal hairlines only); `<caption>` renders below. Add `cfy-compare` when the first column is `<th scope="row">` row headers. |
 | `<figure class="cfy-listing">` | Code listing wrapper: `<figcaption class="cfy-code-title">` filename bar + the Shiki `<pre>` + optional `<ol class="cfy-code-notes">`. |
 | `<span class="cfy-code-mark">1</span>` | Circled annotation marker inside a code line, explained by the matching `cfy-code-notes` item. |
 | `pre.cfy-fallback` | Tier-2 offline fallback source (artifact-spec §7.2) — dashed frame, reads as content, not error. |
 | `.cfy-reveal` (+ `--cfy-reveal-n: 0,1,2…`) | Staged rise-into-place on load (D6); intro elements only, ≤ ~6 items. |
 | `.cfy-flow` (SVG) | Marching-dash edge flow; dashed stroke at rest. Gated on `prefers-reduced-motion`. |
+
+Video figures: use `cfy-video` **only for genuinely temporal concepts**
+(state evolution, request lifecycles, pipelines, protocol rounds) where
+motion encodes a relationship a static diagram flattens — never as
+decoration, and never as the sole carrier of the explanation. Video
+authoring differs from static figures because delivery differs: the clip
+is **not** in the HTML. It is uploaded to central storage first
+(`conceptify save-asset`) and referenced via the app-served
+`cfy-asset://` scheme; the mandatory `data:`-URI poster + transcript +
+caption are what offline, plain-browser, and print readers get (a
+standalone browser cannot resolve the scheme — full standalone playback
+comes from the app's export-self-contained copy). Full contract,
+including the MP4/H.264 encoding budgets: artifact-spec §1.4.
 
 Table gotcha: `cfy-compare` row headers are `white-space: nowrap`, so a
 long unbreakable row header (e.g. a filesystem path in `<code>`) sets a
