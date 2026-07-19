@@ -9,7 +9,8 @@
 <meta name="cfy:generated-by" content="hand-authored/m2-design-pass">
 <style>
 /* ==========================================================================
-   Conceptify design-system scaffold  (D1–D6, PRD §6)  — v1
+   Conceptify design-system scaffold  (D1–D6, PRD §6)  — v2
+   (v2: explanation themes — blueprint/sketchbook overrides, epic 89k)
    ==========================================================================
    Embedded VERBATIM as the first <style> block of every artifact by the
    Claude Code skill (artifact-spec §1). Self-contained: system font stacks
@@ -139,7 +140,181 @@
     --cfy-diagram-accent-bg:   #46301f;
   }
 }
+
+/* ---- Themes (epic conceptify-89k; token tables: design-system.md) --------
+   The bare :root above IS the `manuscript` theme — frozen baseline, zero
+   change for artifacts with no attribute. `data-cfy-theme` on <html>
+   selects an override set; every artifact ships all three so the app can
+   re-skin old artifacts live (artifact-spec §1.5). Hex values are the
+   89k.1 AA-checked design record — do not re-derive.                      */
+
+/* ---- theme: blueprint — cool, precise, drafted-on-vellum — light ------- */
+:root[data-cfy-theme="blueprint"] {
+  /* headings switch to the sans stack (drafting-table register) */
+  --cfy-font-serif: var(--cfy-font-sans);
+
+  --cfy-paper:   #f7f9fb;
+  --cfy-surface: #eaeff4;
+  --cfy-ink:     #1c2430;
+  --cfy-muted:   #55606e;
+  --cfy-line:    #d3dce4;
+  --cfy-accent:  #2b5f8a;   /* prussian/steel blue */
+  --cfy-mark:    #d8e8f5;
+
+  --cfy-insight:       #74591a;
+  --cfy-insight-bg:    #f0eddc;
+  --cfy-warning:       #a13434;
+  --cfy-warning-bg:    #f8e8e6;
+  --cfy-definition:    #1e6a80;   /* cyan-teal, distinct from the accent */
+  --cfy-definition-bg: #e0eef3;
+
+  --cfy-code-bg:     #eef2f6;
+  --cfy-code-hl:     #dde7f0;
+  --cfy-code-hl-bar: #2b5f8a;
+
+  --cfy-diagram-node:        #eaeff4;
+  --cfy-diagram-node-stroke: #46566a;
+  --cfy-diagram-edge:        #55606e;
+  --cfy-diagram-label:       #1c2430;
+  --cfy-diagram-accent:      #2b5f8a;
+  --cfy-diagram-accent-bg:   #d9e5f0;
+}
+
+/* ---- theme: blueprint — dark (deep navy, not neutral black) ------------ */
+@media (prefers-color-scheme: dark) {
+  :root[data-cfy-theme="blueprint"] {
+    --cfy-paper:   #101923;
+    --cfy-surface: #1a2634;
+    --cfy-ink:     #dce6ef;
+    --cfy-muted:   #94a5b6;
+    --cfy-line:    #2b3a4a;
+    --cfy-accent:  #6aa5d8;
+    --cfy-mark:    #1f3a55;
+
+    --cfy-insight:       #d9c069;
+    --cfy-insight-bg:    #2b2a17;
+    --cfy-warning:       #e89a8f;
+    --cfy-warning-bg:    #382223;
+    --cfy-definition:    #85c7dd;
+    --cfy-definition-bg: #16303c;
+
+    --cfy-code-bg:     #0d151e;
+    --cfy-code-hl:     #1c2f42;
+    --cfy-code-hl-bar: #6aa5d8;
+
+    --cfy-diagram-node:        #1a2634;
+    --cfy-diagram-node-stroke: #7e93a8;
+    --cfy-diagram-edge:        #94a5b6;
+    --cfy-diagram-label:       #dce6ef;
+    --cfy-diagram-accent:      #6aa5d8;
+    --cfy-diagram-accent-bg:   #21405c;
+  }
+}
+
+/* ---- theme: sketchbook — warm, hand-drawn — light ---------------------- */
+:root[data-cfy-theme="sketchbook"] {
+  /* headings take the hand stack; rounder, chunkier shapes */
+  --cfy-font-serif: var(--cfy-font-hand);
+  --cfy-radius:    14px;
+  --cfy-radius-sm: 8px;
+
+  --cfy-paper:   #faf6ec;
+  --cfy-surface: #f1ead9;
+  --cfy-ink:     #292118;
+  --cfy-muted:   #6f6754;
+  --cfy-line:    #ddd3ba;
+  --cfy-accent:  #8a5c12;   /* deep ochre (darkened to pass 4.5:1) */
+  --cfy-mark:    #f2da8f;   /* saturated-yellow highlighter */
+
+  --cfy-insight:       #75570f;
+  --cfy-insight-bg:    #f4e9c8;
+  --cfy-warning:       #9c4423;
+  --cfy-warning-bg:    #f6e4d8;
+  --cfy-definition:    #41597d;   /* ink blue */
+  --cfy-definition-bg: #e8ecf2;
+
+  --cfy-code-bg:     #f2ecda;
+  --cfy-code-hl:     #e8dfc2;
+  --cfy-code-hl-bar: #8a5c12;
+
+  --cfy-diagram-node:        #f1ead9;
+  --cfy-diagram-node-stroke: #5c5138;
+  --cfy-diagram-edge:        #6f6754;
+  --cfy-diagram-label:       #292118;
+  --cfy-diagram-accent:      #8a5c12;
+  --cfy-diagram-accent-bg:   #efe0b8;
+}
+
+/* ---- theme: sketchbook — dark (chalkboard green-black) ----------------- */
+@media (prefers-color-scheme: dark) {
+  :root[data-cfy-theme="sketchbook"] {
+    --cfy-paper:   #141a15;
+    --cfy-surface: #1e2620;
+    --cfy-ink:     #e6e3d5;
+    --cfy-muted:   #a3a892;
+    --cfy-line:    #333e30;
+    --cfy-accent:  #d9b25f;   /* chalk ochre */
+    --cfy-mark:    #4c451d;
+
+    --cfy-insight:       #dcc274;
+    --cfy-insight-bg:    #2e2f18;
+    --cfy-warning:       #e5a08a;
+    --cfy-warning-bg:    #3a2620;
+    --cfy-definition:    #a7c6e0;
+    --cfy-definition-bg: #202e3a;
+
+    --cfy-code-bg:     #101711;
+    --cfy-code-hl:     #253023;
+    --cfy-code-hl-bar: #d9b25f;
+
+    --cfy-diagram-node:        #1e2620;
+    --cfy-diagram-node-stroke: #8b937c;
+    --cfy-diagram-edge:        #a3a892;
+    --cfy-diagram-label:       #e6e3d5;
+    --cfy-diagram-accent:      #d9b25f;
+    --cfy-diagram-accent-bg:   #3d3a20;
+  }
+}
 /* @cfy:tokens:end */
+
+
+/* ==========================================================================
+   1b. THEME COMPONENT RULES (epic conceptify-89k — 89k.1 design record)
+   ==========================================================================
+   Non-token, per-theme rules scoped under [data-cfy-theme="…"]. They win
+   over the base component rules below by specificity (the attribute lives
+   on <html>, an ancestor of everything), so file position is immaterial.
+   `manuscript` has no rules here by definition — the base IS manuscript.  */
+
+/* blueprint: H4 tracked labels go mono for the drafting register
+   (.cfy-code-title is already mono in the base scaffold).                  */
+[data-cfy-theme="blueprint"] h4 {
+  font-family: var(--cfy-font-mono);
+}
+
+/* sketchbook: hand faces are not optically sized — drop negative tracking */
+[data-cfy-theme="sketchbook"] h1,
+[data-cfy-theme="sketchbook"] h2 {
+  letter-spacing: 0;
+}
+/* sketchbook: chunkier highlighter swipe (gradient stop 58% → 45%) */
+[data-cfy-theme="sketchbook"] .cfy-term {
+  background: linear-gradient(transparent 45%, var(--cfy-mark) 45%);
+}
+/* sketchbook: heavier strokes — callout edge 3px → 4px, frames 1px → 2px */
+[data-cfy-theme="sketchbook"] .cfy-callout {
+  border-left-width: 4px;
+}
+[data-cfy-theme="sketchbook"] .cfy-diagram,
+[data-cfy-theme="sketchbook"] .cfy-details,
+[data-cfy-theme="sketchbook"] .cfy-next-questions > li {
+  border-width: 2px;
+}
+/* sketchbook: every diagram label takes the hand face (the cfy-hand
+   treatment without needing the class). No fake roughen filters on text.  */
+[data-cfy-theme="sketchbook"] .cfy-diagram svg {
+  font-family: var(--cfy-font-hand);
+}
 
 
 /* ==========================================================================
@@ -569,10 +744,12 @@ figcaption strong { color: var(--cfy-ink); font-weight: 600; }
 /* ==========================================================================
    5. CODE (D4) — pre-rendered Shiki v4 dual-theme output
    ==========================================================================
-   The skill pre-renders with themes { light: "vitesse-light",
-   dark: "vitesse-dark" }; Shiki emits inline styles plus --shiki-dark /
-   --shiki-dark-bg custom properties, which this block flips. The container
-   background is overridden to sit on the paper palette.                    */
+   The skill pre-renders with a per-cfy-theme Shiki pair (design-system.md
+   "Theme decisions": vitesse-light/vitesse-dark for manuscript &
+   sketchbook, github-light/nord for blueprint); Shiki emits inline styles
+   plus --shiki-dark / --shiki-dark-bg custom properties, which this block
+   flips. The container background is overridden to sit on the paper
+   palette.                                                                 */
 
 /* inline code in prose */
 code {
@@ -841,6 +1018,7 @@ pre.cfy-fallback code { padding-inline: var(--cfy-space-5); }
      comes from the cfy-details rules above (artifact-spec §1.4). */
   .cfy-video video::-webkit-media-controls { display: none; }
 }
+
 </style>
 <style>
 /* ---- artifact-specific styles (always a second block, after the scaffold) */

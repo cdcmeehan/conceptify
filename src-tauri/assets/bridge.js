@@ -9,6 +9,7 @@
  *
  *   artifact -> shell : ready | selection | selection_cleared | element_click
  *   shell -> artifact : set_highlights | set_diff_markers | scroll_to_anchor
+ *                       | set_theme
  *
  * The full protocol (envelope, payloads, coordinate + offset conventions,
  * trust model) is documented in docs/api.md, section "Bridge protocol" —
@@ -28,6 +29,26 @@
  */
 (function () {
   "use strict";
+
+  // ---- Live theming (epic conceptify-89k, artifact-spec §1.5) -------------
+  // The protocol handler stamps the app's CURRENT artifact-theme id on this
+  // script tag at serve time. Apply it to the root element FIRST — this
+  // script is synchronous at end-of-body, i.e. before first paint for
+  // locally served documents — so the in-app view shows the live setting
+  // (overriding whatever theme the artifact was authored under) with no
+  // flash of the authored theme. Later theme changes arrive as `set_theme`
+  // messages (dispatch below). Plain-browser opens have no bridge and keep
+  // the authored data-cfy-theme stamp (or Manuscript if none).
+  var VALID_THEMES = { manuscript: 1, blueprint: 1, sketchbook: 1 };
+  function applyTheme(theme) {
+    if (typeof theme === "string" && VALID_THEMES[theme] === 1) {
+      document.documentElement.setAttribute("data-cfy-theme", theme);
+    }
+  }
+  applyTheme(
+    document.currentScript &&
+      document.currentScript.getAttribute("data-cfy-theme")
+  );
 
   // Idempotence at runtime (server-side injection is already idempotent via
   // the data-cfy-bridge marker; this guards pathological double-execution).
@@ -1013,6 +1034,10 @@
         setDiffMarkers(Array.isArray(d.markers) ? d.markers : []);
       } else if (d.type === "scroll_to_anchor") {
         scrollToAnchor(d);
+      } else if (d.type === "set_theme") {
+        // Live retheme while open (settings-changed in the shell). Unknown
+        // ids are ignored — applyTheme validates against the closed set.
+        applyTheme(d.theme);
       }
       // Unknown types: silently ignored (forward compatibility).
     } catch (e) {

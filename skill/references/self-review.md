@@ -57,6 +57,14 @@ Why both widths and both schemes:
   usual dark-mode casualty: `var()` does not work in SVG presentation
   attributes, so a hardcoded hex fill that reads fine on paper can vanish
   on the dark charcoal ground.
+- **In the artifact's ACTIVE theme** — screenshots must be taken from the
+  finished file with its `data-cfy-theme` stamp in place (SKILL.md step 5),
+  so the render shows the theme the reader will actually get — blueprint's
+  navy dark ground and sketchbook's chalkboard are different contrast
+  environments than manuscript's charcoal, in light AND dark. Rendering
+  `file://` on the stamped file does this automatically; never strip the
+  attribute "to simplify review", and judge contrast/legibility against
+  the rendered theme, not the manuscript palette you may expect.
 
 ## The recipe
 

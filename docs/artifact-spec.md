@@ -214,6 +214,37 @@ existing `<details>` print rule already expands it). The exported
 self-contained copy (§2) replaces the `cfy-asset://` URL with a `data:`
 URI so the file plays anywhere.
 
+### 1.5 Explanation themes (`data-cfy-theme`)
+
+The root `<html>` element MAY carry `data-cfy-theme` naming the
+explanation theme the artifact was authored under. The value is exactly
+one of the theme ids (lowercase, case-sensitive):
+
+```
+manuscript | blueprint | sketchbook
+```
+
+- **Absent attribute = Manuscript.** Not an error, not a warning — every
+  pre-theme artifact renders exactly as before. Authoring agents SHOULD
+  stamp the active theme explicitly (even `manuscript`) as an authoring
+  record; the active theme comes from `conceptify status` →
+  `artifactTheme`.
+- **Unrecognized value** → validator warning `W-THEME-UNKNOWN` (§8.2).
+  The scaffold simply matches no override block, so the file still renders
+  as Manuscript.
+- **All three theme token blocks MUST ship in every artifact** — they are
+  part of the design-system scaffold embedded verbatim (§1), never
+  trimmed to the stamped theme. Self-containment is what lets the app
+  re-theme any artifact, old or new, without touching the file.
+- **In-app, the stamp is advisory**: the injected bridge (§5.4 of the
+  PRD; never on disk) applies the app's *current* theme setting to the
+  root element at serve time and live on settings changes, overriding the
+  stamp. In a plain browser (no bridge) the stamped value renders.
+- The attribute is part of the reserved `data-cfy-*` namespace (§1);
+  artifacts MUST NOT set it anywhere but the root element, MUST NOT
+  invent other values, and artifact JS MUST NOT script it (the attribute
+  belongs to the app at runtime).
+
 ## 2. Rendering targets (FR-3.2)
 
 Every artifact MUST render correctly in **both**:
@@ -608,6 +639,7 @@ There are two severities and no others:
 | `W-VIDEO-TRANSCRIPT` | A `cfy-video` figure whose `<video>` is not immediately followed (only whitespace between) by a `<details class="cfy-details cfy-video-transcript">` containing a `<summary>` and a non-empty body (§1.4 — the transcript is the accessibility floor). |
 | `W-VIDEO-CAPTION` | A `cfy-video` figure without a non-empty `<figcaption>` (§1.4). |
 | `W-VIDEO-AUTOPLAY` | A `<video>` element carrying `autoplay` or `loop` (§1.4 — motion starts only on user intent). |
+| `W-THEME-UNKNOWN` | The root `<html>` element carries a `data-cfy-theme` whose value is not exactly `manuscript`, `blueprint`, or `sketchbook` (§1.5). An absent attribute is fine (Manuscript default). |
 
 `cfy-asset://` URLs are **neither external nor local** for
 `W-EXTERNAL-REF` / `W-LOCAL-REF` purposes: they are the sanctioned

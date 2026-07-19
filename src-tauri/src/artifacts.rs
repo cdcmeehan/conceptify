@@ -769,6 +769,23 @@ fn visit_element(node: &NodeRef<'_, Node>, el: &Element, ctx: &mut DocContext, v
                 ctx.has_title = true;
             }
         }
+        // W-THEME-UNKNOWN: a data-cfy-theme on the root element must be one
+        // of the exact theme ids (spec §1.5, lowercase, case-sensitive). An
+        // absent attribute is the Manuscript default and never warns.
+        "html" => {
+            if let Some(theme) = el.attr("data-cfy-theme") {
+                if !matches!(theme, "manuscript" | "blueprint" | "sketchbook") {
+                    v.warnings.push(Issue::new(
+                        "W-THEME-UNKNOWN",
+                        format!(
+                            "data-cfy-theme \"{theme}\" is not a known theme id (expected \
+                             manuscript, blueprint, or sketchbook); the file will render \
+                             as Manuscript"
+                        ),
+                    ));
+                }
+            }
+        }
         // W-ANCHOR-HEADINGS: h1–h4 must carry data-cfy-id.
         "h1" | "h2" | "h3" | "h4" => {
             if el.attr("data-cfy-id").is_none() {
@@ -1339,6 +1356,33 @@ mod tests {
         let v = validate_str(&valid_doc(""));
         assert!(v.errors.is_empty(), "errors: {:?}", v.errors);
         assert!(v.warnings.is_empty(), "warnings: {:?}", v.warnings);
+    }
+
+    #[test]
+    fn w_theme_unknown_fires_only_on_unrecognized_theme_id() {
+        // Absent attribute and each exact known id: clean (spec §1.5).
+        for html_tag in [
+            r#"<html lang="en">"#,
+            r#"<html lang="en" data-cfy-theme="manuscript">"#,
+            r#"<html lang="en" data-cfy-theme="blueprint">"#,
+            r#"<html lang="en" data-cfy-theme="sketchbook">"#,
+        ] {
+            let doc = valid_doc("").replace(r#"<html lang="en">"#, html_tag);
+            let v = validate_str(&doc);
+            assert!(v.errors.is_empty(), "{html_tag}: {:?}", v.errors);
+            assert!(v.warnings.is_empty(), "{html_tag}: {:?}", v.warnings);
+        }
+        // Unknown, wrong-case, padded, or empty ids warn — accepted, stored,
+        // rendered as Manuscript (ids are exact and case-sensitive).
+        for bad in ["parchment", "Manuscript", " blueprint", ""] {
+            let doc = valid_doc("").replace(
+                r#"<html lang="en">"#,
+                &format!(r#"<html lang="en" data-cfy-theme="{bad}">"#),
+            );
+            let v = validate_str(&doc);
+            assert_eq!(warning_codes(&v), vec!["W-THEME-UNKNOWN"], "{bad:?}");
+            assert!(v.errors.is_empty(), "{bad:?}: {:?}", v.errors);
+        }
     }
 
     #[test]

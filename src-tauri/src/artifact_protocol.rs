@@ -40,7 +40,7 @@
 //!
 //! ## Bridge injection (G3: the on-disk file stays pristine)
 //!
-//! [`inject_bridge`] splices [`BRIDGE_TAG`] into the served bytes just
+//! [`inject_bridge`] splices the [`bridge_tag`] into the served bytes just
 //! before the closing `</body>` tag; the file on disk is never modified, so
 //! opened directly in a browser it has no Conceptify residue. The tag wraps
 //! the real postMessage bridge (M4, bead `conceptify-94m.1`), which lives as
@@ -48,6 +48,19 @@
 //! via `include_str!`. The message protocol it speaks is documented in
 //! docs/api.md, "Bridge protocol" — the shell counterpart is
 //! `src/lib/bridge.ts`.
+//!
+//! ## Live theming (epic conceptify-89k, artifact-spec §1.5)
+//!
+//! The tag carries the app's *current* artifact theme (`data-cfy-theme` on
+//! the script element, read per request from the settings row). The bridge
+//! stamps it onto `<html>` as its very first statement, so the in-app view
+//! always shows the live setting — overriding whatever theme the artifact
+//! was authored under — with no flash of the authored theme (the script is
+//! synchronous, end-of-body, i.e. pre-first-paint for locally served
+//! documents). Theme *changes* while an artifact is open arrive as
+//! `set_theme` bridge messages from the shell (which listens for the
+//! `settings-changed` Tauri event). Plain-browser opens have no bridge and
+//! render the authored `data-cfy-theme` stamp (or Manuscript if none).
 //!
 //! ## WKWebView note (Appendix A, wry #168)
 //!
@@ -67,6 +80,7 @@ use tauri::{Manager, UriSchemeContext, UriSchemeResponder};
 
 use crate::artifacts;
 use crate::db::DbHandle;
+use crate::settings::{self, ArtifactTheme};
 
 /// The reference CSP from docs/artifact-spec.md §3, verbatim. The spec is
 /// the contract: authors treat this as the runtime environment, so any
@@ -85,20 +99,27 @@ pub const CSP: &str = "default-src 'none'; \
 /// [`inject_bridge`].
 const BRIDGE_MARKER: &str = "data-cfy-bridge";
 
-/// The injected bridge `<script>` tag: the real postMessage bridge (M4,
-/// bead `conceptify-94m.1`) — selection reporting, click-to-comment,
-/// highlight decorations, scroll-to-anchor; protocol documented in
-/// docs/api.md "Bridge protocol". The script body lives as a lintable JS
-/// asset (`assets/bridge.js`) and MUST NOT contain a literal `</script>`
-/// (it would close this tag early — guarded by a test below). The
-/// `data-cfy-bridge` attribute and the `window.__cfyBridge` global are
-/// reserved names the spec promises artifacts will not touch. Never present
-/// in the on-disk file.
-const BRIDGE_TAG: &str = concat!(
-    "\n<script data-cfy-bridge=\"v1\">\n",
-    include_str!("../assets/bridge.js"),
-    "\n</script>\n",
-);
+/// The bridge script body: the real postMessage bridge (M4, bead
+/// `conceptify-94m.1`) — selection reporting, click-to-comment, highlight
+/// decorations, scroll-to-anchor, live theming; protocol documented in
+/// docs/api.md "Bridge protocol". Lives as a lintable JS asset
+/// (`assets/bridge.js`) and MUST NOT contain a literal `</script>` (it
+/// would close the injected tag early — guarded by a test below). Never
+/// present in the on-disk file.
+const BRIDGE_SCRIPT: &str = include_str!("../assets/bridge.js");
+
+/// Build the injected bridge `<script>` tag for the app's current artifact
+/// theme (epic conceptify-89k). The `data-cfy-bridge` / `data-cfy-theme`
+/// attributes and the `window.__cfyBridge` global are reserved names the
+/// spec promises artifacts will not touch; the theme id is a closed
+/// lowercase set ([`ArtifactTheme::as_str`]), so interpolating it into the
+/// attribute needs no escaping.
+fn bridge_tag(theme: ArtifactTheme) -> String {
+    format!(
+        "\n<script data-cfy-bridge=\"v1\" data-cfy-theme=\"{}\">\n{BRIDGE_SCRIPT}\n</script>\n",
+        theme.as_str(),
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Request path parsing (pure)
@@ -356,7 +377,8 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|w| w == needle)
 }
 
-/// Splice [`BRIDGE_TAG`] into the served bytes, immediately before the
+/// Splice the [`bridge_tag`] (built for `theme`, the app's current
+/// artifact-theme setting) into the served bytes, immediately before the
 /// **last** case-insensitive `</body>` (the last occurrence is the real
 /// close tag even when earlier script text contains a `</body>` literal —
 /// inside `<script>` only `</script>` closes, so such literals are legal).
@@ -372,11 +394,12 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 /// Operates on raw bytes and never re-encodes: the served document is the
 /// on-disk bytes with exactly one splice — the disk file itself is never
 /// touched (G3).
-pub fn inject_bridge(bytes: &[u8]) -> Vec<u8> {
+pub fn inject_bridge(bytes: &[u8], theme: ArtifactTheme) -> Vec<u8> {
     if contains_bytes(bytes, BRIDGE_MARKER.as_bytes()) {
         return bytes.to_vec();
     }
-    let bridge = BRIDGE_TAG.as_bytes();
+    let tag = bridge_tag(theme);
+    let bridge = tag.as_bytes();
     match rfind_ascii_ci(bytes, b"</body>") {
         Some(i) => {
             let mut out = Vec::with_capacity(bytes.len() + bridge.len());
@@ -532,8 +555,16 @@ fn serve(
         "no-store"
     };
 
+    // The app's current artifact theme rides the bridge tag (module docs,
+    // "Live theming"). Best-effort: a settings read hiccup must not sink
+    // serving — it degrades to the Manuscript default. NOTE: numeric
+    // versions are cached `immutable`, so a webview may reuse a response
+    // injected under an older theme; the shell's `set_theme` push on every
+    // bridge `ready` (ThreadView) re-applies the live value regardless.
+    let theme = settings::get_artifact_theme(conn).unwrap_or_default();
+
     base_response(StatusCode::OK, cache_control)
-        .body(inject_bridge(&bytes))
+        .body(inject_bridge(&bytes, theme))
         .map_err(|e| ServeError::Internal(format!("Failed to build response: {e}.")))
 }
 
@@ -778,7 +809,8 @@ mod tests {
         // The JS asset is inlined into a <script> tag, so it must not close
         // that tag early: exactly one `</script>` (ours, at the end), and it
         // must not contain a nested `<script` opener either.
-        let lower = BRIDGE_TAG.to_ascii_lowercase();
+        let tag = bridge_tag(ArtifactTheme::Manuscript);
+        let lower = tag.to_ascii_lowercase();
         assert_eq!(
             lower.matches("</script>").count(),
             1,
@@ -790,8 +822,8 @@ mod tests {
             "bridge.js must not contain a nested <script opener"
         );
         // Reserved names the artifact spec promises artifacts won't touch.
-        assert!(BRIDGE_TAG.contains("data-cfy-bridge=\"v1\""));
-        assert!(BRIDGE_TAG.contains("__cfyBridge"));
+        assert!(tag.contains("data-cfy-bridge=\"v1\""));
+        assert!(tag.contains("__cfyBridge"));
         // The protocol messages the shell depends on (docs/api.md
         // "Bridge protocol") — cheap lockstep guards.
         for msg in [
@@ -803,30 +835,56 @@ mod tests {
             "set_highlights",
             "scroll_to_anchor",
             "scroll_result",
+            "set_theme",
         ] {
-            assert!(BRIDGE_TAG.contains(msg), "bridge must reference {msg:?}");
+            assert!(tag.contains(msg), "bridge must reference {msg:?}");
         }
         for target in ["semanticTargetForRange", "multi_block", "figure", "diagram", "relationships", "data-cfy-role"] {
-            assert!(BRIDGE_TAG.contains(target), "bridge must capture semantic target {target:?}");
+            assert!(tag.contains(target), "bridge must capture semantic target {target:?}");
         }
         for interaction in ["tabindex", "focus-visible", "ArrowRight", "stopPropagation"] {
-            assert!(BRIDGE_TAG.contains(interaction), "bridge must support diagram interaction {interaction:?}");
+            assert!(tag.contains(interaction), "bridge must support diagram interaction {interaction:?}");
         }
         for outline in ["cfy-outline", "aria-current", "hashchange", "popstate", "beforematch"] {
-            assert!(BRIDGE_TAG.contains(outline), "bridge must support layered outline {outline:?}");
+            assert!(tag.contains(outline), "bridge must support layered outline {outline:?}");
         }
         for suggestion in ["data-cfy-next-question", "reportSuggestion", "suggestionNodes"] {
-            assert!(BRIDGE_TAG.contains(suggestion), "bridge must support keyboard suggestions {suggestion:?}");
+            assert!(tag.contains(suggestion), "bridge must support keyboard suggestions {suggestion:?}");
         }
         for state in ["data-cfy-hl-state", "answered", "saved"] {
-            assert!(BRIDGE_TAG.contains(state), "bridge must distinguish highlight state {state:?}");
+            assert!(tag.contains(state), "bridge must distinguish highlight state {state:?}");
         }
+    }
+
+    #[test]
+    fn bridge_tag_carries_each_theme_id() {
+        for (theme, id) in [
+            (ArtifactTheme::Manuscript, "manuscript"),
+            (ArtifactTheme::Blueprint, "blueprint"),
+            (ArtifactTheme::Sketchbook, "sketchbook"),
+        ] {
+            let tag = bridge_tag(theme);
+            assert!(
+                tag.contains(&format!("data-cfy-theme=\"{id}\"")),
+                "tag must stamp the {id} theme"
+            );
+        }
+        let out = inject_bridge(
+            b"<html><body><p>hi</p></body></html>",
+            ArtifactTheme::Blueprint,
+        );
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("data-cfy-theme=\"blueprint\""),
+            "injection must carry the requested theme"
+        );
     }
 
     #[test]
     fn inject_places_bridge_before_last_body_close() {
         let html = b"<html><body><p>hi</p></body></html>";
-        let out = inject_bridge(html);
+        let out = inject_bridge(html, ArtifactTheme::Manuscript);
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("data-cfy-bridge"));
         let bridge_pos = s.find("data-cfy-bridge").unwrap();
@@ -840,7 +898,7 @@ mod tests {
         // A `</body>` literal inside script text is legal HTML (only
         // `</script>` closes a script); the real close tag is the last one.
         let html = b"<body><script>let s = \"</body>\";</script><p>x</p></BODY>";
-        let out = inject_bridge(html);
+        let out = inject_bridge(html, ArtifactTheme::Manuscript);
         let s = String::from_utf8(out).unwrap();
         let bridge_pos = s.find("data-cfy-bridge").unwrap();
         let fake_close = s.find("</body>").unwrap();
@@ -854,7 +912,7 @@ mod tests {
     #[test]
     fn inject_appends_when_no_body_close_exists() {
         let html = b"<p>error-recovered document";
-        let out = inject_bridge(html);
+        let out = inject_bridge(html, ArtifactTheme::Manuscript);
         let s = String::from_utf8(out).unwrap();
         assert!(s.starts_with("<p>error-recovered document"));
         assert!(s.contains("data-cfy-bridge"));
@@ -863,8 +921,8 @@ mod tests {
     #[test]
     fn inject_is_idempotent() {
         let html = b"<html><body><p>hi</p></body></html>";
-        let once = inject_bridge(html);
-        let twice = inject_bridge(&once);
+        let once = inject_bridge(html, ArtifactTheme::Manuscript);
+        let twice = inject_bridge(&once, ArtifactTheme::Sketchbook);
         assert_eq!(once, twice);
     }
 
@@ -901,7 +959,7 @@ mod tests {
         assert!(body.contains("__cfyBridge"), "real bridge script present");
         assert_eq!(
             res.body(),
-            &inject_bridge(artifact_html(1).as_bytes()),
+            &inject_bridge(artifact_html(1).as_bytes(), ArtifactTheme::Manuscript),
             "served bytes must be the pristine file with one bridge splice"
         );
 
@@ -909,6 +967,31 @@ mod tests {
         let disk = std::fs::read(artifacts::version_file_path(&root, "p1", "oauth-flow", 1))
             .unwrap();
         assert_eq!(disk, artifact_html(1).as_bytes());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn served_bridge_tag_carries_current_theme_setting() {
+        // With a stored artifact.theme row the injected tag stamps that
+        // theme; the fixture used elsewhere has NO settings table, which
+        // exercises the degrade-to-Manuscript path (asserted byte-exactly in
+        // serves_versioned_file_with_bridge_and_exact_csp).
+        let conn = test_conn();
+        conn.execute_batch(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO settings (key, value) VALUES ('artifact.theme', 'blueprint');",
+        )
+        .unwrap();
+        let root = tmp_root("theme");
+        save_versions(&conn, &root, 1);
+
+        let res = get(&conn, &root, "/t1/1");
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            body_str(&res).contains("data-cfy-theme=\"blueprint\""),
+            "served bridge tag must carry the live theme setting"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
