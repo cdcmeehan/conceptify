@@ -8,6 +8,7 @@
     "opener:default",
     "window-state:default",
     "dialog:allow-open",
+    "dialog:allow-save",
     "notification:default"
   ]
 }

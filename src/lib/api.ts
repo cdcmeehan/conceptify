@@ -470,6 +470,35 @@ export function openArtifactInBrowser(threadId: string): Promise<string> {
   return invoke<string>("open_artifact_in_browser", { thread_id: threadId });
 }
 
+/** Result of a self-contained export (bead z9y.7). */
+export interface ExportSummary {
+  /** Absolute path the derived copy was written to. */
+  path: string;
+  /** Byte length of the written file. */
+  bytes: number;
+  /** Number of `cfy-asset://` clips inlined as `data:` URIs (0 = plain copy). */
+  inlined_assets: number;
+}
+
+/**
+ * Export a saved artifact version as a self-contained `.html` copy (z9y.7):
+ * every `cfy-asset://` video reference is inlined as a `data:video/mp4;base64,…`
+ * URI so the file plays offline in any browser (Finder, email, sharing). Pass
+ * `version = null` for the latest version. `destPath` is a save-panel choice.
+ * The derived copy is never re-validated or saved back into history.
+ */
+export function exportArtifact(
+  threadId: string,
+  version: number | null,
+  destPath: string,
+): Promise<ExportSummary> {
+  return invoke<ExportSummary>("export_artifact", {
+    thread_id: threadId,
+    version,
+    dest_path: destPath,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Follow-up runs (PRD FR-4.6/4.7/4.8/4.9 — the interrogation loop)
 // ---------------------------------------------------------------------------

@@ -57,6 +57,9 @@ tauri-plugin-notification = "2"
 # downloaded avatar renders (heygen.rs) and uploaded clips (z9y.6, enforcing
 # E-ASSET-HASH). RustCrypto pure-Rust implementation; no native deps.
 sha2.workspace = true
+# Inlines a stored cfy-asset clip as a `data:video/mp4;base64,…` URI for the
+# "export self-contained copy" path (bead conceptify-z9y.7, module `export`).
+base64.workspace = true
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
