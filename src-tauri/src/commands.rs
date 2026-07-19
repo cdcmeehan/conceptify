@@ -397,6 +397,53 @@ pub fn open_artifact_in_browser(db: State<DbHandle>, thread_id: String) -> Resul
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// Summary of a completed self-contained export, surfaced to the shell so it
+/// can confirm the write and how many clips were inlined.
+#[derive(Serialize)]
+pub struct ExportSummary {
+    /// Absolute path the derived copy was written to (the save-panel choice).
+    pub path: String,
+    /// Byte length of the written file.
+    pub bytes: u64,
+    /// Number of distinct `cfy-asset://` clips inlined as `data:` URIs
+    /// (0 for an artifact without video — a plain copy).
+    pub inlined_assets: usize,
+}
+
+/// Export a saved artifact version as a **self-contained** `.html` copy
+/// (bead `conceptify-z9y.7`): every `cfy-asset://` video reference is replaced
+/// by a `data:video/mp4;base64,…` URI of the stored clip, so the file plays in
+/// a plain browser (Finder, email, sharing) with no app and no network —
+/// restoring the FR-2.5 "one file survives alone" guarantee for video-bearing
+/// artifacts.
+///
+/// The frontend obtains `dest_path` from the native save panel
+/// (`@tauri-apps/plugin-dialog`). `version` is the specific version to export,
+/// or `None` for the latest. The derived copy is **never** re-validated or
+/// written back into version history (artifact-spec §2). The transform runs to
+/// completion in memory before the atomic write, so a missing asset fails
+/// cleanly with no partial file left behind.
+#[tauri::command(rename_all = "snake_case")]
+pub fn export_artifact(
+    db: State<DbHandle>,
+    thread_id: String,
+    version: Option<i64>,
+    dest_path: String,
+) -> Result<ExportSummary, String> {
+    let root = artifacts::artifacts_root().map_err(|e| e.to_string())?;
+    let dest = PathBuf::from(&dest_path);
+    let exported = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        crate::export::export_to_path(&conn, &root, &thread_id, version, &dest)
+            .map_err(|e| e.to_string())?
+    };
+    Ok(ExportSummary {
+        path: dest_path,
+        bytes: exported.bytes.len() as u64,
+        inlined_assets: exported.inlined_assets,
+    })
+}
+
 /// A comment row for the shell's in-artifact comment layer (94m.3/94m.4) and
 /// sidebar (94m.6). Mirrors the HTTP `CommentResponse` (docs/api.md "Comments")
 /// field-for-field — the frontend commands and the CLI/skill HTTP surface stay

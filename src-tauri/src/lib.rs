@@ -10,6 +10,7 @@ mod comments;
 mod concept_map;
 mod context;
 mod db;
+mod export;
 mod flows;
 mod heygen;
 mod learning;
@@ -122,6 +123,7 @@ pub fn run() {
             commands::list_artifact_versions,
             commands::diff_versions,
             commands::open_artifact_in_browser,
+            commands::export_artifact,
             commands::create_comment,
             commands::list_comments,
             commands::get_agent_settings,

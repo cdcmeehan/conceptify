@@ -15,6 +15,7 @@
 // immutable/cacheable, so history browsing is instant (FR-2.4).
 
 import { listen } from "@tauri-apps/api/event";
+import { save } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import * as api from "../lib/api";
 import type { ArtifactVersionDiff, Thread } from "../lib/api";
@@ -38,6 +39,7 @@ const PROFILE_LABELS = {
 export function ThreadView({ thread }: { thread: Thread | null }) {
   const state = useAppStore();
   const [openError, setOpenError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
   // The comments sidebar (94m.6) is collapsible; the preference persists across
   // thread switches (ThreadView isn't remounted per thread — only the iframe and
   // comment layer are keyed). Default open: this is the interrogation home base.
@@ -257,6 +259,31 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
     api.openArtifactInBrowser(threadId).catch((e) => setOpenError(String(e)));
   }
 
+  // Export a self-contained copy (z9y.7): the app serves video clips via the
+  // in-app `cfy-asset://` scheme, so the plain `artifact.html` shows only the
+  // poster + transcript outside the app. This inlines each clip as a `data:`
+  // URI so the exported file plays offline anywhere. Exports the version the
+  // viewer is currently showing ("latest" → null).
+  async function onExportSelfContained() {
+    setOpenError(null);
+    const version = state.viewerVersion === "latest" ? null : state.viewerVersion;
+    const base = thread?.slug != null && thread.slug !== "" ? thread.slug : "artifact";
+    const suggested = `${base}${version != null ? `-v${version}` : ""}.html`;
+    try {
+      const dest = await save({
+        defaultPath: suggested,
+        filters: [{ name: "HTML", extensions: ["html"] }],
+      });
+      if (dest == null) return; // user cancelled the save panel
+      setExporting(true);
+      await api.exportArtifact(threadId, version, dest);
+    } catch (e) {
+      setOpenError(String(e));
+    } finally {
+      setExporting(false);
+    }
+  }
+
   if (thread == null) {
     return (
       <main class="flex h-full flex-1 items-center justify-center bg-well">
@@ -314,6 +341,15 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
                 class="cfy-btn cfy-btn-secondary shrink-0"
               >
                 Open in browser
+              </button>
+              <button
+                type="button"
+                onClick={onExportSelfContained}
+                disabled={exporting}
+                title="Save a self-contained .html with any video inlined, so it plays offline in any browser"
+                class="cfy-btn cfy-btn-secondary shrink-0"
+              >
+                {exporting ? "Exporting…" : "Export self-contained copy"}
               </button>
             </>
           )}
