@@ -14,6 +14,7 @@
 // version and the iframe reloads in place. Concrete version URLs are
 // immutable/cacheable, so history browsing is instant (FR-2.4).
 
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import * as api from "../lib/api";
 import type { ArtifactVersionDiff, Thread } from "../lib/api";
@@ -188,6 +189,38 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
       artifactBridge.setDiffMarkers([]);
     };
   }, [diffMarkers]);
+
+  // Live artifact retheme (epic conceptify-89k): keep the open artifact on
+  // the app's current theme. The serve-time bridge tag already applies the
+  // theme current at load (flash-free); this effect covers (a) the user
+  // changing the theme in Settings while an artifact is open
+  // (`settings-changed`) and (b) re-asserting the live value on every bridge
+  // `ready`, since immutable version responses may be cached with a stale
+  // serve-time stamp. Sending on `ready` is queue-safe (bridge.ts queues
+  // pre-ready sends).
+  useEffect(() => {
+    let disposed = false;
+    const apply = () => {
+      api
+        .getArtifactTheme()
+        .then((theme) => {
+          if (!disposed) artifactBridge.setTheme(theme);
+        })
+        .catch(() => {
+          /* settings read hiccup: keep the serve-time theme */
+        });
+    };
+    apply();
+    const unsubscribe = artifactBridge.onMessage((message) => {
+      if (message.type === "ready") apply();
+    });
+    const unlisten = listen("settings-changed", apply);
+    return () => {
+      disposed = true;
+      unsubscribe();
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
 
   const hasArtifact = resolvedVersion != null;
   const waitingOnVersions =

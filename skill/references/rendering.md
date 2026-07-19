@@ -57,7 +57,14 @@ d2 --layout=elk --pad 0 diagram.d2 diagram.svg
 - `--layout=elk` — always; markedly better layered layouts.
 - `--pad 0` — the `cfy-diagram` frame already provides padding.
 - `--sketch` — optional hand-drawn flavor; pair with
-  `<figure class="cfy-diagram cfy-hand">`.
+  `<figure class="cfy-diagram cfy-hand">`. **When the active cfy theme is
+  `sketchbook`** (SKILL.md step 1, `conceptify status` → `artifactTheme`),
+  `--sketch` + `cfy-hand` is the **default** — a preference, not a
+  requirement: override it for dense or precision-critical diagrams where
+  roughened strokes hurt legibility (89k.1 decision). The hand feel is
+  guaranteed at the theme level regardless (hand-face labels + 2px frames
+  come from the theme CSS). After a `--sketch` render, re-check the SVG
+  for extra `fill-*`/`stroke-*` classes the adapter below doesn't cover.
 - Keep shape keys short, lowercase, and meaningful (`client`,
   `token-svc`) — `data-cfy-id`s are derived from them and must stay
   stable across regenerations (artifact-spec §4.3).
@@ -304,14 +311,19 @@ available. Use the bundled helper (first run bootstraps `shiki@^4` into
 
 ```bash
 # from a file (excerpt it first — never a whole file), highlighting lines 2 and 7-9:
-node <skill-dir>/scripts/highlight.mjs --lang rust --input excerpt.rs --highlight 2,7-9
+node <skill-dir>/scripts/highlight.mjs --lang rust --input excerpt.rs --highlight 2,7-9 --theme "$THEME"
 # or from stdin:
-sed -n '120,140p' src/server.rs | node <skill-dir>/scripts/highlight.mjs --lang rust
+sed -n '120,140p' src/server.rs | node <skill-dir>/scripts/highlight.mjs --lang rust --theme "$THEME"
 ```
 
-Output is a dual-theme `<pre class="shiki shiki-themes vitesse-light
-vitesse-dark">` block (`--shiki-dark` variable prefix — exactly what the
-scaffold's dark-mode rules expect, D4). Wrap it:
+`--theme` is the active cfy theme (SKILL.md step 1; default `manuscript`).
+It selects the Shiki pair per the 89k.1 decision: manuscript & sketchbook
+render `vitesse-light`/`vitesse-dark`; **blueprint** renders
+`github-light`/`nord` (Vitesse's warm sand tokens clash on blueprint's ice
+paper and navy code wash). Output is a dual-theme
+`<pre class="shiki shiki-themes <light> <dark>">` block (`--shiki-dark`
+variable prefix — exactly what the scaffold's dark-mode rules expect, D4).
+Wrap it:
 
 ```html
 <figure class="cfy-listing" data-cfy-id="fig-launch-wait">

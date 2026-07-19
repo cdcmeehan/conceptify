@@ -263,6 +263,17 @@ class ArtifactBridge {
     this.send({ type: "set_diff_markers", markers });
   }
 
+  /** Stamp the app's current artifact theme (`data-cfy-theme`) on the
+   *  artifact's root element (epic conceptify-89k). The serve-time bridge
+   *  tag already carries the theme current at load, so this is for LIVE
+   *  changes (settings-changed while an artifact is open) and for
+   *  re-asserting the live value on `ready` (a cached immutable response
+   *  may carry a stale serve-time stamp). Unknown ids are ignored by the
+   *  bridge. */
+  setTheme(theme: string): void {
+    this.send({ type: "set_theme", theme });
+  }
+
   /** Smooth-scroll the anchored element/range into view with a brief pulse.
    *  `key` lets the bridge target an existing decoration exactly. */
   scrollToAnchor(anchor: Anchor, key?: string): void {

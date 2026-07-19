@@ -1,13 +1,19 @@
 #!/usr/bin/env node
 // Conceptify skill — Shiki v4 code highlighting (D4).
 //
-// Pre-renders a code excerpt to dual-theme HTML (vitesse-light /
-// vitesse-dark, `--shiki-dark` variable prefix) for inlining into an
-// artifact. Zero runtime JS in the artifact; the design-system scaffold
-// flips the spans under `prefers-color-scheme: dark`.
+// Pre-renders a code excerpt to dual-theme HTML (`--shiki-dark` variable
+// prefix) for inlining into an artifact. Zero runtime JS in the artifact;
+// the design-system scaffold flips the spans under
+// `prefers-color-scheme: dark`.
+//
+// The Shiki theme pair follows the artifact's cfy theme (design-system.md,
+// "Theme decisions"): manuscript & sketchbook use vitesse-light /
+// vitesse-dark; blueprint uses github-light / nord. Pass the active theme
+// (from `conceptify status` → artifactTheme) via --theme; default is
+// manuscript.
 //
 // Usage:
-//   node highlight.mjs --lang rust --input src/main.rs [--highlight 3,7-9]
+//   node highlight.mjs --lang rust --input src/main.rs [--highlight 3,7-9] [--theme blueprint]
 //   cat snippet.py | node highlight.mjs --lang python
 //
 // Output: the `<pre class="shiki ...">...</pre>` block on stdout.
@@ -31,7 +37,21 @@ function arg(name) {
 const lang = arg("lang");
 if (!lang) {
   console.error(
-    "usage: highlight.mjs --lang <lang> [--input <file>] [--highlight 3,7-9]",
+    "usage: highlight.mjs --lang <lang> [--input <file>] [--highlight 3,7-9] [--theme manuscript|blueprint|sketchbook]",
+  );
+  process.exit(2);
+}
+
+// Per-theme Shiki pairing (89k.1 decision — only blueprint diverges).
+const SHIKI_PAIRS = {
+  manuscript: { light: "vitesse-light", dark: "vitesse-dark" },
+  sketchbook: { light: "vitesse-light", dark: "vitesse-dark" },
+  blueprint: { light: "github-light", dark: "nord" },
+};
+const cfyTheme = arg("theme") ?? "manuscript";
+if (!Object.hasOwn(SHIKI_PAIRS, cfyTheme)) {
+  console.error(
+    `unknown --theme "${cfyTheme}" (expected manuscript, blueprint, or sketchbook)`,
   );
   process.exit(2);
 }
@@ -70,7 +90,7 @@ const { codeToHtml } = await import(pathToFileURL(shim).href);
 
 const html = await codeToHtml(code, {
   lang,
-  themes: { light: "vitesse-light", dark: "vitesse-dark" },
+  themes: SHIKI_PAIRS[cfyTheme],
   transformers: [
     {
       line(node, line) {

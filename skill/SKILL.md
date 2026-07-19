@@ -59,7 +59,15 @@ command -v conceptify && conceptify status
 ```
 
 `status` prints `{"service":"conceptify","status":"ok",...}` and launches
-the app if it isn't running (allow ~10s). If the binary is missing, stop
+the app if it isn't running (allow ~10s). Its JSON includes
+`"artifactTheme"` — the app-level explanation theme (`manuscript` |
+`blueprint` | `sketchbook`). **Capture it now**; step 5 stamps it on the
+artifact and it selects the Shiki pair and diagram flavor (rendering.md):
+
+```bash
+THEME=$(conceptify status | sed -nE 's/.*"artifactTheme" *: *"([a-z]+)".*/\1/p')
+case "$THEME" in manuscript|blueprint|sketchbook) ;; *) THEME=manuscript ;; esac
+``` If the binary is missing, stop
 and tell the user to run `just install-cli` in the conceptify repo, then
 resume. If `status` exits non-zero after a launch attempt, surface its
 stderr to the user and stop. For a fuller diagnostic (app bundle, CLI,
@@ -296,6 +304,18 @@ reminder, not a substitute):
 
 - [ ] `<!doctype html>`, `<meta charset="utf-8">` first in `<head>`,
       viewport meta, non-empty `<title>`.
+- [ ] `<html lang="en" data-cfy-theme="<theme>">` — stamp the active theme
+      read in step 1 (artifact-spec §1.5). **Always stamp it explicitly,
+      including `manuscript`** — the explicit stamp records what theme the
+      artifact was authored under (an absent attribute also renders
+      Manuscript, but only because old pre-theme artifacts must keep
+      working). In-app, the viewer overrides the stamp with the live app
+      setting; in a plain browser the stamp is what renders.
+- [ ] Code blocks rendered with the matching theme:
+      `highlight.mjs --theme "$THEME"` (rendering.md). Diagrams: when the
+      theme is `sketchbook`, default to `d2 --sketch` +
+      `class="cfy-diagram cfy-hand"` (preference, not a requirement —
+      rendering.md).
 - [ ] `cfy:question` (verbatim from step 3), `cfy:version` (`1` for a new
       thread), `cfy:generated-by` (`claude-code/<model>` — the model that
       *actually* authored this artifact; when step 4 delegated authoring,
