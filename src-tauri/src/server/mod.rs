@@ -24,6 +24,7 @@ mod search_routes;
 mod settings_routes;
 mod state;
 mod threads_routes;
+mod video_routes;
 
 use tauri::{AppHandle, Manager};
 

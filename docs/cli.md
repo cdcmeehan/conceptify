@@ -482,6 +482,90 @@ applied in one shot (`open → applied` is a legal transition).
 
 ---
 
+### `conceptify render-avatar --script-file <path> [--avatar <id>] [--voice <id>]`
+
+Render a HeyGen avatar narration video via the app (video epic conceptify-z9y,
+bead z9y.4). **This is a paid render per submission** — callers (the authoring
+skill) must confirm with the user before invoking; the CLI itself never
+triggers a render implicitly. Maps to `POST /api/v1/video/avatar-jobs`
+followed by polling `GET /api/v1/video/avatar-jobs/:id`.
+
+The HeyGen API key never touches the CLI: it lives in a write-only settings
+row inside the app, which performs all HeyGen traffic itself. With no key
+configured the command fails cleanly with a Settings-pointing error (HTTP
+412) before any upstream call.
+
+- `--script-file <path>` — the narration script (plain text), read CLI-side.
+- `--avatar <id>` — avatar (look) id; defaults to the `heygen.default_avatar_id`
+  setting. With neither, the submit is rejected with guidance (discover ids
+  via `conceptify list-avatars`).
+- `--voice <id>` — voice id; defaults to the `heygen.default_voice_id`
+  setting, else HeyGen uses the avatar's own default voice.
+- `--job <id>` — resume polling an already-submitted job instead of
+  submitting a new one (mutually exclusive with `--script-file`).
+
+Polling backs off 5s → 15s with a **10-minute ceiling** (HeyGen renders take
+minutes). Past the ceiling the CLI exits non-zero with the job id and the
+resume command — the render continues server-side at HeyGen; it never hangs
+forever.
+
+**Output (stdout, on completion):**
+
+```json
+{
+  "jobId": "v_abc123",
+  "status": "completed",
+  "sha256": "e3b0c442…7852b855",
+  "bytes": 8388608,
+  "filePath": "/Users/chris/Documents/conceptify/video-renders/e3b0c442….mp4",
+  "durationSeconds": 32.5
+}
+```
+
+The staged file is content-addressed (`<sha256>.mp4`). Register it with a
+thread via `conceptify save-asset --thread <id> --file <filePath>` to obtain
+the `cfy-asset://` URL for the artifact (the seam with bead z9y.6; a stderr
+hint prints the exact command).
+
+**Errors (stderr, exit 1):**
+
+- `Error: no HeyGen API key is configured — avatar rendering is disabled. Add a
+  key in Settings to enable it. (HTTP 412)` — feature not configured.
+- `Error: HeyGen rejected the configured API key — update or re-add it in
+  Settings … (HTTP 502)` — key invalid/revoked.
+- `Error: HeyGen refused the request (quota exhausted or rate limited): …
+  (HTTP 502)` — plan/credit exhaustion.
+- `Error: could not reach HeyGen (…) — check your network connection … (HTTP 502)`
+  — upstream network failure (legible enough for the skill's Remotion fallback).
+- `Error: render failed: <detail>` — HeyGen reported the render itself failed.
+- `Error: render job <id> is still processing after 10 minutes. …` — ceiling
+  hit; resume later with `--job <id>`.
+
+---
+
+### `conceptify list-avatars`
+
+List available HeyGen avatar looks (first 50; cached ~5 minutes app-side) so
+valid ids for `--avatar` / the default-avatar setting can be discovered. Maps
+to `GET /api/v1/video/avatars`. Requires a configured key (same 412
+otherwise). Output is a bare JSON array; each `id` is exactly the value to
+pass as `--avatar`, and `defaultVoiceId` (when present) is a matching voice.
+
+```json
+[
+  {
+    "id": "lk_abc123",
+    "name": "Business Suit",
+    "avatarType": "photo_avatar",
+    "gender": "female",
+    "defaultVoiceId": "1bd001e50f421d891986aad5c8bbd2",
+    "previewImageUrl": "https://…"
+  }
+]
+```
+
+---
+
 ## Output contract
 
 All commands print stable, parseable JSON to **stdout** on success and
@@ -512,4 +596,6 @@ Shared types (e.g., `HealthResponse`) live in `conceptify-types` and are used by
 Every command in the PRD §5.2 table is now implemented: `status`, `doctor`,
 `ensure-project`, `create-thread`, `open`, `save-artifact`, `get-context`,
 `list-comments`, and `resolve-comment`. `save-asset` is documented above as
-a reserved contract (video epic) and is not yet implemented.
+a reserved contract (video epic) and is not yet implemented. The video
+epic's optional HeyGen surface adds `render-avatar` and `list-avatars`
+(bead z9y.4).

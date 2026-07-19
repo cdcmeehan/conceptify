@@ -275,7 +275,7 @@ pub struct LatestArtifact {
 /// in the same directory, then `rename` over the destination (atomic on the
 /// same filesystem, per N4). A crash mid-write leaves only the `.tmp` file;
 /// the destination is either the old content or the new, never a mix.
-fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file_name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?

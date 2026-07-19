@@ -9,6 +9,7 @@ mod concept_map;
 mod context;
 mod db;
 mod flows;
+mod heygen;
 mod learning;
 // Live-checkpoint IPC bridge (test-only, #[ignore]d + env-gated): drives the
 // real command/flow/run stack headlessly for end-to-end verification against
@@ -121,6 +122,9 @@ pub fn run() {
             commands::set_local_endpoint_api_key,
             commands::get_artifact_theme,
             commands::set_artifact_theme,
+            commands::get_heygen_settings,
+            commands::set_heygen_api_key,
+            commands::set_heygen_defaults,
             commands::ask_follow_ups,
             commands::ask_single_comment,
             commands::apply_to_artifact,

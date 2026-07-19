@@ -1276,6 +1276,103 @@ the returned `url`.
 
 ---
 
+## Avatar render jobs (HeyGen — video epic conceptify-z9y, bead z9y.4)
+
+Optional, **app-mediated** narration rendering: the HeyGen API key lives
+in its own write-only settings row (the OpenRouter-key pattern —
+`set_heygen_api_key { key }` Tauri command to set, `null`/blank to
+clear, both emitting `settings-changed`; `get_heygen_settings` exposes
+only `{ keyConfigured, defaultAvatarId, defaultVoiceId }`, never the
+key). All HeyGen traffic happens inside the app process against the
+**HeyGen v3 platform API** (`api.heygen.com/v3`; v2 sunsets 2026-10-31)
+— the key is never returned by any endpoint, command, event, or log.
+
+Two ordinary namespaced settings rows, `heygen.default_avatar_id` and
+`heygen.default_voice_id` (set via `set_heygen_defaults`), supply
+defaults when a request omits `avatarId`/`voiceId`.
+
+All three routes are bearer-authed like the rest of `/api/v1`, and every
+one fails fast with **`412 Precondition Failed`** and a Settings-pointing
+`{ "error": … }` when no key is configured — before any upstream I/O.
+Upstream failures map to **`502`** with legible messages: key
+invalid/revoked and quota/rate-limit errors name Settings; network
+failures say so plainly (the skill's Remotion fallback, bead z9y.5,
+branches on these). These endpoints only ever render when explicitly
+called — the confirm-before-paid-render UX is the calling skill's
+responsibility.
+
+### `POST /api/v1/video/avatar-jobs`
+
+Submit a render (a **paid** operation per submission). Body:
+
+```json
+{ "script": "…narration text…", "avatarId": "lk_abc123", "voiceId": "vc_9" }
+```
+
+`avatarId`/`voiceId` optional with configured defaults (no avatar at
+all → `400` with `conceptify list-avatars` guidance; no voice → HeyGen
+uses the avatar's default). The app requests 720p/16:9 mp4 output so the
+finished clip fits the artifact-spec §1.4 budgets without re-encoding.
+Returns immediately (rendering is async):
+
+```json
+{ "jobId": "v_abc123", "status": "submitted" }
+```
+
+`jobId` is the upstream render id — stateless app-side, so it survives
+an app restart and is the only handle needed to poll.
+
+### `GET /api/v1/video/avatar-jobs/:id`
+
+Poll a job. While rendering: `{ "jobId", "status": "processing",
+"heygenStatus": "<raw upstream status>" }`. On failure: `{ "status":
+"failed", "error": "<upstream detail>" }` (HTTP 200 — the poll worked;
+the render didn't). On the first poll that observes completion, the app
+downloads the mp4 and stages it **content-addressed** (temp+rename, PRD
+N4) under `~/Documents/conceptify/video-renders/<sha256>.mp4`, then:
+
+```json
+{
+  "jobId": "v_abc123",
+  "status": "completed",
+  "sha256": "e3b0c442…7852b855",
+  "bytes": 8388608,
+  "filePath": "/Users/chris/Documents/conceptify/video-renders/e3b0c442….mp4",
+  "durationSeconds": 32.5
+}
+```
+
+**Integration seam with z9y.6** (recorded design decision): the staged
+file is deliberately *not yet* thread-scoped — the asset store
+(`PUT /threads/:id/assets/:sha256`) ships separately. `sha256`/
+`filePath` are exactly the `conceptify save-asset` inputs; registering
+the file with a thread yields its `cfy-asset://` URL. Because staging is
+already content-addressed, registration is a pure upload — no
+re-encode, and the sha the artifact will reference is already final.
+Completed results are memoized in-process; after a restart a re-poll
+simply re-downloads into the same content-addressed path.
+
+### `GET /api/v1/video/avatars`
+
+Avatar discovery (HeyGen "looks", first page of 50, cached ~5 minutes
+in-process, cache scoped to a fingerprint of the key). Each `id` is
+exactly the `avatarId` to render with:
+
+```json
+{
+  "avatars": [
+    { "id": "lk_abc123", "name": "Business Suit", "avatarType": "photo_avatar",
+      "gender": "female", "defaultVoiceId": "1bd001e…", "previewImageUrl": "https://…" }
+  ],
+  "hasMore": true
+}
+```
+
+Side effects: none — no thread status change, no event, nothing rendered
+without an explicit `POST`.
+
+---
+
 ## Comments
 
 Comments are the annotation layer (PRD §7.4, FR-4.1–FR-4.5/4.7): a user note
