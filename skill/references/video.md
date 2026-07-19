@@ -9,10 +9,35 @@ evolution, request lifecycles, pipelines, protocol rounds — never as
 decoration (design-system.md). WHEN to reach for a video is a separate
 decision (bead conceptify-z9y.5); this guide is the mechanical HOW.
 
-Contents: [Workflow](#the-workflow) · [Templates](#pick-a-template) ·
+Contents: [Deciding whether to include a video](#deciding-whether-to-include-a-video) ·
+[Workflow](#the-workflow) · [Templates](#pick-a-template) ·
 [Storyboard JSON](#the-storyboard-json) · [Rendering](#rendering) ·
 [Budgets](#budgets) · [Assembling the figure](#assembling-the-cfy-video-figure) ·
 [Notes](#notes)
+
+## Deciding whether to include a video
+
+The full decision procedure lives in **SKILL.md step 4** (explicit signals →
+the implicit-warrant `(a) STANDARD/DEEP + (b) genuine time axis + (c) motion
+encodes what a static diagram can't` test → the `video.mode` preference). These
+worked examples calibrate that test so different runs decide alike. The verdicts
+assume the default `video.mode: ask` unless a row says otherwise.
+
+| # | Question | `video.mode` | Verdict | Why |
+|---|----------|--------------|---------|-----|
+| 1 | "Explain Python decorators, and **include a little video**." | ask | **Include** (Remotion) | Explicit request wins outright — tier is irrelevant, no offer needed. Even though decorators alone would size COMPACT and might not pass the implicit test, the user asked, so you render one. |
+| 2 | "Walk me through the **TCP three-way handshake and teardown**." (DEEP) | ask | **Offer once** | Passes all three gates: DEEP (a); a protocol round with real state evolution (b); watching SYN/SYN-ACK/ACK and the state transitions move is exactly what a static diagram flattens (c). So offer — No video / Remotion / (HeyGen if a key is configured) — don't impose. |
+| 3 | "**How do React's `useMemo` and `useCallback` differ?**" (STANDARD) | ask | **Skip, no offer** | Passes (a) STANDARD but fails (b): a comparison/definitional question has no time axis, and fails (c): a side-by-side static table serves it better than motion. A video here would decorate, not encode — so no offer at all. |
+| 4 | "**What port does the dev server bind?**" (COMPACT lookup) | ask | **Skip, no offer** | Fails gate (a) immediately — a COMPACT lookup never triggers an offer. No prompt, in any mode. |
+| 5 | "**Trace a request through the artifact-serving pipeline**, in depth." (DEEP) | **auto** | **Include, no ask** | Video-warranted (DEEP; a request lifecycle with a genuine time axis; hops-and-transforms motion beats a static box diagram). Under `auto`, a warranted question gets a Remotion clip included **without** the offer prompt. (Were this HeyGen, it would still confirm cost first — `auto` never buys avatar renders.) |
+| 6 | "Explain the retry/backoff state machine — **no video, just text.**" (DEEP) | ask | **Skip** | The topic *is* video-warranted (a temporal state machine), but the explicit negative ("no video") overrides the warrant. Explicit signals — positive or negative — always beat the implicit test and the mode. Same skip even if `video.mode` were `auto`. |
+
+**Reading the table:** rows 1 and 6 show explicit signals dominating (positive
+and negative); rows 2–4 show the implicit gates (b/c fail in 3, a fails in 4,
+all pass in 2); row 5 shows `auto` converting an offer into a silent include.
+The paid HeyGen option is only ever *listed* when a HeyGen key is configured
+(`conceptify list-avatars` succeeds) and is only ever *rendered* after an
+explicit cost confirmation.
 
 ## The workflow
 

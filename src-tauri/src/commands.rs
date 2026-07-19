@@ -1158,6 +1158,39 @@ pub fn set_artifact_theme<R: tauri::Runtime>(
     Ok(())
 }
 
+/// Read the explainer-video offer preference (video epic conceptify-z9y, bead
+/// z9y.5). Returns the wire id string (`ask` | `auto` | `never`); an absent row
+/// yields `ask` (the default). Stored in its own namespaced settings row, so a
+/// `reset_agent_settings` never disturbs it.
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_video_mode(db: State<DbHandle>) -> Result<String, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::settings::get_video_mode(&conn)
+        .map(|m| m.as_str().to_owned())
+        .map_err(|e| e.to_string())
+}
+
+/// Persist the chosen video mode and emit `settings-changed` (the settings
+/// exception to the app's no-event mutation rule, consistent with the other
+/// settings commands). Validation (a known mode id) happens in the domain layer
+/// before the write, so an unknown id is rejected with a user-facing error
+/// rather than stored. The mode lives in its own settings row, untouched by
+/// `reset_agent_settings`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_video_mode<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    db: State<DbHandle>,
+    mode: String,
+) -> Result<(), String> {
+    {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        crate::settings::set_video_mode(&conn, &mode).map_err(|e| e.to_string())?;
+    }
+    use tauri::Emitter;
+    let _ = app.emit("settings-changed", &());
+    Ok(())
+}
+
 /// The HeyGen-related settings a frontend surface may see (video epic
 /// conceptify-z9y, bead z9y.4). Deliberately contains **no key field of any
 /// kind** — like `AgentOptionsDto.open_router_key_set`, the presence boolean

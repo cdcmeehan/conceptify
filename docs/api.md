@@ -680,23 +680,26 @@ Response `200 OK`:
 
 ### `GET /api/v1/settings/display`
 
-Authenticated (epic conceptify-89k, bead 89k.2). The skill-facing read of the
-app-level display settings the artifact author needs at generation time — one
-cheap call the skill makes while authoring. Kept separate from the DB-free
-`/health` liveness probe. `conceptify status` calls this after health and folds
-`artifactTheme` into its JSON output.
+Authenticated (epic conceptify-89k, bead 89k.2; epic conceptify-z9y, bead
+z9y.5). The skill-facing read of the app-level display settings the artifact
+author needs at generation time — one cheap call the skill makes while authoring.
+Kept separate from the DB-free `/health` liveness probe. `conceptify status`
+calls this after health and folds `artifactTheme` + `videoMode` into its JSON
+output.
 
 Response `200 OK`:
 
 ```json
 {
-  "artifactTheme": "manuscript"
+  "artifactTheme": "manuscript",
+  "videoMode": "ask"
 }
 ```
 
 `artifactTheme` is one of `manuscript` | `blueprint` | `sketchbook` (defaults to
-`manuscript` when unset). The object is the forward-looking home for further
-author-time display settings (e.g. a future `videoMode`).
+`manuscript` when unset). `videoMode` is one of `ask` | `auto` | `never`
+(defaults to `ask` when unset) — the authoring skill's explainer-video offer
+preference. The object is the home for further author-time display settings.
 
 Errors: `401 Unauthorized` if the bearer token is missing or wrong;
 `500 Internal Server Error` (`{ "error": "settings error" }`) on a DB read

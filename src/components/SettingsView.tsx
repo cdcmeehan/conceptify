@@ -34,6 +34,7 @@ import type {
   CatalogModel,
   CatalogProvider,
   CatalogResponse,
+  VideoMode,
 } from "../lib/api";
 import { appStore } from "../store/appStore";
 import { setAppearance } from "../lib/theme";
@@ -109,6 +110,30 @@ const ARTIFACT_THEMES: {
   },
 ];
 
+// Explainer-video offer modes (epic conceptify-z9y, bead z9y.5). A simple radio
+// row; the value is read by the authoring skill, not the app shell. `ask` is the
+// default (offer once when a video is genuinely warranted).
+const VIDEO_MODES: { value: VideoMode; label: string; blurb: string }[] = [
+  {
+    value: "ask",
+    label: "Ask",
+    blurb:
+      "Offer a video once when a topic genuinely benefits from motion (a process, lifecycle, or state machine). Default.",
+  },
+  {
+    value: "auto",
+    label: "Auto",
+    blurb:
+      "Include a short motion graphic automatically when warranted, without asking. Paid avatar narration always still confirms first.",
+  },
+  {
+    value: "never",
+    label: "Never",
+    blurb:
+      "Never offer a video. An explicit request in your question (“include a video”) still wins.",
+  },
+];
+
 export function SettingsView() {
   // The last-persisted settings — used to revert a live appearance preview if
   // the user closes without saving, and as the base for a provider-toggle write.
@@ -123,6 +148,10 @@ export function SettingsView() {
   // OpenRouter key, selecting a card persists immediately).
   const [artifactTheme, setArtifactThemeState] = useState<ArtifactTheme>("manuscript");
   const [themeBusy, setThemeBusy] = useState(false);
+  // Explainer-video offer mode (epic conceptify-z9y). Its own settings row, same
+  // immediate-persist pattern as the theme.
+  const [videoMode, setVideoModeState] = useState<VideoMode>("ask");
+  const [videoModeBusy, setVideoModeBusy] = useState(false);
   const [defaultAdapter, setDefaultAdapter] = useState("");
   const [followUp, setFollowUp] = useState("");
   const [artifactUpdate, setArtifactUpdate] = useState("");
@@ -223,6 +252,12 @@ export function SettingsView() {
         }
       })
       .catch((e) => console.warn("heygen settings load failed", e));
+    api
+      .getVideoMode()
+      .then((m) => {
+        if (alive) setVideoModeState(m);
+      })
+      .catch((e) => console.warn("video mode load failed", e));
     return () => {
       alive = false;
     };
@@ -251,6 +286,23 @@ export function SettingsView() {
       setError(`Could not set theme: ${String(e)}`);
     } finally {
       setThemeBusy(false);
+    }
+  }
+
+  // Video mode persists immediately on selection, same as the theme.
+  async function onSelectVideoMode(value: VideoMode) {
+    if (value === videoMode || videoModeBusy) return;
+    const prev = videoMode;
+    setVideoModeState(value);
+    setVideoModeBusy(true);
+    setError(null);
+    try {
+      await api.setVideoMode(value);
+    } catch (e) {
+      setVideoModeState(prev);
+      setError(`Could not set video mode: ${String(e)}`);
+    } finally {
+      setVideoModeBusy(false);
     }
   }
 
@@ -680,6 +732,32 @@ export function SettingsView() {
                 </div>
                 <p class="mt-1 text-xs leading-relaxed text-muted">
                   {ARTIFACT_THEMES.find((t) => t.value === artifactTheme)?.blurb}
+                </p>
+              </Section>
+
+              {/* Explainer videos (epic conceptify-z9y) */}
+              <Section
+                title="Explainer videos"
+                description="When an artifact should include a short animated clip. Only temporal topics — a process, lifecycle, or state machine — are ever considered."
+              >
+                <div class="flex flex-wrap gap-2">
+                  {VIDEO_MODES.map((m) => (
+                    <button
+                      key={m.value}
+                      type="button"
+                      disabled={videoModeBusy}
+                      onClick={() => void onSelectVideoMode(m.value)}
+                      aria-pressed={videoMode === m.value}
+                      class={`cfy-btn px-3 py-1.5 text-sm disabled:opacity-60 ${
+                        videoMode === m.value ? "cfy-btn-accent" : "cfy-btn-secondary"
+                      }`}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+                <p class="mt-2 text-xs leading-relaxed text-muted">
+                  {VIDEO_MODES.find((m) => m.value === videoMode)?.blurb}
                 </p>
               </Section>
 

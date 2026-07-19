@@ -78,14 +78,19 @@ pub struct HealthResponse {
 /// Response shape for `GET /api/v1/settings/display` (epic conceptify-89k, bead
 /// 89k.2): the app-level display settings the artifact-authoring skill reads at
 /// generation time. Kept separate from the pure `/health` liveness probe so
-/// that probe stays DB-free. Currently just the chosen theme; the object is the
-/// forward-looking home for further author-time display settings (e.g. a future
-/// `videoMode`). `artifactTheme` is one of `manuscript` | `blueprint` |
-/// `sketchbook`; the CLI folds it into `conceptify status` output.
+/// that probe stays DB-free. Carries the chosen theme and the video-offer mode;
+/// the object is the home for further author-time display settings. The CLI
+/// folds both into `conceptify status` output.
+///
+/// - `artifactTheme` is one of `manuscript` | `blueprint` | `sketchbook`
+///   (default `manuscript`).
+/// - `videoMode` is one of `ask` | `auto` | `never` (default `ask`; video epic
+///   conceptify-z9y, bead z9y.5) — the skill's video-offer preference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplaySettingsResponse {
     pub artifact_theme: String,
+    pub video_mode: String,
 }
 
 // Projects API types (PRD §7.1, FR-1.1, FR-1.3)

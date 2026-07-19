@@ -132,6 +132,8 @@ pub fn run() {
             commands::set_local_endpoint_api_key,
             commands::get_artifact_theme,
             commands::set_artifact_theme,
+            commands::get_video_mode,
+            commands::set_video_mode,
             commands::get_heygen_settings,
             commands::set_heygen_api_key,
             commands::set_heygen_defaults,

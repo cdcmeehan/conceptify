@@ -224,6 +224,87 @@ shows the artifact) before reporting to the user.
 model, and stamp `cfy:generated-by` with your *actual* model — never claim a
 model you did not run on. Say in your reply that you fell back and why.
 
+**Also decide, right here, whether a video belongs.** The same moment you
+size the question, classify its **video-worthiness** — an explainer clip is
+worth its render cost only for a narrow shape of question, and deciding now
+(not mid-author) keeps you from either nagging on simple questions or
+bolting a video on as an afterthought. Videos are a `cfy-video` figure
+(artifact-spec §1.4); the mechanical HOW lives in step 5 and
+`references/video.md`. Three inputs decide it: **explicit signals** in the
+question, an **implicit warrant** test, and the user's **`video.mode`**
+preference (read it once, below). Work them in this order — the first that
+matches wins:
+
+1. **Explicit signal → obey it, never ask.** If the question *itself* asks
+   for a video — "include a video", "with a little video", "an animated
+   explainer", "make a video of X" — **include one** (Remotion), regardless
+   of tier, `video.mode`, or the implicit test. An explicit request even on a
+   COMPACT one-liner is honored. Symmetrically, an explicit **negative** —
+   "no video", "skip the video", "text only" — means **no video**, full stop,
+   and overrides everything below (including `video.mode: auto`). Only a
+   direct HeyGen/avatar request ("an avatar explaining X") routes to the paid
+   avatar path, and even then you **confirm the cost first** (see step 5).
+
+2. **Otherwise, apply the implicit-warrant test.** Offer a video **only when
+   ALL of these hold** — if any fails, skip silently (no offer, no mention):
+   - **(a) tier is STANDARD or DEEP** (never COMPACT). A lookup, a
+     definition, a bit of syntax, or a "how do I / how do I configure X"
+     question is out by this gate alone.
+   - **(b) the concept has a genuine time axis or state evolution** — a
+     process, lifecycle, pipeline, protocol round, state machine, or an
+     algorithm stepping through its phases. **Structural, comparison, and
+     definitional** questions ("how are X and Y different", "what is X", "how
+     is the code laid out") do **not** qualify — they have no time axis and a
+     static diagram serves them better.
+   - **(c) motion would encode a relationship a static diagram cannot** —
+     the artifact-spec rule that *visuals MUST encode a relationship, never
+     decorate* (§1.4 / design-system.md), applied to motion: the clip has to
+     show something a `cfy-steps` list or a state diagram flattens. If a
+     single static diagram conveys it just as well, (c) fails.
+
+   When (a)+(b)+(c) all hold, the question is **video-warranted**. What you do
+   with a warrant depends on `video.mode`:
+
+   - **`ask` (default) → offer exactly once**, in your plan/clarification step
+     (the same interactive affordance as the detail-level question above —
+     use **AskUserQuestion**, one question). Header `Explainer video`, three
+     options in this order, **No video recommended/first**:
+     1. **No video** — *"Recommended. A static diagram covers it. Default."*
+     2. **Short motion graphic** — *"A ~30–60s Remotion animation of the
+        process, rendered locally. Adds a minute or two."*
+     3. **Avatar narration (paid)** — *"A HeyGen talking-avatar clip. Costs
+        real money."* — **list this option ONLY when a HeyGen key is
+        configured** (probe: `conceptify list-avatars` succeeds; a `412 / no
+        HeyGen API key` error means omit it). Always label it paid.
+
+     Offer **once** and move on — if the user dismisses, treat as No video.
+   - **`auto` → include a Remotion clip without asking** (skip the offer;
+     go straight to the step-5 render flow). **HeyGen is never auto-selected**
+     — its cost means the avatar path is reached only by an explicit request
+     (rule 1) and always after an explicit cost confirmation, `auto`
+     notwithstanding.
+   - **`never` → skip the offer entirely.** (An explicit request in rule 1
+     already won before reaching here, so `never` only silences the *implicit*
+     offer.)
+
+3. **Never offer** for COMPACT, lookups, "how do I …", or config questions —
+   these fail gate (a)/(b) and must not trigger a prompt, in any mode.
+
+**Reading `video.mode`.** It rides in `conceptify status` next to
+`artifactTheme` (`"videoMode": "ask" | "auto" | "never"`, default `ask`); the
+same one-call read you already do at authoring time carries it — no extra
+call. Set in Settings › Explainer videos.
+
+**Headless / non-interactive runs never offer.** Exactly like the
+detail-level question, a run with no human present (every
+`references/follow-ups.md` path, app- or agent-launched runs) must not call
+AskUserQuestion. So in a headless run the video decision collapses to: an
+explicit request (rule 1) or `video.mode: auto` on a warranted question →
+include a Remotion clip; everything else → **no video**. Never prompt.
+
+Six worked examples calibrating this test live in `references/video.md`
+("Deciding whether to include a video") — read them if a case is ambiguous.
+
 ### 5. Author the artifact
 
 The bulk of the work. Write the file to a temp path (e.g. under
@@ -356,28 +437,47 @@ reminder, not a substitute):
   from-state** — no opacity-0 fade-ins, no draw-ins from invisible
   strokes. Transform-only reveals (like the scaffold's `.cfy-reveal`).
 
-**Explainer video (optional, temporal concepts only).** When a video is
-warranted — the concept is genuinely temporal (state evolution, request
-lifecycle, pipeline, protocol round) and the reader benefits from seeing
-time directly — the skill can render a short clip and add it as a
-`cfy-video` figure. WHETHER to include one is decided elsewhere (bead
-conceptify-z9y.5, plus a `video.mode` setting); this is just the
-mechanical path once that says yes:
+**Explainer video (only when step 4 decided to include one).** WHETHER a
+video belongs was settled back in **step 4** (explicit request, or a
+video-warranted question under `video.mode`); this is the mechanical path
+once that decision is "yes". The concept is by construction genuinely
+temporal (state evolution, request lifecycle, pipeline, protocol round) and
+the reader benefits from seeing time directly.
 
-1. Storyboard 4–8 beats (one sentence each), pick a template
-   (`step-sequence` / `state-machine` / `data-flow`), write the props JSON.
-2. Render: `node scripts/render-video.mjs --composition <id> --props
-   <file> --out <dir>` → mp4 + poster + vtt (tell the user it is
-   rendering; it is CPU-heavy).
-3. Upload the mp4 with `conceptify save-asset` and place the returned
-   `cfy-asset://` URL in a `cfy-video` figure per artifact-spec §1.4 — with
-   the poster inlined as a `data:` URI and **the transcript populated with
-   the narration script verbatim**.
+**Script first, in the plan — before any render or spend.** The storyboard
+IS the plan for the video: write the **4–8 beats** (one narration sentence
+each, per `references/video.md`) as part of your outline/plan step, and
+**show that narration script to the user before you render** — so they see
+exactly what the clip will say and cover *before* any Remotion CPU time or,
+above all, any HeyGen money is committed. Only then render:
 
-Never autoplay; at most 2 video figures; the artifact must stand alone
-without the clip. **Full details in `references/video.md`** — read it
-before rendering. (First use needs the render deps installed; `conceptify
-doctor` reports and hints this.)
+- **Remotion (local, free) path:**
+  1. Pick a template (`step-sequence` / `state-machine` / `data-flow`),
+     write the props JSON from the beats.
+  2. Render: `node scripts/render-video.mjs --composition <id> --props
+     <file> --out <dir>` → mp4 + poster + vtt (tell the user it is
+     rendering; it is CPU-heavy).
+  3. Upload the mp4 with `conceptify save-asset --thread <id> --file
+     <path>`; place the returned `cfy-asset://` URL in a `cfy-video` figure.
+
+- **HeyGen avatar (paid) path — reached only by an explicit request:**
+  1. **Confirm the cost, explicitly, every time.** Re-state to the user that
+     a HeyGen render costs real money and get a clear go-ahead — this
+     confirmation is **mandatory regardless of `video.mode`** (`auto` never
+     buys a HeyGen render on its own).
+  2. `conceptify render-avatar --script-file <path>` (the beats' narration is
+     the script); it renders and polls to completion.
+  3. On completion, `conceptify save-asset` on the resulting file, then embed
+     the returned URL exactly like the Remotion path.
+
+Either way the figure is assembled per artifact-spec §1.4 — poster inlined
+as a `data:` URI, and **the transcript populated with the beats' narration,
+verbatim**. **Place the figure at the section of the artifact it explains**
+(next to the prose about that process), **never dumped at the top**. Never
+autoplay; at most 2 video figures; the artifact must stand alone without the
+clip. **Full details in `references/video.md`** — read it before rendering.
+(First use needs the render deps installed; `conceptify doctor` reports and
+hints this.)
 
 ### 6. Pre-save review
 

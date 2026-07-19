@@ -162,6 +162,18 @@ re-render.
       looks like raw browser default — an unstyled bullet list, a bare
       table, plain block-quote, default-blue link — means a component class
       was missed. Apply the `cfy-*` class from design-system.md.
+- [ ] **`cfy-video` figure integrity (only if the artifact has one).** For
+      each `cfy-video` figure: the **poster renders** (the frame shows in the
+      screenshot, not a broken-image glyph or empty box — `cfy-asset://` does
+      not resolve in headless Chromium, so the poster `data:` URI is what must
+      appear); the **video file is within budget** (the render step already
+      enforced §1.4 — mp4 ≤ 20 MiB, ≤ 120 s; confirm you did not skip it and a
+      `save-asset` URL is actually wired into the `src`); and the **transcript
+      matches the narration script verbatim** — the `<details>` transcript body
+      is the beats' `narration` lines in order, word for word, with no clip-only
+      content. A video whose transcript drifts from the narration fails
+      `W-VIDEO-TRANSCRIPT` and this review. Confirm the figure sits at the
+      section it explains, not dumped at the top.
 - [ ] **Animation-hidden content (source cross-check).** Headless
       Chromium runs animations to completion, so it *cannot* reproduce the
       WKWebView occlusion-suspension trap where an animation freezes in its

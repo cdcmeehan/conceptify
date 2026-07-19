@@ -185,6 +185,14 @@ const HEYGEN_DEFAULT_VOICE_SETTINGS_KEY: &str = "heygen.default_voice_id";
 /// byte-identical to the current scaffold — see `skill/design-system.md`).
 const ARTIFACT_THEME_SETTINGS_KEY: &str = "artifact.theme";
 
+/// Namespaced settings row for the explainer-video offer preference (video epic
+/// conceptify-z9y, bead z9y.5). Its own row, for the same two reasons as the
+/// theme above: (1) `reset_agent_settings` (FR-7.4) must leave it intact; (2)
+/// the skill reads it at authoring time without deserializing the agent-settings
+/// blob. The value is one of the [`VideoMode`] wire ids; an absent row means
+/// `ask` (the default, zero-config offer behavior).
+const VIDEO_MODE_SETTINGS_KEY: &str = "video.mode";
+
 // --- Defaults (single source of truth, shared by `Default` + serde) ---------
 
 /// The built-in `claude` adapter template (PRD §5.5), with the OQ3 permission
@@ -529,6 +537,57 @@ impl ArtifactTheme {
     }
 }
 
+/// The user's explainer-video offer preference (video epic conceptify-z9y, bead
+/// z9y.5). Governs how the authoring skill behaves when a video is only
+/// *implicitly* warranted (a STANDARD/DEEP temporal concept):
+///
+/// - `Ask` (default) — offer once, let the user pick (no video / Remotion /
+///   HeyGen). Zero-config default, byte-identical to the pre-setting behavior.
+/// - `Auto` — an implicit-warrant case gets a Remotion clip included without
+///   asking. HeyGen (which costs real money) still always confirms explicitly,
+///   regardless of this mode.
+/// - `Never` — suppress all offers. An *explicit* video request in the question
+///   ("include a video") still wins over `Never`; this only silences the
+///   implicit-warrant offer.
+///
+/// Serialized lowercase to match the single wire id the CLI (`conceptify status`
+/// `videoMode`), the `GET /settings/display` endpoint, and the Settings UI all
+/// exchange. Consumed by the skill's sizing step, not by app code — the app only
+/// stores and surfaces the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoMode {
+    #[default]
+    Ask,
+    Auto,
+    Never,
+}
+
+impl VideoMode {
+    /// The canonical lowercase wire id — what is stored, returned to the CLI, and
+    /// shown in the frontend.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VideoMode::Ask => "ask",
+            VideoMode::Auto => "auto",
+            VideoMode::Never => "never",
+        }
+    }
+
+    /// Parse a wire mode id, rejecting anything outside the known set with a
+    /// user-facing [`SettingsError::InvalidVideoMode`] (the validation the write
+    /// path requires). Surrounding whitespace is trimmed, but — unlike a lenient
+    /// parse — an unknown id is never silently coerced to the default.
+    pub fn parse(s: &str) -> Result<Self, SettingsError> {
+        match s.trim() {
+            "ask" => Ok(VideoMode::Ask),
+            "auto" => Ok(VideoMode::Auto),
+            "never" => Ok(VideoMode::Never),
+            other => Err(SettingsError::InvalidVideoMode(other.to_owned())),
+        }
+    }
+}
+
 /// One agent invocation template. `args`/`cwd`/`command` may contain the
 /// placeholders `{prompt}`, `{model}`, `{project_root}`, substituted at
 /// resolution time (see module docs on substitution safety).
@@ -832,6 +891,9 @@ pub enum SettingsError {
 
     #[error("unknown artifact theme '{0}': choose one of manuscript, blueprint, sketchbook")]
     InvalidTheme(String),
+
+    #[error("unknown video mode '{0}': choose one of ask, auto, never")]
+    InvalidVideoMode(String),
 
     /// A run routed via OpenRouter (bead `conceptify-e7m.7`) but no key is
     /// stored. Raised BEFORE any run row exists (FR-4.9 guard freed).
@@ -1449,6 +1511,43 @@ pub fn set_artifact_theme(conn: &Connection, theme: &str) -> Result<(), Settings
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         rusqlite::params![ARTIFACT_THEME_SETTINGS_KEY, theme.as_str()],
+    )?;
+    Ok(())
+}
+
+// --- Video mode (epic conceptify-z9y, bead z9y.5) ----------------------------
+//
+// Stored under its own `video.mode` settings row (see VIDEO_MODE_SETTINGS_KEY
+// for the separate-row rationale), mirroring the artifact-theme plumbing above.
+// Only these two functions touch it; the Tauri commands and the
+// `GET /settings/display` route consume them.
+
+/// The stored video mode, or [`VideoMode::Ask`] when no row exists (zero-config
+/// default — offer once when warranted). A stored value is validated on write, so
+/// a stored value that fails to parse — only reachable via external DB tampering
+/// — falls back to the default rather than erroring an otherwise healthy read.
+pub fn get_video_mode(conn: &Connection) -> Result<VideoMode, SettingsError> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [VIDEO_MODE_SETTINGS_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(raw.and_then(|s| VideoMode::parse(&s).ok()).unwrap_or_default())
+}
+
+/// Persist the chosen video mode, validated first: an unknown id is rejected with
+/// the user-facing [`SettingsError::InvalidVideoMode`] and never stored. The
+/// canonical lowercase id ([`VideoMode::as_str`]) is written as one upsert
+/// statement — SQLite applies it atomically, so a crash mid-write cannot corrupt
+/// the row (PRD N4).
+pub fn set_video_mode(conn: &Connection, mode: &str) -> Result<(), SettingsError> {
+    let mode = VideoMode::parse(mode)?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![VIDEO_MODE_SETTINGS_KEY, mode.as_str()],
     )?;
     Ok(())
 }
@@ -2102,6 +2201,84 @@ mod tests {
             get_artifact_theme(&conn).unwrap(),
             ArtifactTheme::Manuscript
         );
+    }
+
+    #[test]
+    fn video_mode_defaults_to_ask_when_absent() {
+        let conn = in_memory_settings_db();
+        assert_eq!(get_video_mode(&conn).unwrap(), VideoMode::Ask);
+    }
+
+    #[test]
+    fn video_mode_round_trips_each_known_mode() {
+        let conn = in_memory_settings_db();
+        for (id, expected) in [
+            ("ask", VideoMode::Ask),
+            ("auto", VideoMode::Auto),
+            ("never", VideoMode::Never),
+            ("  auto  ", VideoMode::Auto), // trimmed on write
+        ] {
+            set_video_mode(&conn, id).unwrap();
+            assert_eq!(get_video_mode(&conn).unwrap(), expected, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn video_mode_rejects_unknown_id_with_clear_error() {
+        let conn = in_memory_settings_db();
+        set_video_mode(&conn, "auto").unwrap();
+        for bad in ["", "  ", "Ask", "always", "on", "ask ."] {
+            let err = set_video_mode(&conn, bad).unwrap_err();
+            assert!(matches!(err, SettingsError::InvalidVideoMode(_)), "{bad:?}");
+            let msg = err.to_string();
+            assert!(msg.contains("ask"), "{msg}");
+            assert!(msg.contains("auto"), "{msg}");
+            assert!(msg.contains("never"), "{msg}");
+        }
+        // A rejected write never mutates the stored value.
+        assert_eq!(get_video_mode(&conn).unwrap(), VideoMode::Auto);
+    }
+
+    #[test]
+    fn video_mode_serializes_lowercase() {
+        assert_eq!(serde_json::to_string(&VideoMode::Never).unwrap(), "\"never\"");
+        assert_eq!(VideoMode::default(), VideoMode::Ask);
+    }
+
+    #[test]
+    fn video_mode_stays_out_of_the_agent_settings_blob_and_survives_reset() {
+        // Same isolation guarantee as the theme/API key: its own row, so clearing
+        // agent settings (FR-7.4 reset) leaves it intact. (A substring check on
+        // the blob is unsound here — "never"/"ask"/"auto" collide with adapter
+        // defaults like `--color never`; compare the whole blob instead.)
+        let conn = in_memory_settings_db();
+        let blob_before = serde_json::to_string(&get_settings(&conn).unwrap()).unwrap();
+
+        set_video_mode(&conn, "never").unwrap();
+
+        let blob_after = serde_json::to_string(&get_settings(&conn).unwrap()).unwrap();
+        assert_eq!(
+            blob_before, blob_after,
+            "writing video mode must not touch the agent-settings blob"
+        );
+
+        clear_settings(&conn).unwrap();
+        assert_eq!(
+            get_video_mode(&conn).unwrap(),
+            VideoMode::Never,
+            "reset keeps the video mode"
+        );
+    }
+
+    #[test]
+    fn video_mode_tampered_stored_value_falls_back_to_default() {
+        let conn = in_memory_settings_db();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('video.mode', 'bogus')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(get_video_mode(&conn).unwrap(), VideoMode::Ask);
     }
 
     // --- Per-purpose model resolution --------------------------------------
