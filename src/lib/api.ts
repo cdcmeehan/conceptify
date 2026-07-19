@@ -967,3 +967,37 @@ export function setOpenRouterApiKey(key: string | null): Promise<void> {
 export function setLocalEndpointApiKey(key: string | null): Promise<void> {
   return invoke<void>("set_local_endpoint_api_key", { key });
 }
+
+// ---------------------------------------------------------------------------
+// HeyGen avatar narration (video epic conceptify-z9y, bead z9y.4).
+// ---------------------------------------------------------------------------
+
+/** Settings surface for HeyGen rendering: whether a key is configured (the only
+ *  key-derived fact exposed to the frontend, matching the OpenRouter pattern)
+ *  plus the non-secret avatar/voice defaults. */
+export interface HeygenSettings {
+  keyConfigured: boolean;
+  defaultAvatarId: string | null;
+  defaultVoiceId: string | null;
+}
+
+export function getHeygenSettings(): Promise<HeygenSettings> {
+  return invoke<HeygenSettings>("get_heygen_settings");
+}
+
+/** Store (`key`) or clear (`null`/blank) the HeyGen API key (bead z9y.4).
+ *  Write-only by design: no command ever returns the key — the frontend learns
+ *  only `keyConfigured` from {@link getHeygenSettings}. Stored outside the
+ *  agent-settings blob, so {@link resetAgentSettings} leaves it intact. */
+export function setHeygenApiKey(key: string | null): Promise<void> {
+  return invoke<void>("set_heygen_api_key", { key });
+}
+
+/** Set/clear the preferred HeyGen avatar + voice defaults. `null` or blank
+ *  clears the corresponding row. Plain settings rows, not secrets. */
+export function setHeygenDefaults(
+  avatarId: string | null,
+  voiceId: string | null
+): Promise<void> {
+  return invoke<void>("set_heygen_defaults", { avatarId, voiceId });
+}

@@ -151,6 +151,14 @@ export function SettingsView() {
   const [localKeyBusy, setLocalKeyBusy] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
+  // HeyGen avatar narration state (video epic conceptify-z9y, bead conceptify-bnp).
+  const [heygenKeySet, setHeygenKeySet] = useState(false);
+  const [heygenKeyInput, setHeygenKeyInput] = useState("");
+  const [heygenKeyEditing, setHeygenKeyEditing] = useState(false);
+  const [heygenKeyBusy, setHeygenKeyBusy] = useState(false);
+  const [heygenDefaultAvatar, setHeygenDefaultAvatar] = useState("");
+  const [heygenDefaultVoice, setHeygenDefaultVoice] = useState("");
+
   const [error, setError] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -205,6 +213,16 @@ export function SettingsView() {
         if (alive) setArtifactThemeState(t);
       })
       .catch((e) => console.warn("artifact theme load failed", e));
+    api
+      .getHeygenSettings()
+      .then((h) => {
+        if (alive) {
+          setHeygenKeySet(h.keyConfigured);
+          setHeygenDefaultAvatar(h.defaultAvatarId ?? "");
+          setHeygenDefaultVoice(h.defaultVoiceId ?? "");
+        }
+      })
+      .catch((e) => console.warn("heygen settings load failed", e));
     return () => {
       alive = false;
     };
@@ -458,6 +476,50 @@ export function SettingsView() {
       await api.setLocalEndpointApiKey(localKeyInput.trim() || null);
       setLocalKeySet(localKeyInput.trim() !== ""); setLocalKeyInput("");
     } catch (e) { setError(String(e)); } finally { setLocalKeyBusy(false); }
+  }
+
+  async function onSaveHeygenKey() {
+    const k = heygenKeyInput.trim();
+    if (k === "") return;
+    setHeygenKeyBusy(true);
+    setError(null);
+    try {
+      await api.setHeygenApiKey(k);
+      setHeygenKeySet(true);
+      setHeygenKeyInput("");
+      setHeygenKeyEditing(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setHeygenKeyBusy(false);
+    }
+  }
+
+  async function onClearHeygenKey() {
+    setHeygenKeyBusy(true);
+    setError(null);
+    try {
+      await api.setHeygenApiKey(null);
+      setHeygenKeySet(false);
+      setHeygenKeyInput("");
+      setHeygenKeyEditing(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setHeygenKeyBusy(false);
+    }
+  }
+
+  async function onSaveHeygenDefaults() {
+    setError(null);
+    try {
+      await api.setHeygenDefaults(
+        heygenDefaultAvatar.trim() || null,
+        heygenDefaultVoice.trim() || null
+      );
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   const adapterNames = (() => {
@@ -844,6 +906,99 @@ export function SettingsView() {
                     </button>
                   </div>
                 )}
+              </Section>
+
+              {/* HeyGen avatar narration (video epic conceptify-z9y, bead conceptify-bnp) */}
+              <Section
+                title="HeyGen avatar narration"
+                description="Optional app-mediated avatar video rendering. The key is write-only — it is never displayed again."
+              >
+                {!heygenKeySet || heygenKeyEditing ? (
+                  <div class="flex items-center gap-2">
+                    <input
+                      type="password"
+                      value={heygenKeyInput}
+                      spellcheck={false}
+                      autocomplete="off"
+                      placeholder="HeyGen API key"
+                      onInput={(e) => setHeygenKeyInput((e.currentTarget as HTMLInputElement).value)}
+                      class="cfy-input flex-1 px-2.5 py-1.5 font-mono text-sm"
+                    />
+                    <button
+                      type="button"
+                      onClick={onSaveHeygenKey}
+                      disabled={heygenKeyInput.trim() === "" || heygenKeyBusy}
+                      class="cfy-btn cfy-btn-primary px-3 py-1.5 text-sm"
+                    >
+                      {heygenKeyBusy ? "Saving…" : "Save key"}
+                    </button>
+                    {heygenKeyEditing && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setHeygenKeyEditing(false);
+                          setHeygenKeyInput("");
+                        }}
+                        disabled={heygenKeyBusy}
+                        class="cfy-btn cfy-btn-ghost px-2.5 py-1.5 text-sm"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <div class="flex items-center gap-2">
+                    <span class="cfy-input flex flex-1 items-center gap-2 px-2.5 py-1.5 text-sm text-muted">
+                      <span class="cfy-chip bg-ok-bg text-ok">Key stored</span>
+                      <span class="font-mono tracking-widest">••••••••••••</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setHeygenKeyEditing(true)}
+                      class="cfy-btn cfy-btn-secondary px-3 py-1.5 text-sm"
+                    >
+                      Replace
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onClearHeygenKey}
+                      disabled={heygenKeyBusy}
+                      class="cfy-btn cfy-btn-danger px-3 py-1.5 text-sm"
+                    >
+                      {heygenKeyBusy ? "…" : "Clear"}
+                    </button>
+                  </div>
+                )}
+
+                <div class="mt-3 flex flex-col gap-3">
+                  <p class="text-xs font-medium text-ink">Default avatar and voice</p>
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    <Field label="Avatar ID" hint="Empty = must be specified per render.">
+                      <TextInput
+                        value={heygenDefaultAvatar}
+                        onInput={setHeygenDefaultAvatar}
+                        placeholder="e.g. avatar_1234"
+                      />
+                    </Field>
+                    <Field label="Voice ID" hint="Empty = uses avatar's default voice.">
+                      <TextInput
+                        value={heygenDefaultVoice}
+                        onInput={setHeygenDefaultVoice}
+                        placeholder="Optional voice override"
+                      />
+                    </Field>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onSaveHeygenDefaults}
+                    class="cfy-btn cfy-btn-secondary self-start px-3 py-1.5 text-sm"
+                  >
+                    Save defaults
+                  </button>
+                  <p class="text-[11px] text-muted">
+                    Discover avatar and voice IDs with <code>conceptify list-avatars</code>.
+                  </p>
+                </div>
               </Section>
 
               {/* Paths (FR-7.3) */}
