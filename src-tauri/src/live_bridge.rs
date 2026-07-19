@@ -106,6 +106,46 @@ async fn artifact_route(
     Ok(axum::response::Html(html))
 }
 
+/// Video assets by thread + file (`<sha256>.mp4`), delegating to the REAL
+/// `cfy-asset://` handler (`crate::asset_protocol::respond`) with the Range
+/// header forwarded — so a live checkpoint can play a §1.4 cfy-video figure
+/// (and exercise seek, i.e. real 206/416 semantics) in a plain browser.
+/// Uses the real `~/Documents` artifacts root explicitly: under `cfg(test)`
+/// `artifacts_root()` resolves to the scratch root, but assets uploaded
+/// through the dev app's HTTP API live in the real one.
+async fn asset_route(
+    axum::extract::State(b): axum::extract::State<Bridge>,
+    axum::extract::Path((thread_id, file)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let root = dirs::document_dir()
+        .expect("documents dir")
+        .join("conceptify")
+        .join("artifacts");
+    let range = headers
+        .get(axum::http::header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let response = {
+        let conn = b.db.lock().unwrap();
+        crate::asset_protocol::respond(
+            &conn,
+            &root,
+            &tauri::http::Method::GET,
+            &format!("/{thread_id}/{file}"),
+            range.as_deref(),
+        )
+    };
+    let (parts, body) = response.into_parts();
+    let mut builder = axum::http::Response::builder().status(parts.status.as_u16());
+    for (name, value) in &parts.headers {
+        builder = builder.header(name.as_str(), value.as_bytes());
+    }
+    builder
+        .body(axum::body::Body::from(body))
+        .expect("asset bridge response must build")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "live checkpoint bridge: serves the REAL app DB on 127.0.0.1:4560 until killed (needs CONCEPTIFY_LIVE_BRIDGE=1)"]
 async fn live_bridge() {
@@ -266,6 +306,7 @@ async fn live_bridge() {
         .route("/invoke", axum::routing::post(invoke_route))
         .route("/events", axum::routing::get(events_route))
         .route("/artifact/{thread_id}/{version}", axum::routing::get(artifact_route))
+        .route("/asset/{thread_id}/{file}", axum::routing::get(asset_route))
         .with_state(bridge);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:4560")

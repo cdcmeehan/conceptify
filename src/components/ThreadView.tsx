@@ -391,12 +391,23 @@ export function ThreadView({ thread }: { thread: Thread | null }) {
           {hasArtifact ? (
             // S2 containment boundary: allow-scripts ONLY — never add
             // allow-same-origin (opaque origin is the whole point).
+            //
+            // allow="fullscreen" (z9y.6 decision): delegates ONLY the
+            // Fullscreen API via Permissions Policy so §1.4 video figures can
+            // use the native fullscreen control. This does NOT weaken origin
+            // isolation — permissions-policy delegation is orthogonal to the
+            // sandbox: the artifact keeps its opaque origin, no same-origin
+            // access, no storage, no IPC. Worst case (WKWebView builds where
+            // element fullscreen is disabled at the webview level) the
+            // control is simply inert, which is the status quo.
             <>
               <iframe
                 key={thread.id}
                 ref={iframeRef}
                 src={`artifact://localhost/${thread.id}/${resolvedVersion}`}
                 sandbox="allow-scripts"
+                allow="fullscreen"
+                allowFullScreen
                 title="Artifact"
                 class="min-h-0 w-full flex-1 border-0 bg-raised"
               />

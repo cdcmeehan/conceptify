@@ -61,7 +61,7 @@ pub struct Issue {
 }
 
 impl Issue {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Issue {
             code,
             message: message.into(),
@@ -275,6 +275,8 @@ pub struct LatestArtifact {
 /// in the same directory, then `rename` over the destination (atomic on the
 /// same filesystem, per N4). A crash mid-write leaves only the `.tmp` file;
 /// the destination is either the old content or the new, never a mix.
+/// `pub(crate)`: the video-asset store (`crate::assets`) shares this exact
+/// discipline.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file_name = path
         .file_name()
@@ -348,7 +350,14 @@ pub fn save_artifact_for_run(
     )?;
     let version = current_version.unwrap_or(0) + 1;
 
-    let validation = validate(bytes, version);
+    // Full validation, including the server-side `E-ASSET-REF` half: every
+    // cfy-asset:// reference must name this thread and an already-uploaded
+    // asset (assets live on disk under the thread dir — `crate::assets`).
+    let asset_ctx = AssetContext {
+        thread_id,
+        assets_dir: crate::assets::assets_dir(root, &project_id, &slug),
+    };
+    let validation = validate_with_assets(bytes, version, Some(&asset_ctx));
     if !validation.errors.is_empty() {
         return Err(ArtifactError::Rejected(validation.errors));
     }
@@ -513,12 +522,41 @@ pub fn save_artifact_for_run(
 // Validation (docs/artifact-spec.md §8 — the spec is the contract)
 // ---------------------------------------------------------------------------
 
+/// Server-side context for the `E-ASSET-REF` check (spec §8.1): which thread
+/// the artifact is being saved to, and where that thread's uploaded video
+/// assets live on disk (the filesystem is the asset store's source of truth —
+/// assets have no DB rows).
+pub struct AssetContext<'a> {
+    pub thread_id: &'a str,
+    /// The thread's `assets/` directory (`crate::assets::assets_dir`).
+    pub assets_dir: PathBuf,
+}
+
 /// Run the full §8 rule set against a submitted file. `assigned_version` is
 /// the server-assigned version for the `W-VERSION-MISMATCH` check (file-only
 /// validators would skip it; we always know it).
 ///
-/// Pure function over the bytes — no I/O, no DB.
+/// Pure function over the bytes — no I/O, no DB. `cfy-asset://` references
+/// get the grammar-only half of `E-ASSET-REF` (the file-only validator
+/// position the spec describes); the save pipeline calls
+/// [`validate_with_assets`] for the full thread-match + existence check.
+/// (Production saves always have an `AssetContext`, so in-crate this
+/// grammar-only entry point is exercised by the rule tests.)
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn validate(bytes: &[u8], assigned_version: i64) -> Validation {
+    validate_with_assets(bytes, assigned_version, None)
+}
+
+/// [`validate`] plus the server-side half of `E-ASSET-REF`: with an
+/// [`AssetContext`], every `cfy-asset://` reference must name *this* thread
+/// and an already-uploaded asset (an `assets/<sha>.mp4` existence probe — the
+/// one non-pure step, mirroring how `W-VERSION-MISMATCH` is the server-side
+/// extra over a file-only validator).
+pub fn validate_with_assets(
+    bytes: &[u8],
+    assigned_version: i64,
+    assets: Option<&AssetContext<'_>>,
+) -> Validation {
     let mut v = Validation::default();
 
     if bytes.len() > MAX_SIZE_BYTES {
@@ -638,7 +676,76 @@ pub fn validate(bytes: &[u8], assigned_version: i64) -> Validation {
         }
     }
 
+    // E-ASSET-REF over every collected cfy-asset:// reference (spec §8.1):
+    // grammar always; thread-match + uploaded-asset existence when the save
+    // pipeline supplied an AssetContext.
+    for (position, url) in &ctx.asset_refs {
+        match parse_asset_url(url) {
+            None => v.errors.push(Issue::new(
+                "E-ASSET-REF",
+                format!(
+                    "{position} \"{}\" is a malformed cfy-asset URL (grammar: \
+                     cfy-asset://localhost/<thread-id>/<sha256>.mp4, thread-id \
+                     [A-Za-z0-9_-]{{1,128}}, sha256 = 64 lowercase hex)",
+                    truncate(url, 160)
+                ),
+            )),
+            Some((ref_thread, sha)) => {
+                if let Some(assets) = assets {
+                    if ref_thread != assets.thread_id {
+                        v.errors.push(Issue::new(
+                            "E-ASSET-REF",
+                            format!(
+                                "{position} names thread \"{ref_thread}\" but this artifact \
+                                 is being saved to thread \"{}\" — a video may only \
+                                 reference its own thread's assets",
+                                assets.thread_id
+                            ),
+                        ));
+                    } else if !assets.assets_dir.join(format!("{sha}.mp4")).is_file() {
+                        v.errors.push(Issue::new(
+                            "E-ASSET-REF",
+                            format!(
+                                "{position} names asset {sha}, which has not been uploaded \
+                                 for this thread (upload it first: \
+                                 conceptify save-asset --thread {} --file <clip.mp4>)",
+                                assets.thread_id
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     v
+}
+
+/// Parse a `cfy-asset://localhost/<thread-id>/<sha256>.mp4` URL against the
+/// §1.4 grammar. Returns `(thread_id, sha256)` or `None` when malformed.
+/// Deliberately exact: no percent-decoding, no case folding, no extra
+/// segments, `.mp4` suffix required.
+fn parse_asset_url(url: &str) -> Option<(&str, &str)> {
+    let rest = url.strip_prefix("cfy-asset://localhost/")?;
+    let (thread_id, file) = rest.split_once('/')?;
+    let thread_ok = !thread_id.is_empty()
+        && thread_id.len() <= 128
+        && thread_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if !thread_ok {
+        return None;
+    }
+    let sha = file.strip_suffix(".mp4")?;
+    if sha.len() == 64
+        && sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        Some((thread_id, sha))
+    } else {
+        None
+    }
 }
 
 /// Facts accumulated in the single document walk.
@@ -653,6 +760,9 @@ struct DocContext {
     /// Every `data-cfy-id` value in document order (for W-ANCHOR-NONE and
     /// W-ID-DUP; W-ID-FORMAT is emitted inline during the walk).
     cfy_ids: Vec<String>,
+    /// Every `cfy-asset://` URL seen in a resource position, as
+    /// `(position, url)` — validated post-walk as `E-ASSET-REF` (§8.1).
+    asset_refs: Vec<(String, String)>,
 }
 
 /// One pass over the whole tree. Uses manual traversal (not CSS selectors) so
@@ -687,7 +797,7 @@ fn visit_element(node: &NodeRef<'_, Node>, el: &Element, ctx: &mut DocContext, v
     // Inline CSS in style="" attributes (url(...) resource refs; @import is
     // not valid in attribute position but the scanner handles it uniformly).
     if let Some(css) = el.attr("style") {
-        scan_inline_css(css, v);
+        scan_inline_css(css, ctx, v);
     }
 
     match name {
@@ -737,7 +847,7 @@ fn visit_element(node: &NodeRef<'_, Node>, el: &Element, ctx: &mut DocContext, v
         // and url(...) resource refs (W-EXTERNAL-REF / W-LOCAL-REF).
         "style" => {
             let css = collect_text(node);
-            scan_inline_css(&css, v);
+            scan_inline_css(&css, ctx, v);
         }
         "meta" => {
             if parent_is(node, "head") {
@@ -808,18 +918,53 @@ fn visit_element(node: &NodeRef<'_, Node>, el: &Element, ctx: &mut DocContext, v
         }
         // W-EXTERNAL-REF / W-LOCAL-REF resource positions (spec §8.2 list).
         "img" => {
-            check_resource_url(el.attr("src"), "img src", v);
-            check_srcset(el.attr("srcset"), "img srcset", v);
+            check_resource_url(el.attr("src"), "img src", ctx, v);
+            check_srcset(el.attr("srcset"), "img srcset", ctx, v);
         }
         "source" => {
-            check_resource_url(el.attr("src"), "source src", v);
-            check_srcset(el.attr("srcset"), "source srcset", v);
+            check_resource_url(el.attr("src"), "source src", ctx, v);
+            check_srcset(el.attr("srcset"), "source srcset", ctx, v);
         }
-        "video" | "audio" | "track" | "iframe" | "embed" => {
-            check_resource_url(el.attr("src"), name, v);
+        // §1.4 video rules apply to every <video>, wherever it appears:
+        // W-VIDEO-AUTOPLAY (motion only on user intent) and W-VIDEO-POSTER
+        // (the poster is the offline/print/plain-browser face of the video).
+        "video" => {
+            check_resource_url(el.attr("src"), name, ctx, v);
+            if el.attr("autoplay").is_some() || el.attr("loop").is_some() {
+                v.warnings.push(Issue::new(
+                    "W-VIDEO-AUTOPLAY",
+                    "<video> carries autoplay and/or loop — motion must start only on \
+                     user intent (spec §1.4)",
+                ));
+            }
+            let poster_ok = el.attr("poster").is_some_and(|p| {
+                let p = p.trim();
+                p.get(..11)
+                    .is_some_and(|pfx| pfx.eq_ignore_ascii_case("data:image/"))
+            });
+            if !poster_ok {
+                v.warnings.push(Issue::new(
+                    "W-VIDEO-POSTER",
+                    "<video> poster is missing or not an embedded data: URI image \
+                     (spec §1.4 — the poster is what offline/print/plain-browser \
+                     readers see)",
+                ));
+            }
+        }
+        "audio" | "track" | "iframe" | "embed" => {
+            check_resource_url(el.attr("src"), name, ctx, v);
         }
         "object" => {
-            check_resource_url(el.attr("data"), "object data", v);
+            check_resource_url(el.attr("data"), "object data", ctx, v);
+        }
+        // cfy-video figure contract (§1.4): mandatory transcript + caption.
+        "figure" => {
+            let is_video_figure = el
+                .attr("class")
+                .is_some_and(|c| c.split_ascii_whitespace().any(|t| t == "cfy-video"));
+            if is_video_figure {
+                check_video_figure(node, v);
+            }
         }
         // W-LOCAL-REF: relative <a href> (absolute http(s) links are fine —
         // §1 explicitly permits them for further reading).
@@ -928,6 +1073,79 @@ fn check_diagram_coverage(node: &NodeRef<'_, Node>, el: &Element, v: &mut Valida
     }
 }
 
+/// `true` iff the element's `class` attribute contains `token` as a
+/// whitespace-separated class token.
+fn has_class(el: &Element, token: &str) -> bool {
+    el.attr("class")
+        .is_some_and(|c| c.split_ascii_whitespace().any(|t| t == token))
+}
+
+/// The §1.4 `cfy-video` figure contract: W-VIDEO-TRANSCRIPT (a
+/// `<details class="cfy-details cfy-video-transcript">` with a `<summary>`
+/// and non-empty body must immediately follow the `<video>`, whitespace only
+/// between) and W-VIDEO-CAPTION (non-empty `<figcaption>`).
+/// (W-VIDEO-POSTER / W-VIDEO-AUTOPLAY are per-`<video>` rules emitted in
+/// `visit_element` — they apply even outside a cfy-video figure.)
+fn check_video_figure(node: &NodeRef<'_, Node>, v: &mut Validation) {
+    // W-VIDEO-CAPTION: a non-empty <figcaption> somewhere in the figure.
+    let has_caption = node.descendants().skip(1).any(|d| {
+        matches!(d.value(), Node::Element(e) if e.name() == "figcaption")
+            && !collect_text(&d).trim().is_empty()
+    });
+    if !has_caption {
+        v.warnings.push(Issue::new(
+            "W-VIDEO-CAPTION",
+            "cfy-video figure has no non-empty <figcaption> (spec §1.4)",
+        ));
+    }
+
+    // W-VIDEO-TRANSCRIPT: locate the <video>, then require the transcript
+    // <details> as its next non-whitespace sibling (a comment or text in
+    // between breaks the required adjacency, same reading as W-SRC-ORPHAN).
+    let video = node
+        .descendants()
+        .skip(1)
+        .find(|d| matches!(d.value(), Node::Element(e) if e.name() == "video"));
+    let transcript_ok = video.is_some_and(|video| {
+        let next = video.next_siblings().find(|sib| match sib.value() {
+            Node::Text(t) => !t.trim().is_empty(),
+            Node::Element(_) | Node::Comment(_) => true,
+            _ => false,
+        });
+        next.is_some_and(|sib| match sib.value() {
+            Node::Element(d)
+                if d.name() == "details"
+                    && has_class(d, "cfy-details")
+                    && has_class(d, "cfy-video-transcript") =>
+            {
+                let summary = sib.children().find(
+                    |c| matches!(c.value(), Node::Element(e) if e.name() == "summary"),
+                );
+                match summary {
+                    Some(summary) => {
+                        // Non-empty body = text beyond what the summary holds.
+                        let total = collect_text(&sib);
+                        let summary_text = collect_text(&summary);
+                        total.split_whitespace().count()
+                            > summary_text.split_whitespace().count()
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        })
+    });
+    if !transcript_ok {
+        v.warnings.push(Issue::new(
+            "W-VIDEO-TRANSCRIPT",
+            "cfy-video figure's <video> is not immediately followed by a \
+             <details class=\"cfy-details cfy-video-transcript\"> with a <summary> \
+             and a non-empty transcript body (spec §1.4 — the transcript is the \
+             accessibility floor)",
+        ));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // URL classification & the allowlist match rule
 // ---------------------------------------------------------------------------
@@ -965,6 +1183,9 @@ enum UrlKind {
     File,
     /// No scheme — relative, always broken (spec §1).
     Relative,
+    /// `cfy-asset://` — the sanctioned app-scheme video reference (§1.4):
+    /// neither external nor local; checked exclusively by `E-ASSET-REF`.
+    CfyAsset,
     /// Some other scheme (`mailto:`, `javascript:`, …) — not a resource ref.
     Other,
 }
@@ -983,6 +1204,7 @@ fn classify_url(url: &str) -> UrlKind {
         }
         Some(s) if s.eq_ignore_ascii_case("file") => UrlKind::File,
         Some(s) if s.eq_ignore_ascii_case("data") => UrlKind::Data,
+        Some(s) if s.eq_ignore_ascii_case("cfy-asset") => UrlKind::CfyAsset,
         Some(_) => UrlKind::Other,
         None => UrlKind::Relative,
     }
@@ -1005,8 +1227,11 @@ fn url_scheme(url: &str) -> Option<&str> {
 
 /// Non-code resource position (img src, media src, iframe, object/embed):
 /// http(s) → W-EXTERNAL-REF (regardless of host — blocked by the runtime CSP
-/// and broken offline); relative / file:// → W-LOCAL-REF; data: → fine.
-fn check_resource_url(url: Option<&str>, position: &str, v: &mut Validation) {
+/// and broken offline); relative / file:// → W-LOCAL-REF; data: → fine;
+/// cfy-asset:// → recorded on the context for the post-walk `E-ASSET-REF`
+/// check (spec §8.2: the sanctioned app-scheme position is neither external
+/// nor local).
+fn check_resource_url(url: Option<&str>, position: &str, ctx: &mut DocContext, v: &mut Validation) {
     let Some(url) = url else { return };
     match classify_url(url) {
         UrlKind::Http => v.warnings.push(Issue::new(
@@ -1024,16 +1249,19 @@ fn check_resource_url(url: Option<&str>, position: &str, v: &mut Validation) {
                 truncate(url, 120)
             ),
         )),
+        UrlKind::CfyAsset => ctx
+            .asset_refs
+            .push((position.to_owned(), url.trim().to_owned())),
         _ => {}
     }
 }
 
 /// A `srcset` is comma-separated `URL [descriptor]` candidates; check each URL.
-fn check_srcset(srcset: Option<&str>, position: &str, v: &mut Validation) {
+fn check_srcset(srcset: Option<&str>, position: &str, ctx: &mut DocContext, v: &mut Validation) {
     let Some(srcset) = srcset else { return };
     for candidate in srcset.split(',') {
         if let Some(url) = candidate.split_ascii_whitespace().next() {
-            check_resource_url(Some(url), position, v);
+            check_resource_url(Some(url), position, ctx, v);
         }
     }
 }
@@ -1046,7 +1274,7 @@ fn check_srcset(srcset: Option<&str>, position: &str, v: &mut Validation) {
 /// (a code-loading position, spec §8.1) and `url(...)` resource refs
 /// (spec §8.2). CSS comments are stripped first so commented-out rules don't
 /// trip warnings.
-fn scan_inline_css(css: &str, v: &mut Validation) {
+fn scan_inline_css(css: &str, ctx: &mut DocContext, v: &mut Validation) {
     let css = strip_css_comments(css);
     let lower = css.to_ascii_lowercase(); // ASCII-only fold keeps byte offsets aligned
     let bytes = lower.as_bytes();
@@ -1107,7 +1335,7 @@ fn scan_inline_css(css: &str, v: &mut Validation) {
             (_, Some(url_pos)) => {
                 let (url_value, consumed_to) = parse_url_token(&css, url_pos + 4);
                 i = consumed_to.max(url_pos + 4);
-                check_resource_url(Some(url_value.trim()), "CSS url()", v);
+                check_resource_url(Some(url_value.trim()), "CSS url()", ctx, v);
             }
             _ => break,
         }
@@ -1274,6 +1502,258 @@ mod tests {
 
     fn validate_str(html: &str) -> Validation {
         validate(html.as_bytes(), 1)
+    }
+
+    // -- §1.4 video figures: E-ASSET-REF + W-VIDEO-* ------------------------
+
+    const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// A complete, §1.4-conformant cfy-video figure referencing `url`.
+    fn video_figure(url: &str) -> String {
+        format!(
+            r#"<figure class="cfy-video" data-cfy-id="vid-demo">
+<video controls preload="metadata" playsinline
+       poster="data:image/jpeg;base64,/9j/4AAQ" src="{url}"></video>
+<details class="cfy-details cfy-video-transcript">
+<summary>Transcript</summary>
+<p>The complete narration, verbatim.</p>
+</details>
+<figcaption><strong>The whole flow.</strong></figcaption>
+</figure>"#
+        )
+    }
+
+    /// A temp assets dir holding `<sha>.mp4` marker files for E-ASSET-REF
+    /// existence checks.
+    fn assets_dir_with(shas: &[&str]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "conceptify-validator-assets-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        for sha in shas {
+            fs::write(dir.join(format!("{sha}.mp4")), b"x").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn conformant_video_figure_is_clean_grammar_only() {
+        // File-only position: grammar passes, no thread/existence check.
+        let html = valid_doc(&video_figure(&format!(
+            "cfy-asset://localhost/t1/{SHA_A}.mp4"
+        )));
+        let v = validate_str(&html);
+        assert!(v.errors.is_empty(), "{:?}", v.errors);
+        assert!(v.warnings.is_empty(), "{:?}", v.warnings);
+    }
+
+    #[test]
+    fn cfy_asset_is_neither_external_nor_local() {
+        // The sanctioned app-scheme position must not trip W-EXTERNAL-REF or
+        // W-LOCAL-REF (spec §8.2 note) — while http(s) video src still does.
+        let html = valid_doc(&video_figure(&format!(
+            "cfy-asset://localhost/t1/{SHA_A}.mp4"
+        )));
+        let v = validate_str(&html);
+        assert!(warning_codes(&v).is_empty(), "{:?}", v.warnings);
+
+        let html = valid_doc(&video_figure("https://example.com/x.mp4"));
+        let v = validate_str(&html);
+        assert!(warning_codes(&v).contains(&"W-EXTERNAL-REF"), "{:?}", v.warnings);
+    }
+
+    #[test]
+    fn e_asset_ref_malformed_grammar_fails_even_file_only() {
+        for bad in [
+            "cfy-asset://localhost/t1/short.mp4",                    // bad sha
+            &format!("cfy-asset://localhost/t1/{}.mp4", "A".repeat(64)), // uppercase
+            &format!("cfy-asset://localhost/t1/{SHA_A}.webm"),       // wrong ext
+            &format!("cfy-asset://localhost/t1/{SHA_A}"),            // no ext
+            &format!("cfy-asset://localhost/{SHA_A}.mp4"),           // no thread
+            &format!("cfy-asset://localhost/a/b/{SHA_A}.mp4"),       // extra segment
+            &format!("cfy-asset://otherhost/t1/{SHA_A}.mp4"),        // wrong host
+            &format!("cfy-asset://localhost/../{SHA_A}.mp4"),        // traversal
+        ] {
+            let html = valid_doc(&video_figure(bad));
+            let v = validate_str(&html);
+            assert_eq!(error_codes(&v), vec!["E-ASSET-REF"], "url {bad:?}");
+        }
+    }
+
+    #[test]
+    fn e_asset_ref_server_side_thread_and_existence_checks() {
+        let dir = assets_dir_with(&[SHA_A]);
+        let url = format!("cfy-asset://localhost/t1/{SHA_A}.mp4");
+        let html = valid_doc(&video_figure(&url));
+
+        // Right thread + uploaded asset: clean.
+        let ctx = AssetContext { thread_id: "t1", assets_dir: dir.clone() };
+        let v = validate_with_assets(html.as_bytes(), 1, Some(&ctx));
+        assert!(v.errors.is_empty(), "{:?}", v.errors);
+
+        // Same URL saved to a DIFFERENT thread: rejected.
+        let ctx = AssetContext { thread_id: "t2", assets_dir: dir.clone() };
+        let v = validate_with_assets(html.as_bytes(), 1, Some(&ctx));
+        assert_eq!(error_codes(&v), vec!["E-ASSET-REF"]);
+        assert!(v.errors[0].message.contains("thread"), "{:?}", v.errors);
+
+        // Right thread but the asset was never uploaded: rejected.
+        let missing = "b".repeat(64);
+        let html = valid_doc(&video_figure(&format!(
+            "cfy-asset://localhost/t1/{missing}.mp4"
+        )));
+        let ctx = AssetContext { thread_id: "t1", assets_dir: dir.clone() };
+        let v = validate_with_assets(html.as_bytes(), 1, Some(&ctx));
+        assert_eq!(error_codes(&v), vec!["E-ASSET-REF"]);
+        assert!(v.errors[0].message.contains("not been uploaded"), "{:?}", v.errors);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn e_asset_ref_checks_source_children_too() {
+        // "Any resource position" includes a <source> child instead of src.
+        let dir = assets_dir_with(&[]);
+        let html = valid_doc(&format!(
+            r#"<figure class="cfy-video" data-cfy-id="vid-x">
+<video controls poster="data:image/jpeg;base64,/9j/"><source src="cfy-asset://localhost/t1/{SHA_A}.mp4"></video>
+<details class="cfy-details cfy-video-transcript"><summary>Transcript</summary><p>Words.</p></details>
+<figcaption>Cap.</figcaption>
+</figure>"#
+        ));
+        let ctx = AssetContext { thread_id: "t1", assets_dir: dir.clone() };
+        let v = validate_with_assets(html.as_bytes(), 1, Some(&ctx));
+        assert_eq!(error_codes(&v), vec!["E-ASSET-REF"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn w_video_autoplay_and_loop() {
+        for attrs in ["autoplay", "loop", "autoplay muted loop"] {
+            let html = valid_doc(&format!(
+                r#"<video controls {attrs} poster="data:image/jpeg;base64,/9j/"></video>"#
+            ));
+            let v = validate_str(&html);
+            assert_eq!(warning_codes(&v), vec!["W-VIDEO-AUTOPLAY"], "attrs {attrs:?}");
+        }
+    }
+
+    #[test]
+    fn w_video_poster_missing_or_not_data_image() {
+        for poster in [None, Some("https://x.example/p.jpg"), Some("poster.jpg"), Some("data:video/mp4;base64,AAAA")] {
+            let attr = poster.map(|p| format!(r#" poster="{p}""#)).unwrap_or_default();
+            let html = valid_doc(&format!("<video controls{attr}></video>"));
+            let v = validate_str(&html);
+            assert!(
+                warning_codes(&v).contains(&"W-VIDEO-POSTER"),
+                "poster {poster:?}: {:?}",
+                v.warnings
+            );
+        }
+        // A data:image poster (any raster subtype, case-insensitive) is fine.
+        let html = valid_doc(r#"<video controls poster="DATA:IMAGE/webp;base64,AA"></video>"#);
+        let v = validate_str(&html);
+        assert!(!warning_codes(&v).contains(&"W-VIDEO-POSTER"), "{:?}", v.warnings);
+    }
+
+    #[test]
+    fn w_video_transcript_shapes() {
+        let url = format!("cfy-asset://localhost/t1/{SHA_A}.mp4");
+
+        // Missing entirely.
+        let html = valid_doc(&format!(
+            r#"<figure class="cfy-video" data-cfy-id="vid-a">
+<video controls poster="data:image/jpeg;base64,/9j/" src="{url}"></video>
+<figcaption>Cap.</figcaption></figure>"#
+        ));
+        assert!(warning_codes(&validate_str(&html)).contains(&"W-VIDEO-TRANSCRIPT"));
+
+        // Present but not adjacent (an element between).
+        let html = valid_doc(&format!(
+            r#"<figure class="cfy-video" data-cfy-id="vid-b">
+<video controls poster="data:image/jpeg;base64,/9j/" src="{url}"></video>
+<p>interloper</p>
+<details class="cfy-details cfy-video-transcript"><summary>Transcript</summary><p>Words.</p></details>
+<figcaption>Cap.</figcaption></figure>"#
+        ));
+        assert!(warning_codes(&validate_str(&html)).contains(&"W-VIDEO-TRANSCRIPT"));
+
+        // Missing the required classes.
+        let html = valid_doc(&format!(
+            r#"<figure class="cfy-video" data-cfy-id="vid-c">
+<video controls poster="data:image/jpeg;base64,/9j/" src="{url}"></video>
+<details><summary>Transcript</summary><p>Words.</p></details>
+<figcaption>Cap.</figcaption></figure>"#
+        ));
+        assert!(warning_codes(&validate_str(&html)).contains(&"W-VIDEO-TRANSCRIPT"));
+
+        // Summary but empty body.
+        let html = valid_doc(&format!(
+            r#"<figure class="cfy-video" data-cfy-id="vid-d">
+<video controls poster="data:image/jpeg;base64,/9j/" src="{url}"></video>
+<details class="cfy-details cfy-video-transcript"><summary>Transcript</summary></details>
+<figcaption>Cap.</figcaption></figure>"#
+        ));
+        assert!(warning_codes(&validate_str(&html)).contains(&"W-VIDEO-TRANSCRIPT"));
+
+        // The conformant shape (whitespace between video and details is fine).
+        let html = valid_doc(&video_figure(&url));
+        assert!(
+            !warning_codes(&validate_str(&html)).contains(&"W-VIDEO-TRANSCRIPT"),
+            "conformant figure must not warn"
+        );
+    }
+
+    #[test]
+    fn w_video_caption_missing_or_empty() {
+        let url = format!("cfy-asset://localhost/t1/{SHA_A}.mp4");
+        for figcaption in ["", "<figcaption></figcaption>", "<figcaption>   </figcaption>"] {
+            let html = valid_doc(&format!(
+                r#"<figure class="cfy-video" data-cfy-id="vid-a">
+<video controls poster="data:image/jpeg;base64,/9j/" src="{url}"></video>
+<details class="cfy-details cfy-video-transcript"><summary>Transcript</summary><p>Words.</p></details>
+{figcaption}</figure>"#
+            ));
+            let v = validate_str(&html);
+            assert!(
+                warning_codes(&v).contains(&"W-VIDEO-CAPTION"),
+                "figcaption {figcaption:?}: {:?}",
+                v.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn video_rules_do_not_touch_plain_figures() {
+        // A non-video figure with neither transcript nor caption stays clean.
+        let html = valid_doc(
+            r#"<figure class="cfy-figure" data-cfy-id="fig-a"><svg viewBox="0 0 1 1"></svg></figure>"#,
+        );
+        let v = validate_str(&html);
+        assert!(v.warnings.is_empty(), "{:?}", v.warnings);
+    }
+
+    #[test]
+    fn parse_asset_url_grammar() {
+        assert_eq!(
+            parse_asset_url(&format!("cfy-asset://localhost/t-1_X/{SHA_A}.mp4")),
+            Some(("t-1_X", SHA_A))
+        );
+        for bad in [
+            "",
+            "cfy-asset://localhost/",
+            "cfy-asset:///t1/x.mp4",
+            &format!("CFY-ASSET://localhost/t1/{SHA_A}.mp4"), // scheme case-sensitive here
+            &format!("cfy-asset://localhost/{}/{SHA_A}.mp4", "x".repeat(129)),
+            &format!("cfy-asset://localhost/t%31/{SHA_A}.mp4"),
+        ] {
+            assert_eq!(parse_asset_url(bad), None, "{bad:?}");
+        }
     }
 
     /// In-memory DB mirroring the shipped projects/threads/artifacts schema

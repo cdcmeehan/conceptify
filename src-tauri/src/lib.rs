@@ -2,6 +2,8 @@ mod anchoring;
 mod artifact_protocol;
 mod artifact_diff;
 mod artifacts;
+mod asset_protocol;
+mod assets;
 mod catalog;
 mod commands;
 mod comments;
@@ -84,6 +86,14 @@ pub fn run() {
     // WKWebView requirement). See `artifact_protocol` for the URL contract.
     builder = builder
         .register_asynchronous_uri_scheme_protocol("artifact", artifact_protocol::protocol_handler);
+
+    // Epic conceptify-z9y / artifact-spec §1.4: the Range-capable video-asset
+    // scheme the viewer CSP admits via `media-src cfy-asset://localhost`.
+    // A second scheme (never the same as `artifact://`) keeps media
+    // cross-origin from both the document and the app shell. Registered on
+    // the builder for the same before-any-webview WKWebView requirement.
+    builder = builder
+        .register_asynchronous_uri_scheme_protocol("cfy-asset", asset_protocol::protocol_handler);
 
     // PRD §5.1 Lifecycle: window-state plugin for size/position persistence
     // across hide/show and relaunch.

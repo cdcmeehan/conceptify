@@ -1212,11 +1212,6 @@ version; `500` for database or artifact-file read failures.
 
 ### `PUT /api/v1/threads/:thread_id/assets/:sha256`
 
-> **Status: contract reserved, not yet implemented.** Ships with the
-> video epic's app-side bead (conceptify-z9y.6); documented here so the
-> render pipeline and the artifact spec (§1.4, §8.3) build against a
-> fixed shape.
-
 Authenticated. **save-asset** (artifact-spec §1.4): upload a video clip
 into a thread's content-addressed asset storage, *before* the
 `save-artifact` call whose HTML references it. `:sha256` is the SHA-256

@@ -22,8 +22,8 @@ use conceptify_types::{
     AvatarJobStatusResponse, AvatarListResponse, CommentResponse, CreateAvatarJobRequest,
     CreateAvatarJobResponse, CreateThreadRequest, CreateThreadResponse, DisplaySettingsResponse,
     EnsureProjectRequest, EnsureProjectResponse, HealthResponse, ListCommentsResponse, OpenRequest,
-    OpenResponse, SaveArtifactErrorResponse, SaveArtifactResponse, ThreadContextResponse,
-    UpdateCommentRequest,
+    OpenResponse, SaveArtifactErrorResponse, SaveArtifactResponse, SaveAssetResponse,
+    ThreadContextResponse, UpdateCommentRequest,
 };
 
 const DEFAULT_PORT: u16 = 4477;
@@ -41,6 +41,7 @@ Commands:
   create-thread  --project <id> --title <t> --question <q>   create a thread
   open           --thread <id> | --project <id>       focus the app on a project/thread
   save-artifact  --thread <id> --file <path>          save an artifact file to a thread
+  save-asset     --thread <id> --file <path>          upload a video clip; prints its cfy-asset:// URL
   get-context    --thread <id>                         run context for a headless follow-up (JSON)
   list-comments  --thread <id> [--status open|answered|applied]   list a thread's comments (JSON)
   resolve-comment --id <id> --answer-file <path> [--applied]      answer/apply a comment
@@ -67,6 +68,7 @@ fn main() -> ExitCode {
         "create-thread" => cmd_create_thread(rest),
         "open" => cmd_open(rest),
         "save-artifact" => cmd_save_artifact(rest),
+        "save-asset" => cmd_save_asset(rest),
         "get-context" => cmd_get_context(rest),
         "list-comments" => cmd_list_comments(rest),
         "resolve-comment" => cmd_resolve_comment(rest),
@@ -591,6 +593,116 @@ fn cmd_save_artifact(args: &[String]) -> ExitCode {
             }
             fail(e)
         }
+    }
+}
+
+/// How a save-asset upload failed: a structured spec rejection (HTTP 422,
+/// artifact-spec §8.3 rule IDs) or anything else.
+enum PutAssetError {
+    Validation(SaveArtifactErrorResponse),
+    Other(String),
+}
+
+/// PUT raw clip bytes to the assets endpoint. Unlike `authed_post_bytes`,
+/// a 422 body is parsed *here* (into the documented `{ error, code, errors }`
+/// shape) rather than re-requesting — uploads are up to 20 MiB, so the
+/// save-artifact "retry to fetch the structured error" trick would resend
+/// the whole clip.
+fn put_asset_bytes(port: u16, path: &str, bytes: &[u8]) -> Result<SaveAssetResponse, PutAssetError> {
+    let token = read_token().map_err(|e| {
+        PutAssetError::Other(format!("failed to read auth token (has the app run once?): {}", e))
+    })?;
+    let url = format!("http://127.0.0.1:{}{}", port, path);
+
+    match ureq::request("PUT", &url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .set("Content-Type", "video/mp4")
+        .timeout(REQUEST_TIMEOUT)
+        .send_bytes(bytes)
+    {
+        Ok(response) => response
+            .into_json::<SaveAssetResponse>()
+            .map_err(|e| PutAssetError::Other(format!("invalid JSON from {}: {}", path, e))),
+        Err(ureq::Error::Status(422, response)) => match response.into_json() {
+            Ok(err_resp) => Err(PutAssetError::Validation(err_resp)),
+            Err(e) => Err(PutAssetError::Other(format!(
+                "validation failed but error body was unreadable: {}",
+                e
+            ))),
+        },
+        Err(ureq::Error::Status(code, response)) => {
+            Err(PutAssetError::Other(status_error(code, response)))
+        }
+        Err(ureq::Error::Transport(e)) => {
+            Err(PutAssetError::Other(format!("failed to reach app: {}", e)))
+        }
+    }
+}
+
+/// Shape the API's save-asset response into the CLI's documented JSON output
+/// (docs/cli.md): the canonical `cfy-asset://` URL is the payload the render
+/// pipeline splices into the artifact's `<video src>`.
+fn save_asset_output(resp: &SaveAssetResponse) -> serde_json::Value {
+    json!({
+        "sha256": resp.sha256,
+        "bytes": resp.bytes,
+        "url": resp.url,
+        "warningsCount": resp.warnings.len(),
+    })
+}
+
+/// `conceptify save-asset --thread <id> --file <path>` — upload a video clip
+/// into a thread's content-addressed asset storage (artifact-spec §1.4; maps
+/// to `PUT /api/v1/threads/:id/assets/:sha256`). Run BEFORE the
+/// `save-artifact` whose HTML references the clip: the artifact validator
+/// rejects references to assets that were never uploaded (`E-ASSET-REF`).
+/// The sha is computed locally; re-upload of a stored clip is idempotent.
+fn cmd_save_asset(args: &[String]) -> ExitCode {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => return fail(e),
+    };
+
+    let (thread, file_path) = match (flags.get("thread"), flags.get("file")) {
+        (Some(t), Some(f)) => (t, f),
+        _ => return fail("save-asset requires --thread <id> --file <path>"),
+    };
+
+    let bytes = match fs::read(file_path) {
+        Ok(b) => b,
+        Err(e) => return fail(format!("failed to read {}: {}", file_path, e)),
+    };
+
+    // Local content address — the URL segment the server verifies against.
+    let sha256 = {
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(&bytes);
+        digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+
+    let port = match ensure_app_healthy() {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+
+    let path = format!("/api/v1/threads/{}/assets/{}", thread, sha256);
+    match put_asset_bytes(port, &path, &bytes) {
+        Ok(resp) => {
+            // Upload-time spec warnings (W-ASSET-RES / W-ASSET-LONG) to
+            // stderr, same format as save-artifact.
+            for warning in &resp.warnings {
+                eprintln!("warning: {}: {}", warning.code, warning.message);
+            }
+            emit(&save_asset_output(&resp))
+        }
+        Err(PutAssetError::Validation(err_resp)) => {
+            eprintln!("Error: {} ({})", err_resp.error, err_resp.code);
+            for issue in &err_resp.errors {
+                eprintln!("  {}: {}", issue.code, issue.message);
+            }
+            ExitCode::FAILURE
+        }
+        Err(PutAssetError::Other(e)) => fail(e),
     }
 }
 
@@ -1463,6 +1575,32 @@ mod tests {
         };
         let out = save_artifact_output(&resp);
         assert_eq!(out, json!({ "version": 1, "warningsCount": 0 }));
+    }
+
+    #[test]
+    fn save_asset_output_stable_camelcase_contract() {
+        use conceptify_types::ArtifactIssue;
+        let sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let resp = SaveAssetResponse {
+            thread_id: s("thr-42"),
+            sha256: s(sha),
+            bytes: 8_388_608,
+            url: format!("cfy-asset://localhost/thr-42/{sha}.mp4"),
+            warnings: vec![ArtifactIssue {
+                code: s("W-ASSET-LONG"),
+                message: s("duration is 95.0s"),
+            }],
+        };
+        let out = save_asset_output(&resp);
+        assert_eq!(
+            out,
+            json!({
+                "sha256": sha,
+                "bytes": 8_388_608,
+                "url": format!("cfy-asset://localhost/thr-42/{sha}.mp4"),
+                "warningsCount": 1,
+            })
+        );
     }
 
     #[test]

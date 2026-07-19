@@ -950,10 +950,16 @@ mod tests {
         std::fs::create_dir_all(dir.join("runs")).unwrap();
         std::fs::write(dir.join("artifact.html"), b"<html></html>").unwrap();
         std::fs::write(dir.join("artifact.v1.html"), b"<html></html>").unwrap();
+        // Video assets (epic conceptify-z9y) live inside the thread dir by
+        // construction, so this same removal is their entire GC story.
+        let asset = crate::assets::asset_file_path(&root, "p1", "how-does-x-work", &"a".repeat(64));
+        std::fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        std::fs::write(&asset, b"clip").unwrap();
 
-        // Existing dir + contents are removed.
+        // Existing dir + contents (assets included) are removed.
         remove_thread_artifact_dir(&root, "p1", "how-does-x-work").unwrap();
         assert!(!dir.exists());
+        assert!(!asset.exists(), "thread deletion must GC video assets");
 
         // A now-missing dir is success (best-effort / idempotent).
         remove_thread_artifact_dir(&root, "p1", "how-does-x-work").unwrap();
