@@ -151,6 +151,150 @@ stroke draw-ins from an invisible stroke. `.cfy-reveal` is transform-only
 for this reason, and there is deliberately no `.cfy-draw` class. Artifact-
 specific styles must follow the same rule.
 
+## Themes (89k.1 design record)
+
+Three explanation themes, selected per artifact (or per app setting —
+89k.2). Each is a **complete override of the `@cfy:tokens` palette block**
+plus a small, named set of component-level rules; type scale, spacing, and
+rhythm are shared. `manuscript` is the default and is byte-identical to the
+current scaffold values — zero visual change for existing artifacts.
+
+Every text/background pairing below was contrast-checked against WCAG 2.1
+AA with a Node implementation of the relative-luminance + contrast-ratio
+formula (21 pairings × 6 variants = 126 checks, all ≥ 4.5:1 for text and
+≥ 3:1 for UI strokes/indicators). Checked pairings per variant: ink/paper,
+muted/paper, ink/surface, muted/surface, accent/paper, ink/mark, each
+callout color vs its own bg, ink vs each callout bg, paper/accent
+(code-mark badge), diagram-label/node, muted/node, ink/code-hl, plus 3:1
+UI checks (node-stroke/node, edge/surface, diagram-accent/accent-bg,
+code-hl-bar/code-hl, accent/surface). Worst cases: Sketchbook-light
+muted/surface 4.68:1; Manuscript-dark node-stroke/node 4.11:1 (needs 3:1).
+
+### `manuscript` — default (frozen baseline)
+
+Quiet print editorial: warm paper, warm near-black ink, one terracotta
+accent, New York serif display. These are the **current scaffold values,
+frozen exactly** — the theme merely names them.
+
+| Token | Light | Dark |
+|---|---|---|
+| `--cfy-paper` | `#fbf9f4` | `#17140f` |
+| `--cfy-surface` | `#f3f0e8` | `#221e17` |
+| `--cfy-ink` | `#211d16` | `#eae4d8` |
+| `--cfy-muted` | `#6d6759` | `#a89f8d` |
+| `--cfy-line` | `#e4dfd2` | `#383226` |
+| `--cfy-accent` | `#a34d24` | `#e09863` |
+| `--cfy-mark` | `#f3e5c3` | `#4a3a1c` |
+| `--cfy-insight` / `-bg` | `#7a5a12` / `#f5edd8` | `#e3c377` / `#322a15` |
+| `--cfy-warning` / `-bg` | `#9b3a2a` / `#f7e8e0` | `#e89b85` / `#3a211a` |
+| `--cfy-definition` / `-bg` | `#33586b` / `#e8eef1` | `#9dc2d6` / `#1d2b33` |
+| `--cfy-code-bg` / `-hl` / `-hl-bar` | `#f4f1e9` / `#eae4d2` / `#a34d24` | `#201c15` / `#332c1e` / `#e09863` |
+| `--cfy-diagram-node` / `-node-stroke` | `#f3f0e8` / `#58513f` | `#2a251c` / `#8d8471` |
+| `--cfy-diagram-edge` / `-label` | `#6d6759` / `#211d16` | `#a89f8d` / `#eae4d8` |
+| `--cfy-diagram-accent` / `-accent-bg` | `#a34d24` / `#f0ddcf` | `#e09863` / `#46301f` |
+
+Fonts: unchanged (`--cfy-font-serif` headings). Shiki pair:
+`vitesse-light` / `vitesse-dark` (unchanged).
+
+### `blueprint` — cool, precise, drafted-on-vellum
+
+For systems/infra topics. Ice-blue near-white paper, graphite blue-black
+ink, prussian/steel-blue accent, pale ice-blue highlighter, cooler code
+wash. Dark variant sits on deep navy, not neutral black. Headings switch
+to the sans stack; H4 tracked labels and code-listing title bars go mono
+for a drafting-table register.
+
+| Token | Light | Dark |
+|---|---|---|
+| `--cfy-paper` | `#f7f9fb` | `#101923` |
+| `--cfy-surface` | `#eaeff4` | `#1a2634` |
+| `--cfy-ink` | `#1c2430` | `#dce6ef` |
+| `--cfy-muted` | `#55606e` | `#94a5b6` |
+| `--cfy-line` | `#d3dce4` | `#2b3a4a` |
+| `--cfy-accent` | `#2b5f8a` | `#6aa5d8` |
+| `--cfy-mark` | `#d8e8f5` | `#1f3a55` |
+| `--cfy-insight` / `-bg` | `#74591a` / `#f0eddc` | `#d9c069` / `#2b2a17` |
+| `--cfy-warning` / `-bg` | `#a13434` / `#f8e8e6` | `#e89a8f` / `#382223` |
+| `--cfy-definition` / `-bg` | `#1e6a80` / `#e0eef3` | `#85c7dd` / `#16303c` |
+| `--cfy-code-bg` / `-hl` / `-hl-bar` | `#eef2f6` / `#dde7f0` / `#2b5f8a` | `#0d151e` / `#1c2f42` / `#6aa5d8` |
+| `--cfy-diagram-node` / `-node-stroke` | `#eaeff4` / `#46566a` | `#1a2634` / `#7e93a8` |
+| `--cfy-diagram-edge` / `-label` | `#55606e` / `#1c2430` | `#94a5b6` / `#dce6ef` |
+| `--cfy-diagram-accent` / `-accent-bg` | `#2b5f8a` / `#d9e5f0` | `#6aa5d8` / `#21405c` |
+
+Non-token rules (part of the theme block, 89k.3):
+`--cfy-font-serif` reassigned to the sans stack (headings, blockquote,
+step numerals, compare row headers all follow); `h4` and `.cfy-code-title`
+take `var(--cfy-font-mono)`. Shiki pair: **`github-light` / `nord`**
+(see decision below).
+
+### `sketchbook` — warm, hand-drawn
+
+For conceptual/teaching explanations. Creamier paper, deep-ochre accent
+(darkened until it passes 4.5:1 as link text — raw ochre does not),
+ink-blue reserved for the definition callout, chunky saturated-yellow
+highlighter. Headings take the existing `--cfy-font-hand` stack (Bradley
+Hand / Chalkboard SE — installed macOS faces, no network). Dark variant is
+chalkboard green-black with chalk-ochre accent.
+
+| Token | Light | Dark |
+|---|---|---|
+| `--cfy-paper` | `#faf6ec` | `#141a15` |
+| `--cfy-surface` | `#f1ead9` | `#1e2620` |
+| `--cfy-ink` | `#292118` | `#e6e3d5` |
+| `--cfy-muted` | `#6f6754` | `#a3a892` |
+| `--cfy-line` | `#ddd3ba` | `#333e30` |
+| `--cfy-accent` | `#8a5c12` | `#d9b25f` |
+| `--cfy-mark` | `#f2da8f` | `#4c451d` |
+| `--cfy-insight` / `-bg` | `#75570f` / `#f4e9c8` | `#dcc274` / `#2e2f18` |
+| `--cfy-warning` / `-bg` | `#9c4423` / `#f6e4d8` | `#e5a08a` / `#3a2620` |
+| `--cfy-definition` / `-bg` | `#41597d` / `#e8ecf2` | `#a7c6e0` / `#202e3a` |
+| `--cfy-code-bg` / `-hl` / `-hl-bar` | `#f2ecda` / `#e8dfc2` / `#8a5c12` | `#101711` / `#253023` / `#d9b25f` |
+| `--cfy-diagram-node` / `-node-stroke` | `#f1ead9` / `#5c5138` | `#1e2620` / `#8b937c` |
+| `--cfy-diagram-edge` / `-label` | `#6f6754` / `#292118` | `#a3a892` / `#e6e3d5` |
+| `--cfy-diagram-accent` / `-accent-bg` | `#8a5c12` / `#efe0b8` | `#d9b25f` / `#3d3a20` |
+
+Non-token rules (part of the theme block, 89k.3):
+`--cfy-font-serif` reassigned to the hand stack; `--cfy-radius: 14px`,
+`--cfy-radius-sm: 8px`; headings drop the negative tracking
+(`letter-spacing: 0` on h1/h2 — hand faces are not optically sized);
+`.cfy-term` gradient stop moves 58% → 45% (chunkier swipe); callout edge
+3px → 4px; `.cfy-diagram`, `.cfy-details`, `.cfy-next-questions > li`
+borders 1px → 2px; `.cfy-diagram svg` labels take `var(--cfy-font-hand)`
+(every diagram gets the `cfy-hand` treatment without needing the class).
+No fake roughen filters on text. Shiki pair: `vitesse-light` /
+`vitesse-dark` (Vitesse's warm earth tokens already suit cream and
+chalkboard).
+
+### Theme decisions
+
+- **Shiki pairing is per-theme, chosen at generation time** — but only
+  Blueprint actually diverges: Manuscript and Sketchbook use
+  `vitesse-light`/`vitesse-dark`; Blueprint uses `github-light`/`nord`.
+  Rationale: Vitesse's warm sand-and-umber token palette visibly clashes
+  on Blueprint's ice paper and navy code-bg, and no single pair can be
+  warm enough for Manuscript/Sketchbook and cool enough for Blueprint
+  dark. Nord's frost-blue tokens were designed for a navy ground.
+  Live-retheme caveat: Shiki colors are baked per-span, so retheming an
+  existing artifact keeps its original code colors. This stays safe
+  because all three themes' `--cfy-code-bg` values sit in tight luminance
+  bands (light ≈ Y 0.83–0.89, dark ≈ Y 0.006–0.013), so any pair remains
+  AA-legible on any theme's code wash — the mismatch is aesthetic only
+  and self-heals on regeneration.
+- **Sketchbook *prefers* d2 sketch mode; it does not force it.** The skill
+  defaults to `d2 --sketch` (+ Mermaid `look: handDrawn` where the
+  adapter supports theming) when the theme is `sketchbook`, but may
+  override for dense or precision-critical diagrams where roughened
+  strokes hurt legibility. Forcing is also unenforceable: hand-authored
+  SVG has no sketch switch, and some Mermaid handDrawn looks bake literal
+  hex (see rendering.md). The hand *feel* is guaranteed at the theme
+  level regardless — hand-face diagram labels and 2px frames come from
+  the theme block, not from the renderer.
+- **Callout semantics keep their hue family in every theme** (insight =
+  gold/olive, warning = red, definition = blue) so callout recognition
+  transfers across themes; each theme re-tunes temperature/saturation to
+  sit on its ground. In Blueprint, definition shifts to cyan-teal
+  (`#1e6a80`/`#85c7dd`) so it stays distinct from the steel-blue accent.
+
 ## Regenerating the demo
 
 `skill/examples/demo-artifact.html` contains the scaffold spliced verbatim.
