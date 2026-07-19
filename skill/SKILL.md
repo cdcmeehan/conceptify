@@ -41,11 +41,17 @@ Read these before authoring — they are the contract, not background:
   runs (answering reader comments via `resolve-comment`, and apply-mode
   updates that publish a new artifact version). Read it when a run's prompt
   points you here; not needed for initial authoring.
+- **`references/video.md`** — how to storyboard, render, and embed an
+  explainer video (`cfy-video`, artifact-spec §1.4). Read it only when a
+  video is warranted (temporal concepts); most artifacts need no video.
 - **`scripts/highlight.mjs`** — Shiki v4 dual-theme code highlighting
   helper (run it; no need to read it).
 - **`scripts/postprocess-svg.mjs`** — post-processes d2/dot SVG for
   inlining (prolog/style stripping + `data-cfy-id` stamping; see
   rendering.md — run it, no need to read it).
+- **`scripts/render-video.mjs`** + **`video/`** — the Remotion render
+  pipeline for explainer clips (compositions + render script). Used only
+  when a video is warranted; see `references/video.md`.
 - **`examples/demo-artifact.html`** — a complete valid artifact exercising
   every component. Skim it as a reference rendering when unsure how
   components compose.
@@ -329,6 +335,29 @@ reminder, not a substitute):
   permanent rendered state. **No animation may hide content in its
   from-state** — no opacity-0 fade-ins, no draw-ins from invisible
   strokes. Transform-only reveals (like the scaffold's `.cfy-reveal`).
+
+**Explainer video (optional, temporal concepts only).** When a video is
+warranted — the concept is genuinely temporal (state evolution, request
+lifecycle, pipeline, protocol round) and the reader benefits from seeing
+time directly — the skill can render a short clip and add it as a
+`cfy-video` figure. WHETHER to include one is decided elsewhere (bead
+conceptify-z9y.5, plus a `video.mode` setting); this is just the
+mechanical path once that says yes:
+
+1. Storyboard 4–8 beats (one sentence each), pick a template
+   (`step-sequence` / `state-machine` / `data-flow`), write the props JSON.
+2. Render: `node scripts/render-video.mjs --composition <id> --props
+   <file> --out <dir>` → mp4 + poster + vtt (tell the user it is
+   rendering; it is CPU-heavy).
+3. Upload the mp4 with `conceptify save-asset` and place the returned
+   `cfy-asset://` URL in a `cfy-video` figure per artifact-spec §1.4 — with
+   the poster inlined as a `data:` URI and **the transcript populated with
+   the narration script verbatim**.
+
+Never autoplay; at most 2 video figures; the artifact must stand alone
+without the clip. **Full details in `references/video.md`** — read it
+before rendering. (First use needs the render deps installed; `conceptify
+doctor` reports and hints this.)
 
 ### 6. Pre-save review
 

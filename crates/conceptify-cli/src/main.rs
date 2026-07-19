@@ -998,6 +998,53 @@ fn check_node_present() -> Check {
     }
 }
 
+/// Check whether the skill's Remotion video project (`skill/video`, installed
+/// under `~/.claude/skills/conceptify/video`) has its dependencies installed.
+/// Explainer videos (bead conceptify-z9y.3) are an optional enhancement, so a
+/// missing or uninstalled project is reported as information — `ok` stays
+/// `true` and doctor's exit code is unaffected, matching the optional-`codex`
+/// check above.
+fn check_remotion_project() -> Check {
+    let home = std::env::var("HOME").unwrap_or_default();
+    // The skill is copied to one of these roots by `just install-skill`.
+    let candidates = [
+        format!("{home}/.claude/skills/conceptify/video"),
+        format!("{home}/.codex/skills/conceptify/video"),
+    ];
+    let install_hint = |dir: &str| {
+        format!("Install the render deps: cd {dir} && npm install && npm run ensure-browser")
+    };
+    for dir in &candidates {
+        let project = std::path::Path::new(dir);
+        if !project.join("package.json").exists() {
+            continue;
+        }
+        // Project present — are its node deps installed?
+        if project.join("node_modules/remotion").exists() {
+            return Check::pass(
+                "remotion-project",
+                format!("Remotion video project is installed at {dir}"),
+            );
+        }
+        return Check {
+            name: "remotion-project".to_string(),
+            ok: true, // optional: absence must never fail doctor
+            detail: format!(
+                "Remotion video project found at {dir} but its dependencies are not installed (explainer videos unavailable until then)"
+            ),
+            hint: Some(install_hint(dir)),
+        };
+    }
+    Check {
+        name: "remotion-project".to_string(),
+        ok: true,
+        detail:
+            "Remotion video project not found (optional — only needed for explainer videos; install the conceptify skill first)"
+                .to_string(),
+        hint: Some(install_hint(&candidates[0])),
+    }
+}
+
 /// Resolve a binary via a login shell (`zsh -lc 'which <name>'`), so the check
 /// sees the user's full PATH the way the app's own lookup does (PRD §5.1).
 fn login_shell_which(name: &str) -> Option<String> {
@@ -1068,6 +1115,7 @@ fn cmd_doctor() -> ExitCode {
         check_d2_present(),
         check_dot_present(),
         check_node_present(),
+        check_remotion_project(),
         check_agent_binary_resolvable(),
         check_codex_binary_resolvable(),
     ];

@@ -1,0 +1,15 @@
+{
+  "title": "A read, traced end to end",
+  "payload": "GET /doc",
+  "stages": [
+    { "label": "Viewer" },
+    { "label": "Handler" },
+    { "label": "Core" },
+    { "label": "Disk" }
+  ],
+  "beats": [
+    { "note": "The viewer emits the request into the custom scheme.", "payload": "GET /doc", "narration": "The viewer emits a read request into the custom scheme.", "seconds": 5 },
+    { "note": "The handler validates the path segments before touching disk.", "payload": "thread/sha", "narration": "The handler validates the path segments before touching disk.", "seconds": 5 },
+    { "note": "The core reads exactly the requested byte range.", "payload": "bytes 0–1MiB", "narration": "The core reads exactly the requested byte range, and no more.", "seconds": 5 }
+  ]
+}
