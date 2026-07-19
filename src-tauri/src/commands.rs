@@ -1152,6 +1152,79 @@ pub fn set_artifact_theme<R: tauri::Runtime>(
     Ok(())
 }
 
+/// The HeyGen-related settings a frontend surface may see (video epic
+/// conceptify-z9y, bead z9y.4). Deliberately contains **no key field of any
+/// kind** — like `AgentOptionsDto.open_router_key_set`, the presence boolean
+/// is the only key-derived fact that ever crosses this boundary; the raw key
+/// is read exclusively by the server-side render handlers.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeygenSettingsDto {
+    /// Whether a HeyGen API key is stored. Gates the avatar-render feature.
+    pub key_configured: bool,
+    /// Preferred avatar (look) id used when a render request omits one.
+    pub default_avatar_id: Option<String>,
+    /// Preferred voice id used when a render request omits one.
+    pub default_voice_id: Option<String>,
+}
+
+/// Read the HeyGen settings surface: presence boolean + the two (non-secret)
+/// render defaults. Never the key itself — see [`HeygenSettingsDto`].
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_heygen_settings(db: State<DbHandle>) -> Result<HeygenSettingsDto, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    Ok(HeygenSettingsDto {
+        key_configured: crate::settings::has_heygen_api_key(&conn).map_err(|e| e.to_string())?,
+        default_avatar_id: crate::settings::get_heygen_default_avatar_id(&conn)
+            .map_err(|e| e.to_string())?,
+        default_voice_id: crate::settings::get_heygen_default_voice_id(&conn)
+            .map_err(|e| e.to_string())?,
+    })
+}
+
+/// Store (or clear, with `null`/blank — the reset affordance) the HeyGen API
+/// key (bead z9y.4). Write-only by design, exactly the OpenRouter-key
+/// pattern: no command ever returns the key — the frontend learns only
+/// `keyConfigured` from `get_heygen_settings`. Stored in its own settings row
+/// (never inside the `agent_settings` blob), so `reset_agent_settings` leaves
+/// it intact. Emits `settings-changed` so option readers refresh.
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_heygen_api_key<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    db: State<DbHandle>,
+    key: Option<String>,
+) -> Result<(), String> {
+    {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        crate::settings::set_heygen_api_key(&conn, key.as_deref()).map_err(|e| e.to_string())?;
+    }
+    use tauri::Emitter;
+    let _ = app.emit("settings-changed", &());
+    Ok(())
+}
+
+/// Set/clear the preferred HeyGen avatar + voice defaults in one call (`null`
+/// or blank clears the corresponding row). Plain settings rows, not secrets.
+/// Emits `settings-changed` per the settings-command convention.
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_heygen_defaults<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    db: State<DbHandle>,
+    avatar_id: Option<String>,
+    voice_id: Option<String>,
+) -> Result<(), String> {
+    {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        crate::settings::set_heygen_default_avatar_id(&conn, avatar_id.as_deref())
+            .map_err(|e| e.to_string())?;
+        crate::settings::set_heygen_default_voice_id(&conn, voice_id.as_deref())
+            .map_err(|e| e.to_string())?;
+    }
+    use tauri::Emitter;
+    let _ = app.emit("settings-changed", &());
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Follow-up flows (PRD FR-4.6/4.7/4.8/4.9) — beads b12.4/b12.5/b12.6.
 //

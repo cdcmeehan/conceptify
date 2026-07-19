@@ -153,6 +153,27 @@ const SETTINGS_KEY: &str = "agent_settings";
 const OPENROUTER_KEY_SETTINGS_KEY: &str = "openrouter_api_key";
 const LOCAL_ENDPOINT_KEY_SETTINGS_KEY: &str = "local_endpoint_api_key";
 
+/// The `settings` key holding the HeyGen API key (video epic conceptify-z9y,
+/// bead z9y.4), stored as a **separate write-only row** — deliberately NOT a
+/// field of [`AgentSettings`], mirroring the OpenRouter-key pattern above
+/// (including the recorded Keychain-vs-settings-row decision, which applies
+/// unchanged). Structural no-leak guarantee: the raw key is read only by the
+/// server-side render-job code in `crate::heygen` / `server::video_routes`;
+/// every frontend/CLI surface learns at most the presence boolean from
+/// [`has_heygen_api_key`]. `reset_agent_settings` leaves the key intact.
+const HEYGEN_KEY_SETTINGS_KEY: &str = "heygen_api_key";
+
+/// Preferred HeyGen avatar (look) id, used when an avatar-render request omits
+/// `avatarId` (bead z9y.4). A plain namespaced string row — not a secret, no
+/// write-only handling. Absent row = no default (requests must then pass an
+/// explicit id; `conceptify list-avatars` discovers valid ids).
+const HEYGEN_DEFAULT_AVATAR_SETTINGS_KEY: &str = "heygen.default_avatar_id";
+
+/// Preferred HeyGen voice id, used when an avatar-render request omits
+/// `voiceId` (bead z9y.4). Absent row = no default; HeyGen then uses the
+/// avatar's own default voice.
+const HEYGEN_DEFAULT_VOICE_SETTINGS_KEY: &str = "heygen.default_voice_id";
+
 /// The `settings` key holding the chosen explanation-artifact theme (epic
 /// conceptify-89k, bead 89k.2), stored as a **separate namespaced row** —
 /// deliberately NOT a field of [`AgentSettings`], mirroring the OpenRouter-key
@@ -790,6 +811,22 @@ pub enum SettingsError {
     #[error("invalid local endpoint API key: it must contain no whitespace or control characters")]
     InvalidLocalApiKey,
 
+    /// The submitted HeyGen API key is structurally invalid. Like
+    /// [`SettingsError::InvalidApiKey`], deliberately carries NO payload: an
+    /// error string must never echo (even a malformed) secret back to logs or
+    /// the UI.
+    #[error(
+        "invalid HeyGen API key: it must be non-empty and contain no \
+         whitespace or control characters"
+    )]
+    InvalidHeygenApiKey,
+
+    /// A HeyGen avatar/voice default id is structurally invalid (these are
+    /// short opaque tokens; whitespace/control characters mean a paste
+    /// accident). Not a secret, so the field name is echoed for clarity.
+    #[error("invalid HeyGen {0} id: it must contain no whitespace or control characters")]
+    InvalidHeygenId(&'static str),
+
     #[error("invalid local model endpoint: {0}")]
     InvalidLocalEndpoint(String),
 
@@ -1249,6 +1286,130 @@ pub fn set_local_endpoint_api_key(conn: &Connection, key: Option<&str>) -> Resul
         }
     }
     Ok(())
+}
+
+// --- HeyGen API key + render defaults (video epic conceptify-z9y, bead z9y.4)
+//
+// The key follows the OpenRouter-key pattern exactly (see
+// HEYGEN_KEY_SETTINGS_KEY for the rationale): its own settings row, write-only
+// through the command surface, presence-boolean-only reads everywhere else.
+// The avatar/voice defaults are ordinary namespaced string rows (not secrets).
+
+/// The stored HeyGen API key, if any. Trimmed; a blank stored value reads as
+/// `None`. **Server-side only**: never expose the returned value through any
+/// Tauri command, HTTP response, event payload, or log line.
+pub fn get_heygen_api_key(conn: &Connection) -> Result<Option<String>, SettingsError> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [HEYGEN_KEY_SETTINGS_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(raw
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty()))
+}
+
+/// Store (or clear) the HeyGen API key. `None`/blank deletes the row (the
+/// clear/reset affordance, same as the OpenRouter key). Validation rejects
+/// embedded whitespace/control characters with an error that deliberately does
+/// NOT echo the value ([`SettingsError::InvalidHeygenApiKey`]). One
+/// upsert/delete statement, atomic like [`update_settings`] (PRD N4).
+pub fn set_heygen_api_key(conn: &Connection, key: Option<&str>) -> Result<(), SettingsError> {
+    let key = key.map(str::trim).filter(|s| !s.is_empty());
+    match key {
+        None => {
+            conn.execute(
+                "DELETE FROM settings WHERE key = ?1",
+                [HEYGEN_KEY_SETTINGS_KEY],
+            )?;
+        }
+        Some(k) => {
+            if k.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err(SettingsError::InvalidHeygenApiKey);
+            }
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![HEYGEN_KEY_SETTINGS_KEY, k],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether a HeyGen API key is stored — the ONLY key-related fact the
+/// frontend/CLI are ever given (`heygenKeyConfigured`). Gates the avatar
+/// render feature end-to-end: absent key = feature cleanly disabled.
+pub fn has_heygen_api_key(conn: &Connection) -> Result<bool, SettingsError> {
+    Ok(get_heygen_api_key(conn)?.is_some())
+}
+
+/// Read one optional HeyGen default-id row (trimmed; blank reads as `None`).
+fn get_heygen_default(conn: &Connection, key: &str) -> Result<Option<String>, SettingsError> {
+    let raw: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    Ok(raw
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty()))
+}
+
+/// Write (or, with `None`/blank, clear) one HeyGen default-id row. Ids are
+/// opaque short tokens; embedded whitespace/control characters are paste
+/// accidents and rejected ([`SettingsError::InvalidHeygenId`]).
+fn set_heygen_default(
+    conn: &Connection,
+    key: &str,
+    value: Option<&str>,
+    field: &'static str,
+) -> Result<(), SettingsError> {
+    let value = value.map(str::trim).filter(|s| !s.is_empty());
+    match value {
+        None => {
+            conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        }
+        Some(v) => {
+            if v.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err(SettingsError::InvalidHeygenId(field));
+            }
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![key, v],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The preferred avatar (look) id used when a render request omits `avatarId`.
+pub fn get_heygen_default_avatar_id(conn: &Connection) -> Result<Option<String>, SettingsError> {
+    get_heygen_default(conn, HEYGEN_DEFAULT_AVATAR_SETTINGS_KEY)
+}
+
+/// Set/clear the preferred avatar (look) id.
+pub fn set_heygen_default_avatar_id(
+    conn: &Connection,
+    value: Option<&str>,
+) -> Result<(), SettingsError> {
+    set_heygen_default(conn, HEYGEN_DEFAULT_AVATAR_SETTINGS_KEY, value, "avatar")
+}
+
+/// The preferred voice id used when a render request omits `voiceId`.
+pub fn get_heygen_default_voice_id(conn: &Connection) -> Result<Option<String>, SettingsError> {
+    get_heygen_default(conn, HEYGEN_DEFAULT_VOICE_SETTINGS_KEY)
+}
+
+/// Set/clear the preferred voice id.
+pub fn set_heygen_default_voice_id(
+    conn: &Connection,
+    value: Option<&str>,
+) -> Result<(), SettingsError> {
+    set_heygen_default(conn, HEYGEN_DEFAULT_VOICE_SETTINGS_KEY, value, "voice")
 }
 
 // --- Artifact theme (epic conceptify-89k, bead 89k.2) ------------------------
@@ -1771,6 +1932,93 @@ mod tests {
 
         clear_settings(&conn).unwrap();
         assert!(has_openrouter_api_key(&conn).unwrap(), "reset keeps the key");
+    }
+
+    // --- HeyGen key + defaults (bead z9y.4) --------------------------------
+
+    #[test]
+    fn heygen_key_round_trip_and_clear() {
+        let conn = in_memory_settings_db();
+        assert_eq!(get_heygen_api_key(&conn).unwrap(), None);
+        assert!(!has_heygen_api_key(&conn).unwrap());
+
+        set_heygen_api_key(&conn, Some("  hg_abc123  ")).unwrap();
+        assert_eq!(get_heygen_api_key(&conn).unwrap().as_deref(), Some("hg_abc123"));
+        assert!(has_heygen_api_key(&conn).unwrap());
+
+        // Blank clears, like `None`.
+        set_heygen_api_key(&conn, Some("   ")).unwrap();
+        assert_eq!(get_heygen_api_key(&conn).unwrap(), None);
+        set_heygen_api_key(&conn, Some("k2")).unwrap();
+        set_heygen_api_key(&conn, None).unwrap();
+        assert!(!has_heygen_api_key(&conn).unwrap());
+    }
+
+    #[test]
+    fn heygen_key_rejects_embedded_whitespace_without_echoing_it() {
+        let conn = in_memory_settings_db();
+        for bad in ["hg SECRET", "hg\tSECRET", "hg\nSECRET"] {
+            let err = set_heygen_api_key(&conn, Some(bad)).unwrap_err();
+            // The error string must never echo the (mis)pasted secret.
+            assert!(!err.to_string().contains("SECRET"), "{err}");
+        }
+        assert!(!has_heygen_api_key(&conn).unwrap());
+    }
+
+    #[test]
+    fn heygen_key_never_enters_the_agent_settings_blob() {
+        // Write-only isolation, mirroring the OpenRouter test: the key lives in
+        // its own row, so saving/reading AgentSettings structurally cannot
+        // carry it, and clearing agent settings does not clear the key.
+        let conn = in_memory_settings_db();
+        set_heygen_api_key(&conn, Some("hg-SECRET")).unwrap();
+
+        let s = get_settings(&conn).unwrap();
+        let blob = serde_json::to_string(&s).unwrap();
+        assert!(!blob.contains("SECRET"), "{blob}");
+        update_settings(&conn, &s).unwrap();
+
+        let stored_blob: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'agent_settings'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!stored_blob.contains("SECRET"), "{stored_blob}");
+
+        clear_settings(&conn).unwrap();
+        assert!(has_heygen_api_key(&conn).unwrap(), "reset keeps the key");
+    }
+
+    #[test]
+    fn heygen_defaults_round_trip_and_clear_independently() {
+        let conn = in_memory_settings_db();
+        assert_eq!(get_heygen_default_avatar_id(&conn).unwrap(), None);
+        assert_eq!(get_heygen_default_voice_id(&conn).unwrap(), None);
+
+        set_heygen_default_avatar_id(&conn, Some(" lk_abc ")).unwrap();
+        set_heygen_default_voice_id(&conn, Some("vc_123")).unwrap();
+        assert_eq!(
+            get_heygen_default_avatar_id(&conn).unwrap().as_deref(),
+            Some("lk_abc")
+        );
+        assert_eq!(
+            get_heygen_default_voice_id(&conn).unwrap().as_deref(),
+            Some("vc_123")
+        );
+
+        // Clearing one leaves the other.
+        set_heygen_default_voice_id(&conn, None).unwrap();
+        assert_eq!(get_heygen_default_voice_id(&conn).unwrap(), None);
+        assert_eq!(
+            get_heygen_default_avatar_id(&conn).unwrap().as_deref(),
+            Some("lk_abc")
+        );
+
+        // Paste accidents rejected, with the field named (not a secret).
+        let err = set_heygen_default_avatar_id(&conn, Some("lk abc")).unwrap_err();
+        assert!(err.to_string().contains("avatar"), "{err}");
     }
 
     // --- Artifact theme (bead 89k.2) ---------------------------------------

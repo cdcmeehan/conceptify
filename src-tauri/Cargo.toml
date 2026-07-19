@@ -49,8 +49,14 @@ ego-tree = "0.11.0"
 # OpenRouter sources. rustls with default-features off avoids pulling
 # native-tls/OpenSSL, keeping the build lean; reqwest is already in the tree
 # transitively (via tauri), so this only turns on a TLS backend.
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# `json` turned on for the HeyGen client (heygen.rs): request/response bodies
+# are JSON; the feature only wires in serde_json, which is already in the tree.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 tauri-plugin-notification = "2"
+# Content-addressing for video assets (epic conceptify-z9y): SHA-256 of
+# downloaded avatar renders (heygen.rs) and, later, uploaded clips (z9y.6).
+# RustCrypto pure-Rust implementation; no native deps.
+sha2 = "0.10"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"

@@ -550,6 +550,101 @@ pub struct CatalogResponse {
     pub providers: Vec<CatalogProvider>,
 }
 
+// Avatar render jobs (video epic conceptify-z9y, bead z9y.4)
+//
+// App-mediated HeyGen rendering: the CLI/skill submits a script; the app —
+// which alone holds the API key — talks to HeyGen and stages the finished
+// mp4 locally. All camelCase (these types were introduced post-89k.2, on the
+// newer camelCase wire convention alongside `DisplaySettingsResponse`).
+
+/// Request body for `POST /api/v1/video/avatar-jobs`. `avatar_id`/`voice_id`
+/// fall back to the `heygen.default_avatar_id` / `heygen.default_voice_id`
+/// settings rows when omitted; with neither an explicit nor a default avatar
+/// the request is rejected (discover ids with `conceptify list-avatars`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAvatarJobRequest {
+    /// The narration script the avatar speaks. Non-empty.
+    pub script: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_id: Option<String>,
+}
+
+/// Response from submitting an avatar render job. `job_id` is stable across
+/// app restarts (it is the upstream render id) — poll
+/// `GET /api/v1/video/avatar-jobs/:job_id` with it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAvatarJobResponse {
+    pub job_id: String,
+    /// Always `submitted`.
+    pub status: String,
+}
+
+/// Response from polling `GET /api/v1/video/avatar-jobs/:job_id`.
+///
+/// `status` is one of `processing` | `completed` | `failed`. On `completed`
+/// the finished mp4 has been downloaded into the app's local
+/// content-addressed staging area and `sha256`/`bytes`/`file_path` are set —
+/// `file_path` is what `conceptify save-asset --thread <id> --file <path>`
+/// registers into a thread's asset storage (bead z9y.6) to obtain the
+/// `cfy-asset://` URL for the artifact. On `failed`, `error` carries the
+/// upstream failure detail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarJobStatusResponse {
+    pub job_id: String,
+    /// `processing` | `completed` | `failed`.
+    pub status: String,
+    /// HeyGen's raw status string while `processing` (diagnostic only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heygen_status: Option<String>,
+    /// SHA-256 (64 lowercase hex) of the staged mp4, once completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// Size of the staged mp4 in bytes, once completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// Absolute path of the staged `<sha256>.mp4`, once completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    /// Render duration in seconds, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<f64>,
+    /// Failure detail, when `status == "failed"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One HeyGen avatar look (`GET /api/v1/video/avatars`). `id` is exactly the
+/// `avatar_id` to pass when rendering (or to store as the default in
+/// Settings); `default_voice_id`, when present, is a matching voice id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarListItem {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gender: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_image_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_voice_id: Option<String>,
+}
+
+/// Response from `GET /api/v1/video/avatars` (first page of 50, cached
+/// briefly app-side).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarListResponse {
+    pub avatars: Vec<AvatarListItem>,
+    pub has_more: bool,
+}
+
 // Full-text search API (epic conceptify-7x3).
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

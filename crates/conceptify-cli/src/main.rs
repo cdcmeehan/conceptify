@@ -19,7 +19,8 @@ use serde::Serialize;
 use serde_json::json;
 
 use conceptify_types::{
-    CommentResponse, CreateThreadRequest, CreateThreadResponse, DisplaySettingsResponse,
+    AvatarJobStatusResponse, AvatarListResponse, CommentResponse, CreateAvatarJobRequest,
+    CreateAvatarJobResponse, CreateThreadRequest, CreateThreadResponse, DisplaySettingsResponse,
     EnsureProjectRequest, EnsureProjectResponse, HealthResponse, ListCommentsResponse, OpenRequest,
     OpenResponse, SaveArtifactErrorResponse, SaveArtifactResponse, ThreadContextResponse,
     UpdateCommentRequest,
@@ -42,7 +43,11 @@ Commands:
   save-artifact  --thread <id> --file <path>          save an artifact file to a thread
   get-context    --thread <id>                         run context for a headless follow-up (JSON)
   list-comments  --thread <id> [--status open|answered|applied]   list a thread's comments (JSON)
-  resolve-comment --id <id> --answer-file <path> [--applied]      answer/apply a comment";
+  resolve-comment --id <id> --answer-file <path> [--applied]      answer/apply a comment
+  render-avatar  --script-file <path> [--avatar <id>] [--voice <id>] | --job <id>
+                                                      render a HeyGen avatar narration video
+                                                      (PAID; needs a HeyGen key in Settings)
+  list-avatars                                        list HeyGen avatar ids for --avatar/Settings";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -65,6 +70,8 @@ fn main() -> ExitCode {
         "get-context" => cmd_get_context(rest),
         "list-comments" => cmd_list_comments(rest),
         "resolve-comment" => cmd_resolve_comment(rest),
+        "render-avatar" => cmd_render_avatar(rest),
+        "list-avatars" => cmd_list_avatars(rest),
         _ => {
             eprintln!("Unknown command: {}", command);
             eprintln!("{USAGE}");
@@ -814,6 +821,227 @@ fn cmd_resolve_comment(args: &[String]) -> ExitCode {
     }
 }
 
+// --- HeyGen avatar rendering (video epic conceptify-z9y, bead z9y.4) --------
+
+/// Overall polling ceiling for `render-avatar`: HeyGen renders take minutes;
+/// past this the CLI stops waiting (the job keeps rendering server-side —
+/// resume with `--job <id>`) instead of hanging forever.
+const RENDER_POLL_CEILING: Duration = Duration::from_secs(600);
+/// Poll cadence: start gentle, back off ×1.5 to a 15s cap.
+const RENDER_POLL_START: Duration = Duration::from_secs(5);
+const RENDER_POLL_MAX: Duration = Duration::from_secs(15);
+/// Per-poll HTTP timeout. Deliberately much longer than `REQUEST_TIMEOUT`:
+/// the poll that first observes completion triggers the app's server-side
+/// download of the finished mp4 (up to ~20 MiB) before responding.
+const RENDER_POLL_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
+
+/// Like `authed_get` but with a caller-chosen timeout (see
+/// `RENDER_POLL_REQUEST_TIMEOUT` for why the render poll needs a longer one).
+fn authed_get_with_timeout<R>(port: u16, path: &str, timeout: Duration) -> Result<R, String>
+where
+    R: DeserializeOwned,
+{
+    let token = read_token()
+        .map_err(|e| format!("failed to read auth token (has the app run once?): {}", e))?;
+    let url = format!("http://127.0.0.1:{}{}", port, path);
+
+    match ureq::get(&url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .timeout(timeout)
+        .call()
+    {
+        Ok(response) => response
+            .into_json::<R>()
+            .map_err(|e| format!("invalid JSON from {}: {}", path, e)),
+        Err(ureq::Error::Status(code, response)) => Err(status_error(code, response)),
+        Err(ureq::Error::Transport(e)) => Err(format!("failed to reach app: {}", e)),
+    }
+}
+
+/// Shape a completed/final job status into the CLI's JSON output contract.
+fn render_avatar_output(resp: &AvatarJobStatusResponse) -> serde_json::Value {
+    json!({
+        "jobId": resp.job_id,
+        "status": resp.status,
+        "sha256": resp.sha256,
+        "bytes": resp.bytes,
+        "filePath": resp.file_path,
+        "durationSeconds": resp.duration_seconds,
+    })
+}
+
+/// Poll one render job until it completes, fails, or the ceiling passes.
+/// Transient transport hiccups are tolerated (3 consecutive failures abort);
+/// server-side errors (412 no key, 502 upstream) abort immediately — they are
+/// already legible and won't heal by waiting.
+fn poll_render_job(port: u16, job_id: &str) -> ExitCode {
+    let path = format!("/api/v1/video/avatar-jobs/{}", job_id);
+    let start = Instant::now();
+    let mut interval = RENDER_POLL_START;
+    let mut consecutive_transport_failures = 0u32;
+
+    loop {
+        match authed_get_with_timeout::<AvatarJobStatusResponse>(
+            port,
+            &path,
+            RENDER_POLL_REQUEST_TIMEOUT,
+        ) {
+            Ok(resp) => match resp.status.as_str() {
+                "completed" => {
+                    eprintln!(
+                        "Render complete. Register it with a thread via: \
+                         conceptify save-asset --thread <id> --file {}",
+                        resp.file_path.as_deref().unwrap_or("<filePath>")
+                    );
+                    return emit(&render_avatar_output(&resp));
+                }
+                "failed" => {
+                    return fail(format!(
+                        "render failed: {}",
+                        resp.error.as_deref().unwrap_or("no detail from HeyGen")
+                    ));
+                }
+                _ => {
+                    consecutive_transport_failures = 0;
+                    eprintln!(
+                        "…still rendering ({}, {}s elapsed)",
+                        resp.heygen_status.as_deref().unwrap_or("processing"),
+                        start.elapsed().as_secs()
+                    );
+                }
+            },
+            Err(e) if e.starts_with("failed to reach app") => {
+                consecutive_transport_failures += 1;
+                if consecutive_transport_failures >= 3 {
+                    return fail(format!(
+                        "lost contact with the app while polling job {}: {} — \
+                         resume later with: conceptify render-avatar --job {}",
+                        job_id, e, job_id
+                    ));
+                }
+                eprintln!("warning: poll failed ({}); retrying", e);
+            }
+            // A structured server error (412 missing key, 502 upstream,
+            // 400 bad id) is final — surface it verbatim.
+            Err(e) => return fail(e),
+        }
+
+        if start.elapsed() > RENDER_POLL_CEILING {
+            return fail(format!(
+                "render job {} is still processing after {} minutes. HeyGen \
+                 keeps rendering server-side — check again later with: \
+                 conceptify render-avatar --job {}",
+                job_id,
+                RENDER_POLL_CEILING.as_secs() / 60,
+                job_id
+            ));
+        }
+        thread::sleep(interval);
+        interval = (interval * 3 / 2).min(RENDER_POLL_MAX);
+    }
+}
+
+/// `conceptify render-avatar --script-file <path> [--avatar <id>] [--voice <id>]`
+/// (or `--job <id>` to resume polling an already-submitted job) — submit a
+/// HeyGen avatar narration render via the app (which alone holds the API key)
+/// and poll until the staged mp4 is ready. This is a PAID render per
+/// submission: callers (the skill, z9y.5) must confirm with the user before
+/// invoking; the CLI itself only ever renders when explicitly run.
+fn cmd_render_avatar(args: &[String]) -> ExitCode {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => return fail(e),
+    };
+
+    // Resume mode: skip submission, just poll an existing job.
+    if let Some(job_id) = flags.get("job") {
+        if flags.contains_key("script-file") {
+            return fail("render-avatar takes either --job <id> or --script-file <path>, not both");
+        }
+        let port = match ensure_app_healthy() {
+            Ok(p) => p,
+            Err(e) => return fail(e),
+        };
+        eprintln!("Resuming poll of render job {}…", job_id);
+        return poll_render_job(port, job_id);
+    }
+
+    let script_file = match flags.get("script-file") {
+        Some(f) => f,
+        None => {
+            return fail(
+                "render-avatar requires --script-file <path> (or --job <id> to resume polling)",
+            )
+        }
+    };
+    let script = match fs::read_to_string(script_file) {
+        Ok(s) => s,
+        Err(e) => return fail(format!("failed to read {}: {}", script_file, e)),
+    };
+    if script.trim().is_empty() {
+        return fail(format!("script file {} is empty", script_file));
+    }
+
+    let port = match ensure_app_healthy() {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+
+    let req = CreateAvatarJobRequest {
+        script,
+        avatar_id: flags.get("avatar").cloned(),
+        voice_id: flags.get("voice").cloned(),
+    };
+
+    let submitted: CreateAvatarJobResponse =
+        match authed_post(port, "/api/v1/video/avatar-jobs", &req) {
+            Ok(r) => r,
+            Err(e) => return fail(e),
+        };
+    eprintln!(
+        "Submitted HeyGen render job {} — polling (renders typically take a \
+         few minutes; ceiling {} min)…",
+        submitted.job_id,
+        RENDER_POLL_CEILING.as_secs() / 60
+    );
+    poll_render_job(port, &submitted.job_id)
+}
+
+/// `conceptify list-avatars` — discover HeyGen avatar ids (cached app-side)
+/// for the `--avatar` flag / default-avatar setting. Prints a bare JSON array.
+fn cmd_list_avatars(args: &[String]) -> ExitCode {
+    if !args.is_empty() {
+        return fail("list-avatars takes no arguments");
+    }
+    let port = match ensure_app_healthy() {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+    match authed_get::<AvatarListResponse>(port, "/api/v1/video/avatars") {
+        Ok(resp) => {
+            if resp.has_more {
+                eprintln!("note: more avatars exist than the first 50 shown here");
+            }
+            emit(&serde_json::Value::Array(
+                resp.avatars
+                    .iter()
+                    .map(|a| {
+                        json!({
+                            "id": a.id,
+                            "name": a.name,
+                            "avatarType": a.avatar_type,
+                            "gender": a.gender,
+                            "defaultVoiceId": a.default_voice_id,
+                            "previewImageUrl": a.preview_image_url,
+                        })
+                    })
+                    .collect(),
+            ))
+        }
+        Err(e) => fail(e),
+    }
+}
+
 /// A single prerequisite check result.
 #[derive(Debug, Clone)]
 struct Check {
@@ -1431,6 +1659,31 @@ mod tests {
         let check = check_codex_binary_resolvable();
         assert!(check.ok, "codex absence must not fail doctor: {:?}", check);
         assert_eq!(check.name, "codex-binary-resolvable");
+    }
+
+    #[test]
+    fn render_avatar_output_is_stable_camelcase_contract() {
+        let resp = AvatarJobStatusResponse {
+            job_id: s("vid_1"),
+            status: s("completed"),
+            heygen_status: None,
+            sha256: Some(s(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            )),
+            bytes: Some(8_388_608),
+            file_path: Some(s("/Users/chris/Documents/conceptify/video-renders/e3b0….mp4")),
+            duration_seconds: Some(32.5),
+            error: None,
+        };
+        let out = render_avatar_output(&resp);
+        assert_eq!(out["jobId"], "vid_1");
+        assert_eq!(out["status"], "completed");
+        assert_eq!(out["bytes"], 8_388_608);
+        assert_eq!(out["durationSeconds"], 32.5);
+        assert!(out["sha256"].as_str().unwrap().len() == 64);
+        // camelCase only — no snake_case leakage into the CLI contract.
+        assert!(out.get("file_path").is_none());
+        assert!(out.get("filePath").is_some());
     }
 
     #[test]
