@@ -19,9 +19,10 @@ use serde::Serialize;
 use serde_json::json;
 
 use conceptify_types::{
-    CommentResponse, CreateThreadRequest, CreateThreadResponse, EnsureProjectRequest,
-    EnsureProjectResponse, HealthResponse, ListCommentsResponse, OpenRequest, OpenResponse,
-    SaveArtifactErrorResponse, SaveArtifactResponse, ThreadContextResponse, UpdateCommentRequest,
+    CommentResponse, CreateThreadRequest, CreateThreadResponse, DisplaySettingsResponse,
+    EnsureProjectRequest, EnsureProjectResponse, HealthResponse, ListCommentsResponse, OpenRequest,
+    OpenResponse, SaveArtifactErrorResponse, SaveArtifactResponse, ThreadContextResponse,
+    UpdateCommentRequest,
 };
 
 const DEFAULT_PORT: u16 = 4477;
@@ -356,19 +357,40 @@ fn fail(msg: impl AsRef<str>) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// `conceptify status` — prints app/API health and version as JSON.
+/// `conceptify status` — prints app/API health, version, and the chosen
+/// artifact theme as JSON. The theme (bead conceptify-89k.2) is the skill's
+/// cheap one-call read of the app-level display setting at authoring time.
 fn cmd_status() -> ExitCode {
     match ensure_app_healthy() {
         Ok(port) => {
             // Re-probe to get the current health info (we know it's healthy,
             // but we want the version and status fields for JSON output).
             match probe_health(port) {
-                Ok(health) => emit(&json!({
-                    "service": health.service,
-                    "status": health.status,
-                    "version": health.version,
-                    "port": port,
-                })),
+                Ok(health) => {
+                    // Fold in the author-time display settings via the authed
+                    // endpoint. Best-effort: health already proved liveness, so
+                    // a settings read hiccup must not sink `status` — it degrades
+                    // to the default theme (with a stderr note) rather than
+                    // failing the whole command.
+                    let artifact_theme =
+                        match authed_get::<DisplaySettingsResponse>(port, "/api/v1/settings/display")
+                        {
+                            Ok(d) => d.artifact_theme,
+                            Err(e) => {
+                                eprintln!(
+                                    "warning: could not read artifact theme ({e}); assuming manuscript"
+                                );
+                                "manuscript".to_string()
+                            }
+                        };
+                    emit(&json!({
+                        "service": health.service,
+                        "status": health.status,
+                        "version": health.version,
+                        "port": port,
+                        "artifactTheme": artifact_theme,
+                    }))
+                }
                 Err(e) => {
                     // This shouldn't happen (we just confirmed it's healthy),
                     // but handle it gracefully.

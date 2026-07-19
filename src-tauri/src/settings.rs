@@ -153,6 +153,17 @@ const SETTINGS_KEY: &str = "agent_settings";
 const OPENROUTER_KEY_SETTINGS_KEY: &str = "openrouter_api_key";
 const LOCAL_ENDPOINT_KEY_SETTINGS_KEY: &str = "local_endpoint_api_key";
 
+/// The `settings` key holding the chosen explanation-artifact theme (epic
+/// conceptify-89k, bead 89k.2), stored as a **separate namespaced row** —
+/// deliberately NOT a field of [`AgentSettings`], mirroring the OpenRouter-key
+/// pattern above. Two reasons for the separate row: (1) `reset_agent_settings`
+/// (FR-7.4) must leave the theme choice intact, exactly as it leaves the API
+/// key; (2) the skill/CLI read it at authoring time without deserializing (or
+/// depending on the shape of) the whole agent-settings blob. The value is one of
+/// the [`ArtifactTheme`] wire ids; an absent row means `manuscript` (the default,
+/// byte-identical to the current scaffold — see `skill/design-system.md`).
+const ARTIFACT_THEME_SETTINGS_KEY: &str = "artifact.theme";
+
 // --- Defaults (single source of truth, shared by `Default` + serde) ---------
 
 /// The built-in `claude` adapter template (PRD §5.5), with the OQ3 permission
@@ -453,6 +464,50 @@ pub enum Appearance {
     Dark,
 }
 
+/// The chosen explanation-artifact theme (epic conceptify-89k, bead 89k.1
+/// design record in `skill/design-system.md`). Each variant names a complete
+/// `@cfy:tokens` palette override plus a small set of component rules; the type
+/// scale, spacing, and rhythm are shared. `Manuscript` is the default and is
+/// byte-identical to the current scaffold, so an absent settings row resolves to
+/// it (`#[default]`). Serialized lowercase to match the single wire id the CLI
+/// (`conceptify status` `artifactTheme`), the `GET /settings/display` endpoint,
+/// and the Settings UI all exchange. The CSS theme blocks + skill stamping that
+/// consume this value are the downstream integration bead (89k.3); this type is
+/// only the settings-plumbing identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactTheme {
+    #[default]
+    Manuscript,
+    Blueprint,
+    Sketchbook,
+}
+
+impl ArtifactTheme {
+    /// The canonical lowercase wire id — what is stored, returned to the CLI, and
+    /// shown in the frontend.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ArtifactTheme::Manuscript => "manuscript",
+            ArtifactTheme::Blueprint => "blueprint",
+            ArtifactTheme::Sketchbook => "sketchbook",
+        }
+    }
+
+    /// Parse a wire theme id, rejecting anything outside the known set with a
+    /// user-facing [`SettingsError::InvalidTheme`] (the validation the write path
+    /// requires). Surrounding whitespace is trimmed, but — unlike a lenient parse
+    /// — an unknown id is never silently coerced to the default.
+    pub fn parse(s: &str) -> Result<Self, SettingsError> {
+        match s.trim() {
+            "manuscript" => Ok(ArtifactTheme::Manuscript),
+            "blueprint" => Ok(ArtifactTheme::Blueprint),
+            "sketchbook" => Ok(ArtifactTheme::Sketchbook),
+            other => Err(SettingsError::InvalidTheme(other.to_owned())),
+        }
+    }
+}
+
 /// One agent invocation template. `args`/`cwd`/`command` may contain the
 /// placeholders `{prompt}`, `{model}`, `{project_root}`, substituted at
 /// resolution time (see module docs on substitution safety).
@@ -737,6 +792,9 @@ pub enum SettingsError {
 
     #[error("invalid local model endpoint: {0}")]
     InvalidLocalEndpoint(String),
+
+    #[error("unknown artifact theme '{0}': choose one of manuscript, blueprint, sketchbook")]
+    InvalidTheme(String),
 
     /// A run routed via OpenRouter (bead `conceptify-e7m.7`) but no key is
     /// stored. Raised BEFORE any run row exists (FR-4.9 guard freed).
@@ -1190,6 +1248,47 @@ pub fn set_local_endpoint_api_key(conn: &Connection, key: Option<&str>) -> Resul
             )?;
         }
     }
+    Ok(())
+}
+
+// --- Artifact theme (epic conceptify-89k, bead 89k.2) ------------------------
+//
+// Stored under its own `artifact.theme` settings row (see
+// ARTIFACT_THEME_SETTINGS_KEY for the separate-row rationale), so a
+// `reset_agent_settings` never disturbs the theme and the value is readable
+// without touching the agent-settings blob. Only these two functions touch it;
+// the Tauri commands and the `GET /settings/display` route consume them.
+
+/// The stored artifact theme, or [`ArtifactTheme::Manuscript`] when no row
+/// exists (FR-7.4 zero-config default). A stored value is validated on write, so
+/// a stored value that fails to parse — only reachable via external DB
+/// tampering — falls back to the default rather than erroring an otherwise
+/// healthy read.
+pub fn get_artifact_theme(conn: &Connection) -> Result<ArtifactTheme, SettingsError> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [ARTIFACT_THEME_SETTINGS_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(raw
+        .and_then(|s| ArtifactTheme::parse(&s).ok())
+        .unwrap_or_default())
+}
+
+/// Persist the artifact theme, validated first: an unknown id is rejected with
+/// the user-facing [`SettingsError::InvalidTheme`] and never stored. The
+/// canonical lowercase id ([`ArtifactTheme::as_str`]) is written as one upsert
+/// statement — SQLite applies it atomically, so a crash mid-write cannot corrupt
+/// the row (PRD N4).
+pub fn set_artifact_theme(conn: &Connection, theme: &str) -> Result<(), SettingsError> {
+    let theme = ArtifactTheme::parse(theme)?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![ARTIFACT_THEME_SETTINGS_KEY, theme.as_str()],
+    )?;
     Ok(())
 }
 
@@ -1672,6 +1771,89 @@ mod tests {
 
         clear_settings(&conn).unwrap();
         assert!(has_openrouter_api_key(&conn).unwrap(), "reset keeps the key");
+    }
+
+    // --- Artifact theme (bead 89k.2) ---------------------------------------
+
+    #[test]
+    fn artifact_theme_defaults_to_manuscript_when_absent() {
+        let conn = in_memory_settings_db();
+        assert_eq!(
+            get_artifact_theme(&conn).unwrap(),
+            ArtifactTheme::Manuscript
+        );
+    }
+
+    #[test]
+    fn artifact_theme_round_trips_each_known_theme() {
+        let conn = in_memory_settings_db();
+        for (id, expected) in [
+            ("manuscript", ArtifactTheme::Manuscript),
+            ("blueprint", ArtifactTheme::Blueprint),
+            ("sketchbook", ArtifactTheme::Sketchbook),
+            ("  blueprint  ", ArtifactTheme::Blueprint), // trimmed on write
+        ] {
+            set_artifact_theme(&conn, id).unwrap();
+            assert_eq!(get_artifact_theme(&conn).unwrap(), expected, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn artifact_theme_rejects_unknown_id_with_clear_error() {
+        let conn = in_memory_settings_db();
+        set_artifact_theme(&conn, "blueprint").unwrap();
+        for bad in ["", "  ", "Manuscript", "vellum", "manuscript ."] {
+            let err = set_artifact_theme(&conn, bad).unwrap_err();
+            assert!(matches!(err, SettingsError::InvalidTheme(_)), "{bad:?}");
+            let msg = err.to_string();
+            assert!(msg.contains("manuscript"), "{msg}");
+            assert!(msg.contains("blueprint"), "{msg}");
+            assert!(msg.contains("sketchbook"), "{msg}");
+        }
+        // A rejected write never mutates the stored value.
+        assert_eq!(get_artifact_theme(&conn).unwrap(), ArtifactTheme::Blueprint);
+    }
+
+    #[test]
+    fn artifact_theme_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&ArtifactTheme::Sketchbook).unwrap(),
+            "\"sketchbook\""
+        );
+        assert_eq!(ArtifactTheme::default(), ArtifactTheme::Manuscript);
+    }
+
+    #[test]
+    fn artifact_theme_stays_out_of_the_agent_settings_blob_and_survives_reset() {
+        // Same isolation guarantee as the OpenRouter key: the theme lives in its
+        // own row, so clearing agent settings (FR-7.4 reset) leaves it intact.
+        let conn = in_memory_settings_db();
+        set_artifact_theme(&conn, "sketchbook").unwrap();
+
+        let s = get_settings(&conn).unwrap();
+        let blob = serde_json::to_string(&s).unwrap();
+        assert!(!blob.contains("sketchbook"), "{blob}");
+
+        clear_settings(&conn).unwrap();
+        assert_eq!(
+            get_artifact_theme(&conn).unwrap(),
+            ArtifactTheme::Sketchbook,
+            "reset keeps the theme"
+        );
+    }
+
+    #[test]
+    fn artifact_theme_tampered_stored_value_falls_back_to_default() {
+        let conn = in_memory_settings_db();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('artifact.theme', 'bogus')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            get_artifact_theme(&conn).unwrap(),
+            ArtifactTheme::Manuscript
+        );
     }
 
     // --- Per-purpose model resolution --------------------------------------

@@ -859,6 +859,23 @@ export function resetAgentSettings(): Promise<AgentSettings> {
   return invoke<AgentSettings>("reset_agent_settings");
 }
 
+/** The three explanation-artifact themes (epic conceptify-89k). `manuscript` is
+ *  the default; an unset theme resolves to it. */
+export type ArtifactTheme = "manuscript" | "blueprint" | "sketchbook";
+
+/** Read the chosen artifact theme. Stored in its own settings row (not the
+ *  agent-settings blob), so a settings reset never disturbs it; an unset theme
+ *  resolves to `manuscript`. */
+export function getArtifactTheme(): Promise<ArtifactTheme> {
+  return invoke<ArtifactTheme>("get_artifact_theme");
+}
+
+/** Persist the chosen artifact theme. Rejects (user-facing message) on an
+ *  unknown id. Emits `settings-changed` on success. */
+export function setArtifactTheme(theme: ArtifactTheme): Promise<void> {
+  return invoke<void>("set_artifact_theme", { theme });
+}
+
 // ---------------------------------------------------------------------------
 // Model catalog + routing options (epic conceptify-e7m — beads e7m.6/e7m.7).
 //

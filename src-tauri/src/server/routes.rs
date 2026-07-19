@@ -31,6 +31,7 @@ pub fn build_router<R: tauri::Runtime>(state: ApiState<R>) -> Router {
         .merge(super::open_routes::router())
         .merge(super::catalog_routes::router())
         .merge(super::search_routes::router())
+        .merge(super::settings_routes::router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer_token,

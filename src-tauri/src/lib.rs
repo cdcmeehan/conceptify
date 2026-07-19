@@ -119,6 +119,8 @@ pub fn run() {
             commands::get_agent_options,
             commands::set_openrouter_api_key,
             commands::set_local_endpoint_api_key,
+            commands::get_artifact_theme,
+            commands::set_artifact_theme,
             commands::ask_follow_ups,
             commands::ask_single_comment,
             commands::apply_to_artifact,

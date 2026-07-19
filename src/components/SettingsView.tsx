@@ -30,6 +30,7 @@ import * as api from "../lib/api";
 import type {
   AgentSettings,
   Appearance,
+  ArtifactTheme,
   CatalogModel,
   CatalogProvider,
   CatalogResponse,
@@ -53,6 +54,61 @@ const APPEARANCE_OPTIONS: { value: Appearance; label: string }[] = [
 
 const DEFAULT_BASE_DIR_HINT = "~/Documents/conceptify/projects";
 
+// Font stacks copied verbatim from skill/design-system.css so the swatch heading
+// sample renders in each theme's real display face.
+const FONT_SERIF =
+  'ui-serif, "New York", "Iowan Old Style", "Palatino Nova", Palatino, Georgia, "Times New Roman", serif';
+const FONT_SANS =
+  '-apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+const FONT_HAND = '"Bradley Hand", "Chalkboard SE", "Comic Sans MS", "Segoe Print", cursive';
+
+// Theme swatch previews. Hex values are the LIGHT-variant token values from the
+// 89k.1 design record (skill/design-system.md "Themes"), copied verbatim so the
+// mini-previews match the real palettes. `callout` is each theme's `definition`
+// callout color. When the CSS theme blocks land (bead 89k.3), these could be
+// extracted from design-system.css instead; until then they are the source.
+const ARTIFACT_THEMES: {
+  value: ArtifactTheme;
+  label: string;
+  blurb: string;
+  paper: string;
+  ink: string;
+  accent: string;
+  callout: string;
+  font: string;
+}[] = [
+  {
+    value: "manuscript",
+    label: "Manuscript",
+    blurb: "Quiet print editorial — warm paper, terracotta accent, serif display. The default.",
+    paper: "#fbf9f4",
+    ink: "#211d16",
+    accent: "#a34d24",
+    callout: "#33586b",
+    font: FONT_SERIF,
+  },
+  {
+    value: "blueprint",
+    label: "Blueprint",
+    blurb: "Cool and precise — ice-blue vellum, steel accent, sans headings. For systems topics.",
+    paper: "#f7f9fb",
+    ink: "#1c2430",
+    accent: "#2b5f8a",
+    callout: "#1e6a80",
+    font: FONT_SANS,
+  },
+  {
+    value: "sketchbook",
+    label: "Sketchbook",
+    blurb: "Warm and hand-drawn — cream paper, ochre accent, hand headings. For teaching.",
+    paper: "#faf6ec",
+    ink: "#292118",
+    accent: "#8a5c12",
+    callout: "#41597d",
+    font: FONT_HAND,
+  },
+];
+
 export function SettingsView() {
   // The last-persisted settings — used to revert a live appearance preview if
   // the user closes without saving, and as the base for a provider-toggle write.
@@ -62,6 +118,11 @@ export function SettingsView() {
   // Editable form state (mirrors AgentSettings, plus the raw adapters textarea
   // and a minutes view of the timeout).
   const [appearance, setAppearanceState] = useState<Appearance>("system");
+  // Artifact theme (epic conceptify-89k). Lives in its own settings row, loaded
+  // and persisted independently of AgentSettings (like the provider toggles /
+  // OpenRouter key, selecting a card persists immediately).
+  const [artifactTheme, setArtifactThemeState] = useState<ArtifactTheme>("manuscript");
+  const [themeBusy, setThemeBusy] = useState(false);
   const [defaultAdapter, setDefaultAdapter] = useState("");
   const [followUp, setFollowUp] = useState("");
   const [artifactUpdate, setArtifactUpdate] = useState("");
@@ -138,6 +199,12 @@ export function SettingsView() {
         if (alive) { setOpenRouterKeySet(o.openRouterKeySet); setLocalKeySet(o.localEndpointKeySet); }
       })
       .catch((e) => console.warn("agent options load failed", e));
+    api
+      .getArtifactTheme()
+      .then((t) => {
+        if (alive) setArtifactThemeState(t);
+      })
+      .catch((e) => console.warn("artifact theme load failed", e));
     return () => {
       alive = false;
     };
@@ -148,6 +215,25 @@ export function SettingsView() {
   function onAppearanceChange(value: Appearance) {
     setAppearanceState(value);
     setAppearance(value);
+  }
+
+  // The theme persists immediately on selection (like the provider toggles), so
+  // there is nothing to Save/revert for it. Optimistic update with rollback on
+  // failure keeps the selected card responsive.
+  async function onSelectTheme(value: ArtifactTheme) {
+    if (value === artifactTheme || themeBusy) return;
+    const prev = artifactTheme;
+    setArtifactThemeState(value);
+    setThemeBusy(true);
+    setError(null);
+    try {
+      await api.setArtifactTheme(value);
+    } catch (e) {
+      setArtifactThemeState(prev);
+      setError(`Could not set theme: ${String(e)}`);
+    } finally {
+      setThemeBusy(false);
+    }
   }
 
   function close() {
@@ -473,6 +559,65 @@ export function SettingsView() {
                 <p class="mt-2 text-xs text-muted">
                   The artifact viewer keeps the system light/dark setting even when the app is
                   forced — its sandboxed frame is isolated from the app shell.
+                </p>
+              </Section>
+
+              {/* Artifact theme (epic conceptify-89k) */}
+              <Section
+                title="Artifact theme"
+                description="The visual style new explanation artifacts are authored in. Applies to newly generated and re-generated artifacts."
+              >
+                <div class="grid grid-cols-3 gap-2.5">
+                  {ARTIFACT_THEMES.map((t) => {
+                    const selected = artifactTheme === t.value;
+                    return (
+                      <button
+                        key={t.value}
+                        type="button"
+                        disabled={themeBusy}
+                        onClick={() => void onSelectTheme(t.value)}
+                        aria-pressed={selected}
+                        aria-label={`${t.label} theme`}
+                        class={`flex flex-col overflow-hidden rounded-ctl border text-left transition disabled:opacity-60 ${
+                          selected
+                            ? "border-accent ring-2 ring-accent"
+                            : "border-line hover:border-muted"
+                        }`}
+                      >
+                        {/* Mini preview: paper chip is the card ground; a heading
+                            sample in the theme's face, an accent bar, and a
+                            callout sliver sit on it. */}
+                        <div
+                          class="flex flex-col gap-2 p-3"
+                          style={{ backgroundColor: t.paper }}
+                        >
+                          <span
+                            class="text-[15px] font-semibold leading-none"
+                            style={{ color: t.ink, fontFamily: t.font }}
+                          >
+                            Aa
+                          </span>
+                          <span
+                            class="h-1.5 w-10 rounded-full"
+                            style={{ backgroundColor: t.accent }}
+                          />
+                          <span
+                            class="h-2.5 w-6 rounded-sm"
+                            style={{ backgroundColor: t.callout }}
+                          />
+                        </div>
+                        <div class="flex items-center justify-between gap-1 border-t border-line px-2.5 py-1.5">
+                          <span class="text-xs font-medium text-ink">{t.label}</span>
+                          {selected && (
+                            <span class="text-[10px] font-medium text-accent">Selected</span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+                <p class="mt-1 text-xs leading-relaxed text-muted">
+                  {ARTIFACT_THEMES.find((t) => t.value === artifactTheme)?.blurb}
                 </p>
               </Section>
 

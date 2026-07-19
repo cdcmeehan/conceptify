@@ -1119,6 +1119,39 @@ pub fn set_local_endpoint_api_key<R: tauri::Runtime>(
     Ok(())
 }
 
+/// Read the chosen explanation-artifact theme (epic conceptify-89k, bead 89k.2).
+/// Returns the wire id string (`manuscript` | `blueprint` | `sketchbook`); an
+/// absent row yields `manuscript` (the default). Stored in its own namespaced
+/// settings row, so a `reset_agent_settings` never disturbs it.
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_artifact_theme(db: State<DbHandle>) -> Result<String, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::settings::get_artifact_theme(&conn)
+        .map(|t| t.as_str().to_owned())
+        .map_err(|e| e.to_string())
+}
+
+/// Persist the chosen artifact theme and emit `settings-changed` (the settings
+/// exception to the app's no-event mutation rule, consistent with the other
+/// settings commands). Validation (a known theme id) happens in the domain layer
+/// before the write, so an unknown id is rejected with a user-facing error
+/// rather than stored. The theme lives in its own settings row, untouched by
+/// `reset_agent_settings`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_artifact_theme<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    db: State<DbHandle>,
+    theme: String,
+) -> Result<(), String> {
+    {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        crate::settings::set_artifact_theme(&conn, &theme).map_err(|e| e.to_string())?;
+    }
+    use tauri::Emitter;
+    let _ = app.emit("settings-changed", &());
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Follow-up flows (PRD FR-4.6/4.7/4.8/4.9) — beads b12.4/b12.5/b12.6.
 //

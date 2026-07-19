@@ -21,6 +21,7 @@ pub(crate) mod paths;
 mod projects_routes;
 mod routes;
 mod search_routes;
+mod settings_routes;
 mod state;
 mod threads_routes;
 
