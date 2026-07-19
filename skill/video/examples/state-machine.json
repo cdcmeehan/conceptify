@@ -1,0 +1,17 @@
+{
+  "title": "A connection's lifecycle",
+  "nodes": [
+    { "id": "idle", "label": "Idle" },
+    { "id": "connecting", "label": "Connecting" },
+    { "id": "open", "label": "Open" },
+    { "id": "closing", "label": "Closing" },
+    { "id": "closed", "label": "Closed" }
+  ],
+  "beats": [
+    { "to": "idle", "narration": "The socket begins idle, holding no resources.", "seconds": 4 },
+    { "to": "connecting", "edgeLabel": "connect()", "narration": "A connect call moves it into the connecting state.", "seconds": 5 },
+    { "to": "open", "edgeLabel": "handshake ok", "narration": "Once the handshake succeeds, the connection is open and carrying traffic.", "seconds": 5 },
+    { "to": "closing", "edgeLabel": "close()", "narration": "A close call drains it into the closing state.", "seconds": 5 },
+    { "to": "closed", "edgeLabel": "drained", "narration": "When the last frame is flushed, it settles into closed.", "seconds": 5 }
+  ]
+}

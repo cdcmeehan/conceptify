@@ -1,0 +1,35 @@
+{
+  "title": "One request, start to finish",
+  "beats": [
+    {
+      "label": "Request",
+      "detail": "The viewer asks the sandboxed iframe for the artifact.",
+      "narration": "A request leaves the viewer for the artifact it wants to show.",
+      "seconds": 5
+    },
+    {
+      "label": "Resolve",
+      "detail": "The artifact:// handler maps the URL to a file on disk.",
+      "narration": "The custom-scheme handler resolves that URL to a file on disk.",
+      "seconds": 5
+    },
+    {
+      "label": "Read",
+      "detail": "The Rust core reads the bytes, never touching the network.",
+      "narration": "The Rust core reads the bytes locally, never touching the network.",
+      "seconds": 5
+    },
+    {
+      "label": "Stamp",
+      "detail": "The response is stamped with its Content-Security-Policy.",
+      "narration": "On the way back, the response is stamped with its Content-Security-Policy.",
+      "seconds": 5
+    },
+    {
+      "label": "Render",
+      "detail": "The iframe renders the artifact inside those per-response walls.",
+      "narration": "The iframe renders the artifact inside those per-response walls.",
+      "seconds": 5
+    }
+  ]
+}
